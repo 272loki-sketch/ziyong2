@@ -2295,8 +2295,8 @@ const stage = new StageEngine({
 	deleteMemory: (sessionId, storeId, id) =>
 		memoryDeleteChunk(cwd, { sessionId, card: cardPath || undefined }, storeId, id),
 	webResearch: async (queries, maxResults, signal) => {
-		const { card } = loadStageMaterials(cwd);
-		return webResearchBatch(queries, maxResults, { card, signal });
+		const { card, config } = loadStageMaterials(cwd);
+		return webResearchBatch(queries, maxResults, { card, userName: config.userName, signal });
 	},
 	// 面板读写（M-D5）：按 session 绑定 artifacts 文件，注入后台上可通过 panel_write/read/close 操控面板
 	loadPanels: (sessionId) => {

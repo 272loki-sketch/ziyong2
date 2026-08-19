@@ -873,6 +873,7 @@ export class StageEngine {
 		state: ReturnType<typeof stateFromBranch>;
 		history: ReturnType<typeof rebuildHistory>["history"];
 		userText: string;
+		userName: string;
 		globalSkill: NonNullable<ReturnType<typeof workflowSkill>>;
 		cardSkill: NonNullable<ReturnType<typeof workflowSkill>>;
 		pools: ReturnType<typeof loadEcologyPools>;
@@ -882,7 +883,7 @@ export class StageEngine {
 		const task = (async () => {
 			let pools = input.pools;
 			const warnings: string[] = [];
-			const queryPrompt = buildEcologySearchPlanPrompt(input.globalSkill.body, { global: pools.global, card: input.card, state: input.state, userText: input.userText });
+			const queryPrompt = buildEcologySearchPlanPrompt(input.globalSkill.body, { global: pools.global, card: input.card, state: input.state, userText: input.userText, userName: input.userName });
 			const queryResult = await this.#sideText("ecologySearch", queryPrompt.systemPrompt, queryPrompt.userText, 2048, "off", input.signal);
 			if (typeof queryResult !== "string") warnings.push(`鲜活世界备料：检索规划失败（${queryResult.error}）`);
 			const queries = typeof queryResult === "string" ? ecologySearchQueries(queryResult) : [];
@@ -1053,7 +1054,7 @@ export class StageEngine {
 			const sourceLeafId = sm.getLeafId();
 			if (sourceLeafId) {
 				ev.onActivity?.("鲜活世界：搜索素材并更新双池");
-				const queryPrompt = buildEcologySearchPlanPrompt(ecologyGlobalSkill.body, { global: ecologyPools.global, card, state, userText: lastUserText });
+				const queryPrompt = buildEcologySearchPlanPrompt(ecologyGlobalSkill.body, { global: ecologyPools.global, card, state, userText: lastUserText, userName: config.userName });
 				const queryResult = await this.#sideText("ecologySearch", queryPrompt.systemPrompt, queryPrompt.userText, 2048);
 				if (typeof queryResult !== "string") ev.onActivity?.(`鲜活世界：检索规划失败（${queryResult.error}）`);
 				const queries = typeof queryResult === "string" ? ecologySearchQueries(queryResult) : [];
@@ -1147,7 +1148,7 @@ export class StageEngine {
 		}
 		if (!rerollPrep && config.literaryEcologyEnabled === true && !legacyBackstage && ecologyGlobalSkill && ecologyCardSkill) {
 			const poolSignal = new AbortController();
-			this.#startEcologyPoolPrep({ cardPath: config.card, card, entries: materials.entries, state, history, userText: lastUserText, globalSkill: ecologyGlobalSkill, cardSkill: ecologyCardSkill, pools: ecologyPools, signal: poolSignal.signal });
+			this.#startEcologyPoolPrep({ cardPath: config.card, card, entries: materials.entries, state, history, userText: lastUserText, userName: config.userName, globalSkill: ecologyGlobalSkill, cardSkill: ecologyCardSkill, pools: ecologyPools, signal: poolSignal.signal });
 			ev.onActivity?.("鲜活世界：已在后台搜索并准备下一拍素材");
 		}
 		if (directorRequested) {

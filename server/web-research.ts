@@ -155,6 +155,17 @@ function protectedNames(card: CharacterCard): string[] {
 	return publicSource ? [] : [card.name].filter((name) => name.trim().length >= 2);
 }
 
+function redactLiteral(value: string, secret: string): string {
+	const needle = secret.trim();
+	if (!needle) return value;
+	return value.replace(new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "giu"), " ");
+}
+
+/** 最终发网闸门：即使规划模型重新写入用户名，也会在 HTTP 请求前剔除。 */
+export function sanitizeWebResearchQuery(query: string, userName?: string): string {
+	return redactLiteral(query, userName ?? "").replace(/\s+/g, " ").trim();
+}
+
 function rejectReason(query: string, card: CharacterCard): string | undefined {
 	if (query.length > 160 || /(?:以下是用户|本轮输入|系统提示|<\/?(?:character|persona|world|user)>)/i.test(query)) {
 		return "查询包含提示词包装或过长的私人上下文";
@@ -168,9 +179,11 @@ function rejectReason(query: string, card: CharacterCard): string | undefined {
 export async function webResearchBatch(
 	queries: string[],
 	maxResults: number,
-	options: { card: CharacterCard; signal?: AbortSignal },
+	options: { card: CharacterCard; userName?: string; signal?: AbortSignal },
 ): Promise<WebResearchItem[]> {
-	return Promise.all(queries.slice(0, 3).map(async (query) => {
+	return Promise.all(queries.slice(0, 3).map(async (rawQuery) => {
+		const query = sanitizeWebResearchQuery(rawQuery, options.userName);
+		if (query.length < 2) return { query, rejected: "查询脱敏后没有足够的公开主题" };
 		const rejected = rejectReason(query, options.card);
 		if (rejected) return { query, rejected };
 		try {

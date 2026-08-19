@@ -9,6 +9,7 @@ import {
 	parseDuckDuckGo,
 	rankWebResearchResults,
 	resolveWebResearchProxy,
+	sanitizeWebResearchQuery,
 } from "../server/web-research.ts";
 
 test("联网查证工具：最多三个查询，部分失败保留并格式化", async () => {
@@ -44,6 +45,11 @@ test("联网查证模式：manual 只接受明确联网意图", () => {
 	assert.equal(wantsManualWebResearch("请百度一下明治资料"), true);
 	assert.equal(wantsManualWebResearch("查一下网上的公开资料"), true);
 	assert.equal(wantsManualWebResearch("继续剧情，去图书馆查资料"), false);
+});
+
+test("联网查询最终闸门剔除用户栏姓名并保留剧情主题", () => {
+	assert.equal(sanitizeWebResearchQuery("朱耀良 高中篮球社 放学后训练活动", "朱耀良"), "高中篮球社 放学后训练活动");
+	assert.equal(sanitizeWebResearchQuery("图书馆 朱.耀良 读书会", "朱.耀良"), "图书馆 读书会");
 });
 
 test("联网代理：专用变量优先、direct 关闭、NO_PROXY 生效", () => {

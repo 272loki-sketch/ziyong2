@@ -12,6 +12,7 @@ import {
 	dueEcologyActors,
 	ecologyCardKey,
 	ecologySearchQueries,
+	ecologySearchSceneCue,
 	ecologyWireView,
 	emptyEcologyCardPool,
 	emptyEcologyGlobalPool,
@@ -82,6 +83,17 @@ test("ecology：主演注入不泄露秘密，前端投影需显式揭示", () =
 
 test("ecology：检索规划支持每拍最多十二项并去重", () => {
 	assert.deepEqual(ecologySearchQueries('{"queries":["校园日常活动","电影 场所变化","小说 人物自主线","多余"]}'), ["校园日常活动", "电影 场所变化", "小说 人物自主线", "多余"]);
+});
+
+test("ecology：检索场景线索保留地点活动但剔除用户栏姓名", () => {
+	const cue = ecologySearchSceneCue({
+		userText: "朱耀良去篮球社参加放学后训练，顺便看看体育馆里有什么活动",
+		userName: "朱耀良",
+		state: { time: "放学后", location: "体育馆·篮球社", characters: {}, inventory: [], flags: {}, plot_threads: [] },
+	});
+	assert.equal(cue.latestAction, "用户角色去篮球社参加放学后训练，顺便看看体育馆里有什么活动");
+	assert.equal(cue.location, "体育馆·篮球社");
+	assert.doesNotMatch(JSON.stringify(cue), /朱耀良/);
 });
 
 test("ecology：同构原型和模板按 patternKey 合并，不因换名复制", () => {

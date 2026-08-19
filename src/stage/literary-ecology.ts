@@ -500,12 +500,28 @@ export function ecologySearchQueries(value: unknown): string[] {
 	return [...new Set(strings(source?.queries, 12, 160).filter((query) => query.length >= 2))];
 }
 
+function redactLiteral(value: string, secret: string): string {
+	const needle = secret.trim();
+	if (!needle) return value;
+	return value.replace(new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "giu"), "用户角色");
+}
+
+/** 给检索规划模型的剧情线索：保留地点/活动主题，但绝不发送用户栏姓名。 */
+export function ecologySearchSceneCue(input: { userText: string; userName?: string; state: WorldState }): { latestAction: string; time: string; location: string } {
+	const redact = (value: string): string => redactLiteral(value, input.userName ?? "").replace(/\s+/g, " ").trim();
+	return {
+		latestAction: redact(input.userText).slice(0, 1200),
+		time: redact(input.state.time).slice(0, 120),
+		location: redact(input.state.location).slice(0, 200),
+	};
+}
+
 function skillPrompt(task: string, skillBody: string): string {
 	return `你在执行梨园的${task}工作流。Skill 是规则唯一权威，代码只负责输入、解析与持久化。严格只返回 Skill 要求的合法 JSON，不输出 Markdown、解释或角色扮演正文。\n\n# 工作流 Skill\n${skillBody}`;
 }
 
-export function buildEcologySearchPlanPrompt(skillBody: string, input: { global: EcologyGlobalPool; card: CharacterCard; state: WorldState; userText: string }): { systemPrompt: string; userText: string } {
-	return { systemPrompt: skillPrompt("通用叙事原型检索规划", skillBody), userText: JSON.stringify({ phase: "plan_queries", existing_pool_digest: input.global.digest, existing_categories: [...new Set(input.global.prototypes.map((item) => item.category))], existing_tags: input.global.prototypes.flatMap((item) => item.tags).slice(-80), safe_genre_tags: input.card.tags.slice(0, 20), allowed_dimensions: ["日常活动", "人物职业与私人生活", "公共场所运行", "制度与轻量考验", "群体协作", "环境变化", "关系扰动", "可错过机会", "现实学校或社区活动", "叙事结构分析"] }, null, 2) };
+export function buildEcologySearchPlanPrompt(skillBody: string, input: { global: EcologyGlobalPool; card: CharacterCard; state: WorldState; userText: string; userName?: string }): { systemPrompt: string; userText: string } {
+	return { systemPrompt: skillPrompt("通用叙事原型检索规划", skillBody), userText: JSON.stringify({ phase: "plan_queries", current_scene_cue: ecologySearchSceneCue(input), existing_pool_digest: input.global.digest, existing_categories: [...new Set(input.global.prototypes.map((item) => item.category))], existing_tags: input.global.prototypes.flatMap((item) => item.tags).slice(-80), safe_genre_tags: input.card.tags.slice(0, 20), allowed_dimensions: ["当前地点相关活动", "当前行动相关素材", "日常活动", "人物职业与私人生活", "公共场所运行", "制度与轻量考验", "群体协作", "环境变化", "关系扰动", "可错过机会", "现实学校或社区活动", "叙事结构分析"] }, null, 2) };
 }
 
 export function buildEcologyGlobalPrompt(skillBody: string, input: { global: EcologyGlobalPool; research: WebResearchItem[]; card: CharacterCard; userText: string }): { systemPrompt: string; userText: string } {
@@ -516,7 +532,7 @@ export function buildEcologyGlobalPrompt(skillBody: string, input: { global: Eco
 export function buildEcologyCardPrompt(skillBody: string, input: { global: EcologyGlobalPool; cardPool: EcologyCardPool; card: CharacterCard; lore: LorebookEntry[]; state: WorldState; history: BeatMsg[] }): { systemPrompt: string; userText: string } {
 	const prototypes = input.global.prototypes.filter((item) => item.status === "active").sort((a, b) => a.useCount - b.useCount).slice(0, 60);
 	const templates = input.cardPool.templates.filter((item) => item.status === "active").sort((a, b) => a.useCount - b.useCount).slice(0, 50);
-	return { systemPrompt: skillPrompt("角色卡生态适配池", skillBody), userText: JSON.stringify({ current_card_pool: { ...input.cardPool, templates }, global_prototypes: prototypes, character_card: { name: input.card.name, description: clipPromptText(input.card.description, 8_000), personality: clipPromptText(input.card.personality, 5_000), scenario: clipPromptText(input.card.scenario, 5_000), tags: input.card.tags.slice(0, 30) }, world_lore: boundedLore(input.lore, 40, 40_000), current_state: input.state, recent_history: boundedHistory(input.history, 12) }, null, 2) };
+	return { systemPrompt: skillPrompt("角色卡生态适配池", skillBody), userText: JSON.stringify({ current_card_pool: { ...input.cardPool, templates }, global_prototypes: prototypes, character_card: { name: input.card.name, description: clipPromptText(input.card.description, 8_000), personality: clipPromptText(input.card.personality, 5_000), scenario: clipPromptText(input.card.scenario, 5_000), tags: input.card.tags.slice(0, 30) }, world_lore: boundedLore(input.lore, 30, 28_000), current_state: input.state, recent_history: boundedHistory(input.history, 12, 48_000) }, null, 2) };
 }
 
 export function buildEcologyRuntimePrompt(skillBody: string, input: { phase: "arrival" | "aftermath"; ecology: LiteraryEcologyState; global: EcologyGlobalPool; cardPool: EcologyCardPool; state: WorldState; history: BeatMsg[]; userText: string; narrativeText?: string; worldSignals?: unknown[] }): { systemPrompt: string; userText: string } {
