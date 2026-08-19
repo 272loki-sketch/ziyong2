@@ -30,7 +30,7 @@
 
 import type { DisplayRule } from "./cardfront.ts";
 import { hasDepthLimits, rulesAtDepth } from "./cardfront.ts";
-import { applyCardSkin } from "./cardSkin.ts";
+import { applyCardSkinProtected } from "./cardSkin.ts";
 
 export type TagPolicy = "fold" | "strip" | "unwrap";
 
@@ -311,9 +311,21 @@ export function skinAtDepth(skin: DisplaySkin | null | undefined, depth: number)
 export function isHtmlDisplayPayload(text: string): boolean {
 	if (!text) return false;
 	if (isFullPageHtmlPayload(text)) return true;
+	if (hasHtmlAssetFragment(text)) return true;
 	// 皮肤包的大块 styled div（部分社区皮肤包的状态栏等）
 	if (/<div\b[^>]*\bstyle\s*=/i.test(text) && /<\/div>/i.test(text) && text.length > 60) return true;
 	return false;
+}
+
+/**
+ * class 样式皮肤的常见形态：`<style>…</style>` 紧邻一个顶层容器。
+ * 这是 HTML 结构判定，不认类名、卡名或状态栏标签。
+ */
+function hasHtmlAssetFragment(text: string): boolean {
+	return (
+		/<style\b[^>]*>[\s\S]*?<\/style\s*>[\s\S]*?<(?:div|section|article|main|table|figure|details)\b[^>]*>[\s\S]*?<\/(?:div|section|article|main|table|figure|details)\s*>/i.test(text) ||
+		/<(?:div|section|article|main|table|figure|details)\b[^>]*>[\s\S]*?<(?:style|script)\b[^>]*>[\s\S]*?<\/(?:style|script)\s*>[\s\S]*?<\/(?:div|section|article|main|table|figure|details)\s*>/i.test(text)
+	);
 }
 
 /** 整页 HTML（doctype/html 整文档或围栏整页）——只有这种才允许跳过全部显示层策略 */
@@ -337,6 +349,115 @@ function isFullPageHtmlPayload(text: string): boolean {
 
 /** 占位符：私用区字符包裹序号，正常文本不可能撞车 */
 const skinDivToken = (i: number) => `${i}`;
+
+const HTML_CONTAINER_TAGS = new Set(["div", "section", "article", "main", "table", "figure", "details"]);
+
+/** 浏览器容忍的 HTML 注释闭合（标准 `-->` 与常见 `--!>`）。 */
+function skipHtmlTrivia(text: string, from: number): number {
+	let i = from;
+	for (;;) {
+		const ws = /^\s+/.exec(text.slice(i));
+		if (ws) i += ws[0].length;
+		if (!text.startsWith("<!--", i)) return i;
+		const close = /--!?>/g;
+		close.lastIndex = i + 4;
+		const m = close.exec(text);
+		if (!m) return i;
+		i = m.index + m[0].length;
+	}
+}
+
+/** 从顶层容器开标签定位到同名配平闭标签。 */
+function balancedHtmlBlockEnd(text: string, start: number): number {
+	const open = /^<([A-Za-z][\w-]*)\b[^>]*>/.exec(text.slice(start));
+	if (!open || !HTML_CONTAINER_TAGS.has(open[1].toLowerCase())) return -1;
+	const tag = open[1];
+	const tokenRe = new RegExp(`<${tag}\\b[^>]*>|<\\/${tag}\\s*>`, "gi");
+	tokenRe.lastIndex = start;
+	let depth = 0;
+	let token: RegExpExecArray | null;
+	while ((token = tokenRe.exec(text))) {
+		if (/^<\//.test(token[0])) depth--;
+		else depth++;
+		if (depth === 0) return tokenRe.lastIndex;
+	}
+	return -1;
+}
+
+/**
+ * 保护卡皮肤生成的 HTML 资产片段：可选注释 + style/script/link + 顶层容器。
+ * 样式资产必须和容器一起暂存，否则前端拆成两个 iframe 后样式无法作用于内容。
+ */
+function protectHtmlAssetFragments(text: string): { text: string; stash: string[] } {
+	const stash: string[] = [];
+	const assetStartRe = /(?:<!--|<style\b|<script\b|<link\b)/gi;
+	let out = "";
+	let cursor = 0;
+	for (;;) {
+		assetStartRe.lastIndex = cursor;
+		const startMatch = assetStartRe.exec(text);
+		if (!startMatch) {
+			out += text.slice(cursor);
+			break;
+		}
+		let pos = skipHtmlTrivia(text, startMatch.index);
+		let sawAsset = false;
+		for (;;) {
+			const style = /^<style\b[^>]*>[\s\S]*?<\/style\s*>/i.exec(text.slice(pos));
+			const script = /^<script\b[^>]*>[\s\S]*?<\/script\s*>/i.exec(text.slice(pos));
+			const link = /^<link\b[^>]*>/i.exec(text.slice(pos));
+			const asset = style ?? script ?? link;
+			if (!asset) break;
+			sawAsset = true;
+			pos += asset[0].length;
+			pos = skipHtmlTrivia(text, pos);
+		}
+		const end = sawAsset ? balancedHtmlBlockEnd(text, pos) : -1;
+		if (end < 0) {
+			out += text.slice(cursor, startMatch.index + startMatch[0].length);
+			cursor = startMatch.index + startMatch[0].length;
+			continue;
+		}
+		out += text.slice(cursor, startMatch.index);
+		out += skinDivToken(stash.length);
+		stash.push(text.slice(startMatch.index, end));
+		cursor = end;
+	}
+	return { text: out, stash };
+}
+
+/** 保护外层 class 容器内自带 style/script 的皮肤片段。 */
+function protectHtmlAssetContainers(text: string): { text: string; stash: string[] } {
+	const stash: string[] = [];
+	const openRe = /<(div|section|article|main|table|figure|details)\b[^>]*>/gi;
+	let out = "";
+	let cursor = 0;
+	for (;;) {
+		openRe.lastIndex = cursor;
+		const open = openRe.exec(text);
+		if (!open) {
+			out += text.slice(cursor);
+			break;
+		}
+		const end = balancedHtmlBlockEnd(text, open.index);
+		if (end < 0) {
+			out += text.slice(cursor, openRe.lastIndex);
+			cursor = openRe.lastIndex;
+			continue;
+		}
+		const block = text.slice(open.index, end);
+		if (!/<(?:style|script)\b[^>]*>[\s\S]*?<\/(?:style|script)\s*>/i.test(block)) {
+			out += text.slice(cursor, openRe.lastIndex);
+			cursor = openRe.lastIndex;
+			continue;
+		}
+		out += text.slice(cursor, open.index);
+		out += skinDivToken(stash.length);
+		stash.push(block);
+		cursor = end;
+	}
+	return { text: out, stash };
+}
 
 /**
  * 把皮肤产出的 styled div 块（含嵌套）换成占位符暂存，避免被标签策略撕碎；
@@ -394,7 +515,20 @@ export function prepareDisplayText(text: string, skin?: DisplaySkin | null): str
 	if (!text) return "";
 	let t = text;
 	if (skin?.rules?.length) {
-		t = applyCardSkin(t, skin.rules, { charName: skin.charName, userName: skin.userName });
+		const applied = applyCardSkinProtected(
+			t,
+			skin.rules,
+			{ charName: skin.charName, userName: skin.userName },
+			skinDivToken,
+		);
+		if (applied.stash.length > 0) {
+			let cleaned = displayAssistantText(applied.text);
+			for (let i = 0; i < applied.stash.length; i++) {
+				cleaned = cleaned.split(skinDivToken(i)).join(applied.stash[i]);
+			}
+			return cleaned;
+		}
+		t = applied.text;
 	}
 	// 整段就是界面（前后无叙事）：原样交出，不拆
 	if (isFullPageHtmlPayload(t) && isBareFullPagePayload(t)) {
@@ -405,6 +539,17 @@ export function prepareDisplayText(text: string, skin?: DisplaySkin | null): str
 	// 「状态栏出现」反而成了「catsay 标签暴露」的原因（8/05 实锤）。故占位保护后照常过滤。
 	if (isFullPageHtmlPayload(t)) {
 		const { text: protectedText, stash } = protectFullPageBlocks(t);
+		let cleaned = displayAssistantText(protectedText);
+		for (let i = 0; i < stash.length; i++) {
+			cleaned = cleaned.split(skinDivToken(i)).join(stash[i]);
+		}
+		return cleaned;
+	}
+	if (hasHtmlAssetFragment(t)) {
+		const outerAsset = /<(?:div|section|article|main|table|figure|details)\b[^>]*>[\s\S]*?<(?:style|script)\b/i.test(t);
+		const { text: protectedText, stash } = outerAsset
+			? protectHtmlAssetContainers(t)
+			: protectHtmlAssetFragments(t);
 		let cleaned = displayAssistantText(protectedText);
 		for (let i = 0; i < stash.length; i++) {
 			cleaned = cleaned.split(skinDivToken(i)).join(stash[i]);

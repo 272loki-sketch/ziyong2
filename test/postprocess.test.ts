@@ -190,6 +190,60 @@ test("prepareDisplayText: 先皮肤再策略——有正则的 state 标记不�
 	assert.ok(!skinned.includes("<state1>"), "标记应已被正则吃掉");
 });
 
+test("prepareDisplayText: class 皮肤 fragment 的 style 与容器整体保留，CSS 不泄漏成正文", () => {
+	const raw = `开头。\n<comprehensive_now_status>当前时间: 上午</comprehensive_now_status>\n结尾。`;
+	const skin = {
+		rules: [{
+			name: "状态栏",
+			source: "<comprehensive_now_status>([\\s\\S]*?)<\\/comprehensive_now_status>",
+			flags: "g",
+			replace: `<!-- 状态皮肤 --!>\n<style>\n.cote-elite-content { color: red; }\n</style>\n<div class="cote-elite-content">$1</div>`,
+		}],
+		charName: "角色",
+		userName: "用户",
+	};
+	const out = prepareDisplayText(raw, skin);
+	assert.ok(out.includes("<style>"));
+	assert.ok(out.includes(".cote-elite-content"));
+	assert.ok(out.includes('<div class="cote-elite-content">'));
+	assert.ok(out.includes("当前时间: 上午"));
+	assert.ok(out.includes("开头。") && out.includes("结尾。"));
+	assert.ok(!out.includes("<comprehensive_now_status>"));
+});
+
+test("prepareDisplayText: 外层 class 容器包裹 style 的真实卡皮肤整体保留", () => {
+	const raw = `<comprehensive_now_status>上午</comprehensive_now_status>`;
+	const skin = {
+		rules: [{
+			name: "状态栏",
+			source: "<comprehensive_now_status>([\\s\\S]*?)<\\/comprehensive_now_status>",
+			flags: "g",
+			replace: `<div class="cote-elite-container">\n<style>\n.cote-elite-content { color: red; }\n</style>\n<div class="cote-elite-content">$1</div>\n</div>`,
+		}],
+		charName: "角色",
+		userName: "用户",
+	};
+	const out = prepareDisplayText(raw, skin);
+	assert.ok(out.startsWith('<div class="cote-elite-container">'));
+	assert.ok(out.includes("<style>"));
+	assert.ok(out.includes(".cote-elite-content"));
+	assert.ok(out.includes('<div class="cote-elite-content">上午</div>'));
+});
+
+test("prepareDisplayText: 皮肤脚本字符串含嵌套 div 也按 replacement 原子保护", () => {
+	const raw = `正文。\n<comprehensive_now_status>上午</comprehensive_now_status>`;
+	const replacement = `<div class="cote-elite-container"><style>.cote-elite-content{color:red}</style><script>const tpl = '<div class="fake">x</div>';</script><div class="cote-elite-content">$1</div></div>`;
+	const out = prepareDisplayText(raw, {
+		rules: [{ name: "复杂状态栏", source: "<comprehensive_now_status>([\\s\\S]*?)<\\/comprehensive_now_status>", flags: "g", replace: replacement }],
+		charName: "角色",
+		userName: "用户",
+	});
+	assert.ok(out.includes('<div class="cote-elite-container">'));
+	assert.ok(out.includes("const tpl"));
+	assert.ok(out.includes(".cote-elite-content"));
+	assert.ok(out.includes("上午"));
+});
+
 test("prepareDisplayText: 皮肤状态栏 div 与 thinking 混排——div 保留，thinking/注释仍被过滤", () => {
 	const raw = [
 		"<!-- 本回合承接：先对齐人设再落笔 -->",

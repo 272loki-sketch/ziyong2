@@ -695,11 +695,6 @@ function buildParams(
 	} else if (options?.reasoningEffort && model.reasoning && compat.supportsReasoningEffort) {
 		// OpenAI-style reasoning_effort
 		(params as any).reasoning_effort = model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort;
-	} else if (!options?.reasoningEffort && model.reasoning && compat.supportsReasoningEffort) {
-		const offValue = model.thinkingLevelMap?.off;
-		if (typeof offValue === "string") {
-			(params as any).reasoning_effort = offValue;
-		}
 	}
 
 	// OpenRouter provider routing preferences
@@ -1269,9 +1264,9 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 	const isCloudflareAiGateway = provider === "cloudflare-ai-gateway" || baseUrl.includes("gateway.ai.cloudflare.com");
 	const isNvidia = provider === "nvidia" || baseUrl.includes("integrate.api.nvidia.com");
 	const isAntLing = provider === "ant-ling" || baseUrl.includes("api.ant-ling.com");
-
 	const isNonStandard =
 		isNvidia ||
+		provider === "hajimi" ||
 		provider === "cerebras" ||
 		baseUrl.includes("cerebras.ai") ||
 		provider === "xai" ||

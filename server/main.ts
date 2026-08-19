@@ -43,8 +43,16 @@ import { loadAgentConfig, normalizeAgentConfig, syncAgentConfigToRuntime } from 
 import { streamSimple } from "@liyuan/ai/compat";
 import { loadCardFile } from "../src/card.ts";
 import { buildGreeting } from "../src/greeting.ts";
-import { StageEngine, type AssistantMsgLike, type StageModelLike, type StageStreamFn } from "../src/stage/engine.ts";
+import { StageEngine, type AssistantMsgLike, type StageModelLike, type StageRerollPrep, type StageStreamFn } from "../src/stage/engine.ts";
 import { stateFromBranch, type BranchEntryLike } from "../src/stage/assemble.ts";
+import { worldAuditFromBranch } from "../src/stage/literary-world-transition.ts";
+import { modularWorldFromBranch, modularWorldWireView, projectLiteraryWorldV1 } from "../src/stage/literary-world-modular.ts";
+import { worldManifestFromBranch } from "../src/stage/literary-world-profile.ts";
+import { parseLegacyCalendarSource, projectPresentation, projectTavernVariables } from "../src/presentation.ts";
+import { ecologyWireView, literaryEcologyFromBranch, normalizeLiteraryEcologyState } from "../src/stage/literary-ecology.ts";
+import { loadStageMaterials } from "../src/stage/materials.ts";
+import { webResearchBatch } from "./web-research.ts";
+import { resolveStepModel } from "../src/model-routing.ts";
 import {
 	activePanels,
 	closePanel as closePanelInMap,
@@ -117,7 +125,6 @@ import { registerAssistantRunner } from "../src/assistant-gateway.ts";
 import { sameCardPath } from "../src/paths.ts";
 import { toggleDisabledLore } from "../src/lorebook.ts";
 import { syncStoryPanelsFromDisk, syncStoryStateFromDisk } from "../src/story-sync.ts";
-import { applyPendingBackupRestore } from "../src/backup.ts";
 import { toolStartDetail } from "../src/activity-format.ts";
 import {
 	checkLatestRelease,
@@ -142,11 +149,6 @@ const newSessionFlag = process.argv.includes("--new");
 // 数据目录/配置文件：.rp-* → .liyuan-*，rp.config.json → liyuan.config.json
 for (const line of migrateLegacyLayout(cwd)) {
 	console.log(`[liyuan] 迁移 ${line}`);
-}
-
-// 待恢复备份（导入备份后重启触发）：在装载任何会话/素材之前精确铺回数据
-for (const line of applyPendingBackupRestore(cwd, agentHome)) {
-	console.log(`[liyuan] 恢复 ${line}`);
 }
 
 // 自操作接口（LIYUAN_HTTP → 剧情 system prompt）已退役（2026-07-14）：
@@ -243,17 +245,14 @@ let updateCheck: UpdateCheckResult | null = null;
 let updateBusy = false;
 
 const UPDATE_SUPERVISED = process.env.LIYUAN_SUPERVISED === "1";
-/** Docker 部署：升级靠宿主机 git pull + rebuild，容器内不下载 zip（覆盖只写可写层、重建即丢） */
-const IS_DOCKER = existsSync("/.dockerenv") || process.env.LIYUAN_DOCKER === "1";
-const pushUpdate = () =>
-	broadcast({ type: "update", update: { ...updateState, supervised: UPDATE_SUPERVISED, dockerDeploy: IS_DOCKER } });
+const pushUpdate = () => broadcast({ type: "update", update: { ...updateState, supervised: UPDATE_SUPERVISED } });
 
 /** 启动后静默检查一次；失败不提示（manual 时才把 error 带给 UI） */
 const runUpdateCheck = async (manual: boolean): Promise<void> => {
 	// 已有暂存包：直接就绪态（跨重启持久；旧暂存版本低于当前版则丢弃）
 	const pending = readPendingUpdate(cwd);
 	if (pending) {
-		if (IS_DOCKER || pending.version === APP_VERSION || pending.version < APP_VERSION) {
+		if (pending.version === APP_VERSION || pending.version < APP_VERSION) {
 			discardPendingUpdate(cwd);
 		} else {
 			updateState = {
@@ -294,7 +293,6 @@ const runUpdateCheck = async (manual: boolean): Promise<void> => {
 
 /** 下载并暂存（进度限流 500ms 一帧）；完成后 ready，失败回 available 带 error */
 const startUpdateDownload = async (mirror?: string): Promise<void> => {
-	if (IS_DOCKER) throw new Error("Docker 部署请到宿主机执行 git pull && docker compose up -d --build");
 	if (updateBusy) throw new Error("已在下载中");
 	if (!updateCheck?.hasUpdate || !updateCheck.asset) throw new Error("没有可下载的更新");
 	updateBusy = true;
@@ -523,9 +521,57 @@ const currentDisplaySkin = () => {
 const branchMessages = (): unknown[] => {
 	try {
 		const out: unknown[] = [];
-		for (const e of session.sessionManager.getBranch() as Array<Record<string, unknown>>) {
-			if (e.type === "message" && e.message) out.push(e.message);
-			else if (e.type === "custom_message") {
+		const branch = session.sessionManager.getBranch() as Array<Record<string, unknown>>;
+		const overrides = new Map<string, string>();
+		const usableCurtain = (text: string): boolean => {
+			const value = text.trim();
+			if (value.length < 8 || value === "<") return false;
+			const stack: string[] = [];
+			for (const match of value.matchAll(/<\/?([A-Za-z][\w:-]*)\b[^>]*>/g)) {
+				const full = match[0];
+				const name = match[1].toLowerCase();
+				if (/^<\//.test(full)) {
+					if (stack[stack.length - 1] === name) stack.pop();
+				} else if (!/\/>$/.test(full) && !["br", "hr", "img", "input", "meta", "link"].includes(name)) stack.push(name);
+			}
+			return stack.length === 0;
+		};
+		for (const e of branch) {
+			if (e.type !== "custom" || e.customType !== "rp-curtain-override" || !e.data || typeof e.data !== "object") continue;
+			const data = e.data as { targetEntryId?: unknown; curtain?: unknown };
+			if (typeof data.targetEntryId === "string" && typeof data.curtain === "string" && usableCurtain(data.curtain)) overrides.set(data.targetEntryId, data.curtain);
+		}
+		for (const e of branch) {
+			if (e.type === "message" && e.message) {
+				const override = overrides.get(String(e.id));
+				if (!override || typeof e.message !== "object") {
+					out.push(e.message);
+					continue;
+				}
+				const message = e.message as Record<string, unknown>;
+				const details = message.details && typeof message.details === "object" && !Array.isArray(message.details)
+					? message.details as Record<string, unknown> : {};
+				const narrative = typeof details.rpNarrative === "string" ? details.rpNarrative : extractEntryText(message.content);
+				const oldCurtain = typeof details.rpCurtain === "string" ? details.rpCurtain : "";
+				const oldTimeline = Array.isArray(details.rpTimeline) ? details.rpTimeline as Array<Record<string, unknown>> : [];
+				let replaced = false;
+				const timeline = oldTimeline.map((segment) => {
+					if (!replaced && oldCurtain && segment.kind === "text" && segment.text === oldCurtain) {
+						replaced = true;
+						return { ...segment, text: override };
+					}
+					return segment;
+				});
+				if (!replaced) timeline.push({ kind: "text", text: override });
+				const thinking = Array.isArray(message.content)
+					? message.content.filter((part) => part && typeof part === "object" && (part as { type?: unknown }).type === "thinking")
+					: [];
+				out.push({
+					...message,
+					content: [...thinking, { type: "text", text: `${narrative}\n\n${override}` }],
+					details: { ...details, rpCurtain: override, rpTimeline: timeline },
+				});
+			} else if (e.type === "custom_message") {
 				// details 必须透传：开场白序号（rpGreeting）等元数据只存在于树条目上，
 				// 丢了就让 resyncAll 后的角标退回 /api/card 轮询（切换开场白时角标卡住不动）
 				out.push({
@@ -558,8 +604,47 @@ const helloFrame = (): ServerFrame => {
 		sessionId: session.sessionId,
 		charName: names.charName,
 		userName: names.userName,
-		messages: annotateSwipes(toWireHistory(branchMessages(), names, { skin })),
+		messages: (() => {
+			const messages = annotateSwipes(toWireHistory(branchMessages(), names, { skin }));
+			for (let i = messages.length - 1; i >= 0; i--) {
+				if (messages[i].channel === "narrative") {
+					const branch = session.sessionManager.getBranch() as BranchEntryLike[];
+					const manifest = worldManifestFromBranch(branch);
+					const modular = modularWorldFromBranch(branch, manifest);
+					const state = stateFromBranch(branch);
+					let ecology = literaryEcologyFromBranch(branch);
+					if (ecology.round === 0) {
+						for (let index = branch.length - 1; index >= 0; index--) {
+							const prep = branch[index].message?.details && typeof branch[index].message?.details === "object"
+								? (branch[index].message!.details as Record<string, unknown>).rpPrep
+								: undefined;
+							const candidate = prep && typeof prep === "object" ? (prep as Record<string, unknown>).literaryEcology : undefined;
+							const parsed = candidate ? normalizeLiteraryEcologyState(candidate, ecology) : null;
+							if (parsed && (parsed.actors.length || parsed.occurrences.length || parsed.locationStates.length)) { ecology = parsed; break; }
+						}
+					}
+					const presentation = projectPresentation(state, modular, ecology, names.userName);
+					let rawCurtain = "";
+					for (let index = branch.length - 1; index >= 0; index--) {
+						const details = branch[index].message?.details as Record<string, unknown> | undefined;
+						if (branch[index].message?.role === "assistant" && typeof details?.rpCurtain === "string") { rawCurtain = details.rpCurtain; break; }
+					}
+					// 新回复一律使用 rp-state + 世界/生态的权威日历。仅无原生日期可投影的旧历史回退 rpCurtain。
+					const legacyCalendar = presentation.calendar ? undefined : parseLegacyCalendarSource(rawCurtain);
+					if (legacyCalendar) presentation.calendar = legacyCalendar;
+					const optionMatch = rawCurtain.match(/<options>\s*([\s\S]*?)\s*<\/options>/i);
+					if (optionMatch) presentation.options = optionMatch[1].split(/\r?\n/).map((line) => line.trim().replace(/^(?:>|[-*]|\d+[.)、])\s*/, "")).filter(Boolean).slice(0, 9);
+					messages[i] = { ...messages[i], world: projectLiteraryWorldV1(modular), worldModules: modularWorldWireView(modular, manifest), worldAudit: worldAuditFromBranch(branch), ecology: ecologyWireView(ecology), presentation, tavernVariables: projectTavernVariables(state, names.userName) };
+					break;
+				}
+			}
+			return messages;
+		})(),
 		state: currentState(),
+		world: (() => { const branch = session.sessionManager.getBranch() as BranchEntryLike[]; return projectLiteraryWorldV1(modularWorldFromBranch(branch, worldManifestFromBranch(branch))); })(),
+		worldAudit: worldAuditFromBranch(session.sessionManager.getBranch() as BranchEntryLike[]),
+		worldModules: (() => { const branch = session.sessionManager.getBranch() as BranchEntryLike[]; const manifest = worldManifestFromBranch(branch); return modularWorldWireView(modularWorldFromBranch(branch, manifest), manifest); })(),
+		ecology: ecologyWireView(literaryEcologyFromBranch(session.sessionManager.getBranch() as BranchEntryLike[])),
 		stats: safeStats(),
 		panels: currentPanels(),
 		// 一档皮肤与消息同帧:首屏不得依赖二次 REST(缓存/竞态会让 StatusBlock 回落统一面板)
@@ -713,6 +798,30 @@ const regenerateSwipe = async (): Promise<void> => {
 		return;
 	}
 	const sm = session.sessionManager;
+	const branchBefore = sm.getBranch() as BranchEntryLike[];
+	let prep: StageRerollPrep | undefined;
+	for (let i = branchBefore.length - 1; i >= 0; i--) {
+		const details = branchBefore[i].message?.details;
+		if (!details || typeof details !== "object") continue;
+		const raw = (details as Record<string, unknown>).rpPrep;
+		if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+		const source = raw as Record<string, unknown>;
+		prep = {
+			...(source.literaryContinuity && typeof source.literaryContinuity === "object"
+				? { literaryContinuity: source.literaryContinuity as NonNullable<StageRerollPrep["literaryContinuity"]> }
+				: {}),
+			...(typeof source.literaryDirection === "string" ? { literaryDirection: source.literaryDirection } : {}),
+			...(source.literaryDirectionData && typeof source.literaryDirectionData === "object" && !Array.isArray(source.literaryDirectionData)
+				? { literaryDirectionData: source.literaryDirectionData as NonNullable<StageRerollPrep["literaryDirectionData"]> }
+				: {}),
+			...(source.literaryEcology && typeof source.literaryEcology === "object" && !Array.isArray(source.literaryEcology)
+				? { literaryEcology: source.literaryEcology as NonNullable<StageRerollPrep["literaryEcology"]> }
+				: {}),
+		};
+		if (!prep.literaryContinuity && !prep.literaryDirection && !prep.literaryDirectionData && !prep.literaryEcology) prep = undefined;
+		break;
+	}
+	broadcast({ type: "notify", level: "info", text: prep ? "正文重Roll：复用上一版拍前分析，从 writer 阶段重新生成" : "正文重Roll：旧回复没有可复用工件，将重新执行完整一拍" });
 	// 记录 reroll 前的叶：生成失败/停止无产出时回退到旧回复（8/05：reroll 链上停止，前版本全消失）
 	rerollFallbackLeaf = sm.getLeafId();
 	// 叶钉回 user：引擎在 user 下挂新的 assistant sibling（swipe 语义）。
@@ -723,7 +832,7 @@ const regenerateSwipe = async (): Promise<void> => {
 	}
 	// 展示层立刻去掉旧回复（只显示到 user）
 	resyncAll();
-	await stage.regenerate();
+	await stage.regenerate(prep);
 };
 
 /**
@@ -1027,7 +1136,7 @@ const currentModelInfo = (): CurrentModelInfo | null => {
 
 const restHost: RestHost = {
 	cwd,
-	isStreaming: () => session.isStreaming,
+	isStreaming: () => session.isStreaming || stage.isStreaming,
 	listModels: () => ({
 		current: currentModelInfo(),
 		models: session.modelRegistry.getAvailable().map((m) => ({
@@ -1118,7 +1227,6 @@ const restHost: RestHost = {
 			api: typeof sample.api === "string" ? sample.api : undefined,
 			envKey,
 			models: all.map((m) => ({
-				...(m as Record<string, unknown>),
 				id: m.id,
 				name: m.name || m.id,
 				reasoning: m.reasoning === true,
@@ -1467,22 +1575,44 @@ const restHost: RestHost = {
 		sessionId: session.sessionId,
 		card: cardPath || undefined,
 	}),
+	latestNarrativeText: () => {
+		const msgs = branchMessages() as Array<{ role?: string; content?: unknown }>;
+		for (let i = msgs.length - 1; i >= 0; i--) {
+			if (msgs[i]?.role !== "assistant") continue;
+			const text = extractEntryText(msgs[i].content);
+			if (text.trim()) return text;
+		}
+		return "";
+	},
 	// 预设 AI 分拣等旁路声明：调当前会话模型做一次性判断（复用 streamSimple，同 StageEngine.#sideText）
-	runSideText: async (systemPrompt, userText, opts) => {
-		const model = session.model;
+	runSideText: async (step, systemPrompt, userText, opts) => {
+		const config = loadStageMaterials(cwd).config;
+		const resolved = resolveStepModel(
+			step,
+			config.stepModels,
+			session.model as unknown as StageModelLike | undefined,
+			(provider, id) => session.modelRegistry.getAvailable().find((item) => item.provider === provider && item.id === id) as unknown as StageModelLike | undefined,
+		);
+		const model = resolved.model;
 		if (!model) return { error: "无可用模型" };
+		if (resolved.fallback && resolved.requested) {
+			console.error(`[side-model] ${step} 的 ${resolved.requested.provider}/${resolved.requested.id} 不可用，回退剧情总插头`);
+		}
 		let auth: { apiKey?: string; headers?: Record<string, string> } = {};
 		try {
 			auth = (await session.modelRegistry.getApiKeyAndHeaders(model as never)) as typeof auth;
 		} catch (e) {
 			return { error: e instanceof Error ? e.message : String(e) };
 		}
-		const streamFn = streamSimple as unknown as StageStreamFn;
-		try {
-			const s = streamFn(
-				model as unknown as StageModelLike,
+			const streamFn = streamSimple as unknown as StageStreamFn;
+			try {
+				const selectedModel = opts?.forceNonStreaming
+					? { ...(model as unknown as Record<string, unknown>), compat: { ...(((model as unknown as { compat?: Record<string, unknown> }).compat) ?? {}), streaming: false } } as unknown as StageModelLike
+					: model as unknown as StageModelLike;
+				const s = streamFn(
+					selectedModel,
 				{ systemPrompt, messages: [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }] },
-				{ apiKey: auth.apiKey, headers: auth.headers, maxTokens: opts?.maxTokens ?? 4096, reasoning: opts?.reasoning ?? "off", signal: opts?.signal },
+				{ apiKey: auth.apiKey, headers: auth.headers, maxTokens: opts?.maxTokens ?? 4096, reasoning: opts?.reasoning ?? "off", signal: opts?.signal, maxRetries: 9 },
 			);
 			let final: AssistantMsgLike | null = null;
 			for await (const e of s) {
@@ -1495,10 +1625,50 @@ const restHost: RestHost = {
 				.map((c) => c.text ?? "")
 				.join("")
 				.trim();
+			if (text.length <= 1 && (text === "{" || text === "<")) {
+				// 部分兼容中转的 SSE 会在结构化旁路首字符后断流；与 StageEngine.#sideText
+				// 同语义做一次非流式降级，避免画像/预设声明只落一个“{”。
+				const callModel = { ...(model as unknown as Record<string, unknown>), compat: { ...(((model as unknown as { compat?: Record<string, unknown> }).compat) ?? {}), streaming: false } } as unknown as StageModelLike;
+				const retry = streamFn(callModel, { systemPrompt, messages: [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }] }, { apiKey: auth.apiKey, headers: auth.headers, maxTokens: opts?.maxTokens ?? 4096, reasoning: opts?.reasoning ?? "off", signal: opts?.signal, maxRetries: 9 });
+				let retryFinal: AssistantMsgLike | null = null;
+				for await (const event of retry) {
+					if (event.type === "done") retryFinal = event.message ?? null;
+					else if (event.type === "error") return { error: event.error?.errorMessage || `stopReason=${event.error?.stopReason ?? "?"}` };
+				}
+				const retryText = retryFinal?.content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("").trim() ?? "";
+				return retryText || { error: "非流式降级仍无文本" };
+			}
 			return text || { error: "最终消息无文本" };
 		} catch (err) {
 			return { error: err instanceof Error ? err.message : String(err) };
 		}
+	},
+	appendWorldManifest(data) {
+		session.sessionManager.appendCustomEntry("rp-world-manifest", data);
+		session.sessionManager.flush();
+		resyncAll();
+	},
+	worldProfileContext: () => {
+		const branch = session.sessionManager.getBranch() as Array<{ type?: string; customType?: string; data?: { card?: unknown } }>;
+		const bound = [...branch].reverse().find((entry) => entry.type === "custom" && entry.customType === "rp-card" && typeof entry.data?.card === "string");
+		return { leafId: session.sessionManager.getLeafId(), card: typeof bound?.data?.card === "string" ? bound.data.card : cardPath };
+	},
+	worldStateView() {
+		const branch = session.sessionManager.getBranch() as BranchEntryLike[];
+		const manifest = worldManifestFromBranch(branch);
+		const modular = modularWorldFromBranch(branch, manifest);
+		return { state: modular, view: modularWorldWireView(modular, manifest), legacy: projectLiteraryWorldV1(modular), audit: worldAuditFromBranch(branch), manifest };
+	},
+	clearWorldModule(moduleId) {
+		const branch = session.sessionManager.getBranch() as BranchEntryLike[];
+		const manifest = worldManifestFromBranch(branch);
+		const modular = modularWorldFromBranch(branch, manifest);
+		if (!modular.modules[moduleId]) throw new Error(`世界模块不存在：${moduleId}`);
+		const modules = { ...modular.modules };
+		delete modules[moduleId];
+		session.sessionManager.appendCustomEntry("rp-world-state", { ...modular, round: modular.round + 1, digest: `已清空模块 ${moduleId}；其他世界状态保持不变。`, modules, kernel: { ...modular.kernel, links: modular.kernel.links.filter((link) => link.from.moduleId !== moduleId && link.to.moduleId !== moduleId) } });
+		session.sessionManager.flush();
+		resyncAll();
 	},
 };
 
@@ -2077,13 +2247,31 @@ const httpServer = createServer((req, res) => {
 
 const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
 
+// 同一 WS 客户端请求会话列表的最短间隔。旧缓存前端曾形成 sessions 请求闭环；
+// 即使浏览器尚未刷新到修复版，也不能让它反复扫描会话文件、解析 7MB PNG 卡吃满单核。
+const sessionsRequestAt = new WeakMap<WebSocket, number>();
+
 // ---------- 台上引擎（PLAN-RP-HARNESS R1：叙事回合走自建循环，pi 只留幕后） ----------
 
 const stage = new StageEngine({
 	cwd,
 	getSessionManager: () => session.sessionManager as never,
 	getModel: () => session.model as never,
-	getAuth: async (m) => session.modelRegistry.getApiKeyAndHeaders(m as never),
+	findModel: (provider, id) => session.modelRegistry.getAvailable().find((item) => item.provider === provider && item.id === id) as never,
+	findModelById: (id) => {
+		const available = session.modelRegistry.getAvailable().filter((item) => item.id === id);
+		// 同 id 多渠道时优先当前剧情渠道；否则只有唯一候选才可自动迁移。
+		const currentProvider = session.model?.provider;
+		return (available.find((item) => item.provider === currentProvider) ?? (available.length === 1 ? available[0] : undefined)) as never;
+	},
+	getAuth: async (m) => {
+		// 部分中转/网关会拦截 openai SDK 的默认 User-Agent（返回 403「request was blocked」），
+		// 导致旁路模型（生态/导演等）静默失败。默认补一个普通浏览器 UA，已显式配置的 UA 优先。
+		const a = await session.modelRegistry.getApiKeyAndHeaders(m as never);
+		const headers = { ...(a.headers ?? {}) };
+		if (!headers["user-agent"] && !headers["User-Agent"]) headers["user-agent"] = "Mozilla/5.0";
+		return { apiKey: a.apiKey, headers };
+	},
 	getThinking: () => session.thinkingLevel,
 	// 场记落盘 → fs.watch 自动广播 state 帧（与扩展/REST 写路径同一条）
 	getStateFile: (sessionId) => join(stateDir, `${sessionId}.json`),
@@ -2106,6 +2294,10 @@ const stage = new StageEngine({
 		memoryListChunks(cwd, { sessionId, card: cardPath || undefined }, storeId),
 	deleteMemory: (sessionId, storeId, id) =>
 		memoryDeleteChunk(cwd, { sessionId, card: cardPath || undefined }, storeId, id),
+	webResearch: async (queries, maxResults, signal) => {
+		const { card } = loadStageMaterials(cwd);
+		return webResearchBatch(queries, maxResults, { card, signal });
+	},
 	// 面板读写（M-D5）：按 session 绑定 artifacts 文件，注入后台上可通过 panel_write/read/close 操控面板
 	loadPanels: (sessionId) => {
 		const panels = loadPanels(join(artifactsDir, `${sessionId}.json`));
@@ -2576,6 +2768,21 @@ const sessionInfos = async () => {
 
 const listSessions = async (): Promise<ServerFrame> => ({ type: "sessions", list: await sessionInfos() });
 
+// 防御旧前端的 sessions 请求风暴：同一连接若上一份列表仍在计算，后续请求复用它；
+// 150ms 内重复请求直接回缓存。会话列表会扫描会话文件并读取卡 PNG，失控时可吃满单核。
+let sessionsFrameCache: { at: number; frame: ServerFrame } | undefined;
+let sessionsFramePending: Promise<ServerFrame> | undefined;
+const listSessionsCoalesced = async (): Promise<ServerFrame> => {
+	const now = Date.now();
+	if (sessionsFrameCache && now - sessionsFrameCache.at < 150) return sessionsFrameCache.frame;
+	if (sessionsFramePending) return sessionsFramePending;
+	sessionsFramePending = listSessions().then((frame) => {
+		sessionsFrameCache = { at: Date.now(), frame };
+		return frame;
+	}).finally(() => { sessionsFramePending = undefined; });
+	return sessionsFramePending;
+};
+
 // ---------- 会话文件辅助（预览/重命名/删除/搜索——面板重做 PLAN-PANELS §2.1） ----------
 
 /** 读文件尾部若干字节（末条消息预览用；大会话不整读） */
@@ -2702,6 +2909,11 @@ wss.on("connection", (ws, req) => {
 						await handlePrompt(t ? `/reroll ${t}` : "/reroll");
 						break;
 					}
+					case "curtain_reroll": {
+						if (refuseWhileStreaming(ws, "重Roll状态栏")) return;
+						await stage.regenerateCurtain();
+						break;
+					}
 					case "swipe": {
 						if (refuseWhileStreaming(ws, "切换回复变体")) return;
 						const dir = frame.dir === "prev" || frame.dir === "next" || frame.dir === "new" ? frame.dir : "next";
@@ -2713,7 +2925,9 @@ wss.on("connection", (ws, req) => {
 						await hostCompact();
 						break;
 					case "sessions":
-						ws.send(JSON.stringify(await listSessions()));
+						if (Date.now() - (sessionsRequestAt.get(ws) ?? 0) < 1000) break;
+						sessionsRequestAt.set(ws, Date.now());
+						ws.send(JSON.stringify(await listSessionsCoalesced()));
 						break;
 					case "open": {
 						if (refuseWhileStreaming(ws, "切换会话")) return;

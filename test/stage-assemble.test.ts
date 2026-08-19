@@ -16,6 +16,7 @@ import {
 } from "../src/stage/assemble.ts";
 import type { DisplayRule } from "../src/cardfront.ts";
 import { extractDraftRules } from "../src/draft.ts";
+import { loreFingerprint, scanEntries, searchEntries } from "../src/lorebook.ts";
 import { assemblePresetAfter, constantLoreOf, loadStageMaterials } from "../src/stage/materials.ts";
 import { defaultState } from "../src/state.ts";
 import { DEFAULT_CONFIG, type RpConfig } from "../src/types.ts";
@@ -214,7 +215,7 @@ test("system prompt：字节稳定、宏替换；扮演话语零残留（P1—�
 	assert.ok(!a.includes("# 输出结构"), "D2：输出结构段已删");
 	assert.ok(!a.includes("状态栏"), "状态栏在 system 零提及（唯一席位是谢幕注入）");
 	assert.ok(!a.includes("资深作家") && !a.includes("倾尽所有"), "D3：作家咏叹调已删");
-	assert.ok(!a.includes("主权") && !a.includes("绝不替"), "主权兜底迁默认预设，harness 不再持有");
+	assert.ok(!a.includes("绝不替"), "具体主权规则归预设与工具，不由常驻提示词重复定义");
 	assert.ok(!a.includes("800–1500") && !a.includes("800-1500"), "篇幅兜底迁默认预设");
 });
 
@@ -318,6 +319,53 @@ test("末端注入：字数一行纯事实（§2.2）；无目标不出行", () 
 	assert.ok(!none.includes("800–1500"), "无预设兜底数字随 D1 迁出（默认预设数据承接）");
 });
 
+test("末端注入：文学画像是候选指导，位于设定索引之后、预设末端之前", () => {
+	const inj = buildStageInjection({
+		state: defaultState(),
+		activatedLore: [],
+		card,
+		config,
+		loreIndex: "共 1 条：旧宅",
+		literaryCharacterProfile: "角色画像正文",
+		literaryPersonaProfile: "用户画像正文",
+		presetTail: ["末端规则"],
+	});
+	assert.ok(inj.includes("【角色校准参考】"));
+	assert.ok(inj.includes("不是已发生事实"));
+	assert.ok(inj.includes("【用户偏好参考】"));
+	assert.ok(inj.includes("用户本拍明确要求永远优先"));
+	assert.ok(inj.indexOf("【设定集索引】") < inj.indexOf("【角色校准参考】"));
+	assert.ok(inj.indexOf("【用户偏好参考】") < inj.indexOf("【预设末端指令】"));
+
+	const none = buildStageInjection({ state: defaultState(), activatedLore: [], card, config });
+	assert.ok(!none.includes("文学画像") && !none.includes("角色校准参考") && !none.includes("用户偏好参考"));
+});
+
+test("末端注入：文学导演只作为画像之后、预设之前的拍前候选", () => {
+	const inj = buildStageInjection({
+		state: defaultState(), activatedLore: [], card, config,
+		literaryCharacterProfile: "画像", literaryDirection: "角色主动性：云澜施压",
+		presetTail: ["末端规则"],
+	});
+	assert.ok(inj.includes("不是正文、事实、事件清单或 beat_plan"));
+	assert.ok(inj.includes("具体事件、顺序、动作、对白、镜头与段落由随后 beat_plan 决定"));
+	assert.ok(inj.indexOf("【角色校准参考】") < inj.indexOf("【本拍文学导演候选】"));
+	assert.ok(inj.indexOf("【本拍文学导演候选】") < inj.indexOf("【预设末端指令】"));
+});
+
+test("末端注入：预设 D/E 方法论直接成为写作指导，不依赖 skill 工具", () => {
+	const text = buildStageInjection({
+		state: defaultState(),
+		activatedLore: [],
+		card,
+		config,
+		writerGuidance: [{ topic: "静场", text: "保持留白，不抢玩家行动。" }],
+	});
+	assert.ok(text.includes("【预设写作指导】"));
+	assert.ok(text.includes("保持留白"));
+	assert.ok(!text.includes("skill_read"));
+});
+
 test("detectsLanguageMismatch：中文目标才判、样本要够长", () => {
 	const en = "The moon hangs over the courtyard while she waits in silence for a long time tonight.";
 	assert.equal(detectsLanguageMismatch(en, "中文"), true);
@@ -340,6 +388,98 @@ test("formatLoreIndex：只出标题、超预算截断", () => {
 });
 
 // ---------------- 素材装载 ----------------
+
+test("loadStageMaterials：card.book 是 constant/search/index/scan 共用知识源", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "liyuan-card-lore-"));
+	try {
+		writeFileSync(
+			join(cwd, "card.json"),
+			JSON.stringify({
+				data: {
+					name: "云澜",
+					first_mes: "你来了。",
+					character_book: {
+						entries: [
+							{ id: 1, name: "月井", keys: ["月井"], content: "月井终年映着两轮月亮。", constant: true, enabled: true },
+							{ id: 2, name: "玄羽鸟", keys: ["玄羽鸟"], content: "玄羽鸟是山门传信用的黑鸟。", enabled: true },
+						],
+					},
+				},
+			}),
+		);
+		writeFileSync(join(cwd, "liyuan.config.json"), JSON.stringify({ card: "card.json" }));
+
+		const m = loadStageMaterials(cwd);
+		assert.deepEqual(constantLoreOf(m).map((e) => e.comment), ["月井"], "卡内常驻条目进入 constant 注入源");
+		assert.equal(searchEntries(m.entries, "玄羽鸟", 3)[0]?.entry.comment, "玄羽鸟", "卡内条目可主动检索");
+		assert.ok(formatLoreIndex(m.entries)?.includes("玄羽鸟"), "卡内条目进入设定索引");
+		assert.equal(scanEntries(m.entries, "玄羽鸟掠过屋脊。", 3)[0]?.comment, "玄羽鸟", "卡内条目可被动激活");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("stateFromBranch：新会话从开场白提取明确时间地点，rp-state 仍优先", () => {
+	const greetingOnly: BranchEntryLike[] = [{
+		type: "custom_message",
+		customType: "rp-greeting",
+		content: "【开场 · 实教】\n<content>2016年4月6日，上午8点，教学楼>二年级楼层>堀北班教室。春假结束了。</content>",
+	}];
+	assert.equal(stateFromBranch(greetingOnly).time, "2016年4月6日 上午8点");
+	assert.equal(stateFromBranch(greetingOnly).location, "教学楼::二年级楼层::堀北班教室");
+	const withSnapshot: BranchEntryLike[] = [...greetingOnly, {
+		type: "custom", customType: "rp-state", data: { time: "2016年4月7日", location: "体育馆" },
+	}];
+	assert.equal(stateFromBranch(withSnapshot).time, "2016年4月7日");
+	assert.equal(stateFromBranch(withSnapshot).location, "体育馆");
+});
+
+test("loadStageMaterials：统一知识集合去重，并一致应用 disabledLore 与协议过滤", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "liyuan-unified-lore-"));
+	const duplicate = "外书与卡内完全相同的设定。";
+	const disabled = "这条卡内秘密已由用户停用。";
+	try {
+		writeFileSync(
+			join(cwd, "card.json"),
+			JSON.stringify({
+				data: {
+					name: "云澜",
+					character_book: {
+						entries: [
+							{ id: 1, name: "重复设定", keys: ["重合词"], content: duplicate, enabled: true },
+							{ id: 2, name: "停用秘密", keys: ["停用关键词"], content: disabled, constant: true, enabled: true },
+							{ id: 3, name: "插件协议", keys: ["协议关键词"], content: "回复末尾输出 <UpdateVariable><JSONPatch>[]</JSONPatch></UpdateVariable>", constant: true, enabled: true },
+						],
+					},
+				},
+			}),
+		);
+		writeFileSync(
+			join(cwd, "book.json"),
+			JSON.stringify({ entries: { "9": { uid: 9, comment: "外部副本", key: ["外部词"], content: duplicate } } }),
+		);
+		writeFileSync(
+			join(cwd, "liyuan.config.json"),
+			JSON.stringify({ card: "card.json", lorebooks: ["book.json"], disabledLore: [loreFingerprint(disabled)] }),
+		);
+
+		const m = loadStageMaterials(cwd);
+		assert.equal(m.entries.filter((e) => e.content === duplicate).length, 1, "外部书与卡内重复内容只保留一份");
+		const disabledEntry = m.entries.find((e) => e.content === disabled);
+		assert.equal(disabledEntry?.enabled, false, "disabledLore 对卡内条目生效");
+		assert.equal(constantLoreOf(m).some((e) => e.content === disabled), false);
+		assert.equal(searchEntries(m.entries, "停用关键词", 3).length, 0);
+		assert.equal(scanEntries(m.entries, "停用关键词出现。", 3).length, 0);
+		const protocolEntry = m.entries.find((e) => e.comment === "插件协议");
+		assert.equal(protocolEntry?.enabled, false, "卡内协议条目仍由统一过滤置死");
+		assert.equal(m.protocolDrops.length, 1);
+		assert.equal(constantLoreOf(m).some((e) => e.comment === "插件协议"), false);
+		assert.equal(searchEntries(m.entries, "协议关键词", 3).length, 0);
+		assert.equal(scanEntries(m.entries, "协议关键词出现。", 3).length, 0);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
 
 test("loadStageMaterials：卡+预设宏求值+postHistory 每拍求值", () => {
 	const cwd = mkdtempSync(join(tmpdir(), "liyuan-mat-"));

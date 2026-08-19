@@ -15,6 +15,7 @@ packages/**/node_modules/
 .liyuan-lore/
 .liyuan-media/
 .liyuan-skills/
+.liyuan-stage-skills/
 .liyuan-state/
 .liyuan-uploads/
 .liyuan-audio/
@@ -77,6 +78,17 @@ white-screen-check.png
 
 # local VPS / gateway debug scripts (personal ops, not product)
 scripts/_*
+
+# root-level local diagnostics and imported display regex samples
+check-statusbar.cjs
+drive-turn.mjs
+dump-narrative.cjs
+dump-session.cjs
+inspect-wire-real.mts
+probe.mjs
+test-status-detect.mts
+vps-rounds.mjs
+/regex-*.json
 
 # 根级排查脚手架（下划线约定）+ 旧实验目录 + 调试截图
 # 与 pack-release.ps1 的 $dropGlobs 同口径（那里已有 "_*"，注释写着 root-level

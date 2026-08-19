@@ -11,17 +11,30 @@ import {
 	registerTavernChatBridge,
 } from "../web/src/tavernShim.ts";
 
-test("IFRAME_TAVERN_BRIDGE_SNIPPET 自包含并暴露 TavernHelper/eventOn/triggerSlash", () => {
+test("IFRAME_TAVERN_BRIDGE_SNIPPET 自包含并暴露 TavernHelper/世界书/开场兼容 API", () => {
 	assert.ok(IFRAME_TAVERN_BRIDGE_SNIPPET.startsWith("<script>"));
 	assert.ok(IFRAME_TAVERN_BRIDGE_SNIPPET.includes("TavernHelper"));
 	assert.ok(IFRAME_TAVERN_BRIDGE_SNIPPET.includes("eventOn"));
 	assert.ok(IFRAME_TAVERN_BRIDGE_SNIPPET.includes("eventEmit"));
 	assert.ok(IFRAME_TAVERN_BRIDGE_SNIPPET.includes("TheaterAPI"));
 	assert.ok(IFRAME_TAVERN_BRIDGE_SNIPPET.includes("triggerSlash"));
+	assert.ok(IFRAME_TAVERN_BRIDGE_SNIPPET.includes("getCharWorldbookNames"));
+	assert.ok(IFRAME_TAVERN_BRIDGE_SNIPPET.includes("getWorldbook"));
+	assert.ok(IFRAME_TAVERN_BRIDGE_SNIPPET.includes("replaceWorldbook"));
+	assert.ok(IFRAME_TAVERN_BRIDGE_SNIPPET.includes("getChatMessages"));
+	assert.ok(IFRAME_TAVERN_BRIDGE_SNIPPET.includes("setChatMessage"));
+	assert.ok(IFRAME_TAVERN_BRIDGE_SNIPPET.includes("toastr"));
 });
 
 test("parseSlashPipeline: 管道分段", () => {
 	assert.deepEqual(parseSlashPipeline("/send hello|/trigger"), ["/send hello", "/trigger"]);
+});
+
+test("parseSlashPipeline: /send 正文里的普通竖线不拆断开局内容", () => {
+	assert.deepEqual(parseSlashPipeline("/send 一年级篇｜A班 | 同学关系|/trigger"), [
+		"/send 一年级篇｜A班 | 同学关系",
+		"/trigger",
+	]);
 });
 
 test("executeTriggerSlash: /send|/trigger 调用 sendPrompt", () => {
@@ -109,6 +122,12 @@ test("installParentTavernShim: generate 返回字符串 Promise", async () => {
 		stopAllGeneration: () => void;
 	};
 	assert.ok(th);
+	assert.equal(typeof fakeWin.getCharWorldbookNames, "function");
+	assert.equal(typeof fakeWin.getWorldbook, "function");
+	assert.equal(typeof fakeWin.replaceWorldbook, "function");
+	assert.equal(typeof fakeWin.getChatMessages, "function");
+	assert.equal(typeof fakeWin.setChatMessage, "function");
+	assert.equal(typeof (fakeWin.toastr as { info?: unknown }).info, "function");
 	const text = await th.generate({ user_input: "你好修仙" });
 	assert.equal(typeof text, "string");
 	assert.ok(text.includes("梨园") || text.includes("你好修仙"));
@@ -136,6 +155,10 @@ test("酒馆全局垫片：jQuery/lodash/变量系统/Mvu/waitGlobalInitialized 
 	assert.ok(doc.indexOf("getAllVariables") < cardScriptStart, "getAllVariables 在卡脚本前");
 	assert.ok(doc.indexOf("waitGlobalInitialized") < cardScriptStart, "waitGlobalInitialized 在卡脚本前");
 	assert.ok(doc.indexOf("Mvu") < cardScriptStart, "Mvu 壳在卡脚本前");
+	assert.ok(doc.indexOf("errorCatched") < cardScriptStart, "社区卡初始化包装器在卡脚本前");
+	const seeded = buildSrcDoc("<script>window.__card=1</script>", true, true, { stat_data: { 学生证: { 姓名: "朱耀良" } } });
+	assert.ok(seeded.includes("window.__liyuanVariables="));
+	assert.ok(seeded.includes("朱耀良"));
 
 	// 静态帧不注入（省体积、无脚本不依赖）
 	const staticDoc = buildSrcDoc("<!doctype html><html><head></head><body><div>x</div></body></html>", false, true);

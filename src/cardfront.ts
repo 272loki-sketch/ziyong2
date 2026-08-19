@@ -23,6 +23,11 @@
 
 import type { RpConfig } from "./types.ts";
 
+export interface RegexScriptSource {
+	source: string;
+	scripts: unknown[];
+}
+
 export interface DisplayRule {
 	name: string;
 	/** 正则源文本(不含定界斜杠) */
@@ -56,9 +61,11 @@ export function buildCardFrontSnapshot(
 	config: { card: string; cardSkinOff?: string[]; userName: string },
 	raw: Record<string, unknown> | null,
 	charName: string,
-	presetRaw?: Record<string, unknown> | null,
+	presetRaw?: Record<string, unknown> | RegexScriptSource[] | null,
 ): CardFrontSnapshot {
-	const presetRules = presetRaw ? displayRules(extractRegexScripts(presetRaw)) : [];
+	const presetRules = Array.isArray(presetRaw)
+		? presetRaw.flatMap((source) => displayRules(source.scripts))
+		: presetRaw ? displayRules(extractRegexScripts(presetRaw)) : [];
 	const cardRules = raw ? displayRules(extractRegexScripts(raw)) : [];
 	const rules = [...presetRules, ...cardRules];
 	return {
@@ -74,6 +81,14 @@ export function buildCardFrontSnapshot(
 export function extractRegexScripts(raw: Record<string, unknown>): unknown[] {
 	const data = raw.data && typeof raw.data === "object" ? (raw.data as Record<string, unknown>) : raw;
 	const ext = data.extensions && typeof data.extensions === "object" ? (data.extensions as Record<string, unknown>) : {};
+	return Array.isArray(ext.regex_scripts) ? ext.regex_scripts : [];
+}
+
+/** ST 世界书扩展里的作者正则；只投影数据，不修改原始世界书。 */
+export function extractLorebookRegexScripts(raw: Record<string, unknown>): unknown[] {
+	const direct = extractRegexScripts(raw);
+	if (direct.length > 0) return direct;
+	const ext = raw.extensions && typeof raw.extensions === "object" ? raw.extensions as Record<string, unknown> : {};
 	return Array.isArray(ext.regex_scripts) ? ext.regex_scripts : [];
 }
 

@@ -6,6 +6,7 @@
  */
 
 import type { WorldState } from "./types.ts";
+import { clipPromptText } from "./stage/prompt-budget.ts";
 
 export interface ScribePromptInput {
 	/** 当前世界状态（JSON 序列化前的对象） */
@@ -44,7 +45,7 @@ export function buildScribeTurnPrompt(input: ScribePromptInput): { systemPrompt:
 
 输出唯一字段：
 "patch"：从本轮对话中提取需要记账的持久变化。字段语义：
-- "time" / "location"：字符串，整体替换。剧内时间推移（入夜、次日清晨、数日后）必须更新 time。
+- "time" / "location"：字符串，整体替换。剧内时间推移（入夜、次日清晨、数日后）必须更新 time。若当前账本或本轮正文已有可确定的绝对日期，time 必须保留完整日期作为开头，再附叙事时段，例如“2015年4月7日（次日清晨）”或“星辉历102年长昼月7日（黄昏）”；无法唯一推出时不得猜造日期。
 - "characters"：{ "名字": { "affinity"?, "status"?, "notes"? } }，按字段合并。affinity 为 -100..100 的对${userName}态度值，基于账本当前值小步调整（通常 ±1~10）。${nameGuide}；只有全新出场的人物才建新条目，键用正文中的人名——不要把作品/剧本标题（如「${charName}」这类非人名）当作角色。
 - "inventory"：字符串数组，整体替换——只在物品归属变化时给出变化后的完整清单，条目注明归属（如「黄铜怀表（${userName}持有）」）。
 - "flags"：键值对，按键合并（值为字符串）。
@@ -57,9 +58,9 @@ export function buildScribeTurnPrompt(input: ScribePromptInput): { systemPrompt:
 ${JSON.stringify(state, null, 2)}
 
 【本轮对话】
-${userName}：${userText}
+${userName}：${clipPromptText(userText, 8_000)}
 
-${charName}：${assistantText}`;
+${charName}：${clipPromptText(assistantText, 30_000)}`;
 
 	return { systemPrompt, userText: user };
 }
@@ -105,7 +106,7 @@ export function parseScribeResult(text: string): ScribeResult | null {
 		if (end === -1) break;
 		try {
 			const obj = JSON.parse(t.slice(start, end + 1)) as Record<string, unknown>;
-			if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+			if (obj && typeof obj === "object" && !Array.isArray(obj) && Object.hasOwn(obj, "patch")) {
 				const patch =
 					obj.patch && typeof obj.patch === "object" && !Array.isArray(obj.patch)
 						? (obj.patch as Record<string, unknown>)

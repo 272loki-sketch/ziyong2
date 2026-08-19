@@ -90,3 +90,50 @@ export function applyCardSkin(
 	}
 	return out;
 }
+
+/**
+ * 应用皮肤时原子暂存 HTML replacement。复杂社区皮肤常在 CSS/JS 字符串中嵌套标签，
+ * 事后靠标签配平无法可靠找回边界；在 replace 回调里边界天然准确。
+ */
+export function applyCardSkinProtected(
+	text: string,
+	rules: DisplayRule[],
+	macros: { charName: string; userName: string },
+	token: (index: number) => string,
+): { text: string; stash: string[] } {
+	let out = text;
+	const stash: string[] = [];
+	for (const r of rules) {
+		try {
+			const re = new RegExp(substMacros(r.source, macros, true), r.flags);
+			const template = substMacros(r.replace, macros, false);
+			const replace = (input: string): string => input.replace(re, (match, ...args) => {
+				const last = args[args.length - 1];
+				const hasNamed = typeof last === "object" && last !== null;
+				const captEnd = hasNamed ? args.length - 3 : args.length - 2;
+				const captures = args.slice(0, Math.max(0, captEnd)) as Array<string | undefined>;
+				return expandSkinReplacement(template, match, captures);
+			});
+			// ST 按规则顺序处理完整上一步产物。整页 renderer 虽已为防标签策略撕碎而
+			// 暂存，后续内联规则（如 [表情13] → <img>）仍必须进入该 HTML。
+			// 先处理旧 stash；本规则刚生成的新 stash 不应被同一规则递归处理。
+			for (let index = 0; index < stash.length; index++) stash[index] = replace(stash[index]);
+			out = out.replace(re, (match, ...args) => {
+				const last = args[args.length - 1];
+				const hasNamed = typeof last === "object" && last !== null;
+				const captEnd = hasNamed ? args.length - 3 : args.length - 2;
+				const captures = args.slice(0, Math.max(0, captEnd)) as Array<string | undefined>;
+				const replacement = expandSkinReplacement(template, match, captures);
+				if (!/(?:```(?:html)?|<!doctype\s+html|<html[\s>]|<(?:div|section|article|main|table|figure|details|style|script)\b)/i.test(replacement)) {
+					return replacement;
+				}
+				const index = stash.length;
+				stash.push(replacement);
+				return token(index);
+			});
+		} catch {
+			// 单条坏规则不拖累整条管线
+		}
+	}
+	return { text: out, stash };
+}

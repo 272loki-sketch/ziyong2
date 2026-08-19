@@ -8,7 +8,11 @@ import {
 	finalTimeline,
 	formatPlan,
 	MAX_STEPS,
+	MAX_APPENDS,
+	MAX_DRAFT_ABSOLUTE_CHARS,
+	MAX_DRAFT_BODY_CHARS,
 	MAX_STEP_LEN,
+	planStepBudget,
 	projectedState,
 	recordSegment,
 	runWriteTool,
@@ -51,6 +55,7 @@ test("writeTools：写侧十件在清单里，beat_plan 列首为落笔前构思
 	assert.match(byName.get("beat_plan") ?? "", /怎么演.*再想|留给演到/);
 	// 计划是草图：描述须声明可改写，否则模型会把它当成必须演完的剧本
 	assert.match(byName.get("beat_plan") ?? "", /草图|改写/);
+	assert.doesNotMatch(byName.get("beat_plan") ?? "", /几条就写几段/, "路标数量不再机械决定段数");
 });
 
 test("beat_plan：受理回执一句事实（§2.4）；重拟保留已勾条目的进度", () => {
@@ -90,14 +95,69 @@ test("beat_plan 粒度门禁：条目写成正文即拒收（构思与排练的�
 	assert.doesNotMatch(r.text, /发生什么|留给/, "拒收回执只留事实＋动作，通道契约在工具描述里（P4）");
 
 	// 条数上限：一拍是一小段戏，不是整章大纲
-	const many = Array.from({ length: MAX_STEPS + 1 }, (_, i) => `第${i + 1}步`);
+	const many = Array.from({ length: planStepBudget() + 1 }, (_, i) => `第${i + 1}步`);
 	const tooMany = runWriteTool(ws, d, "beat_plan", { steps: many });
 	assert.equal(tooMany.ok, false);
-	assert.match(tooMany.text, new RegExp(`最多 ${MAX_STEPS} 条`));
+	assert.match(tooMany.text, new RegExp(`最多 ${planStepBudget()} 条`));
 
 	// 非数组 / 空数组都拒收，且不抛
 	assert.equal(runWriteTool(ws, d, "beat_plan", { steps: [] }).ok, false);
 	assert.equal(runWriteTool(ws, d, "beat_plan", {}).ok, false);
+});
+
+test("beat_plan 单拍边界：拒绝擅自跳到放学、夜跑或次日", () => {
+	const ws = createWorkspace();
+	const result = runWriteTool(ws, deps(), "beat_plan", {
+		steps: ["回应眼前试探", "放学后前往体育馆参加交流会"],
+	});
+	assert.equal(result.ok, false);
+	assert.match(result.text, /当前场景|跨时间/);
+	assert.equal(ws.plan.length, 0);
+});
+
+test("用户明确授权时间跳转时，计划和正文通过单拍边界", () => {
+	const d = { ...deps(), transitionAuthorized: true };
+	const ws = createWorkspace();
+	assert.equal(runWriteTool(ws, d, "beat_plan", { steps: ["推进到第二天清晨", "抵达车站"] }).ok, true);
+	assert.equal(runWriteTool(ws, d, "draft_append", { segment: "第二天清晨，他抵达车站。" }).ok, true);
+});
+
+test("当前场景提到体育馆或交流会本身不算跨场景", () => {
+	const ws = createWorkspace();
+	assert.equal(runWriteTool(ws, deps(), "draft_append", { segment: "OAA 公告栏列着体育馆交流会，但当前配对状态还是未配对。" }).ok, true);
+});
+
+test("稿纸正文边界：剧情插图可就地穿插，日历与 HTML 格式块拒收", () => {
+	assert.equal(runWriteTool(createWorkspace(), deps(), "draft_append", { segment: "正文。<image>提示词</image>" }).ok, true);
+	for (const content of ["正文。<calendar>四月</calendar>", "<!DOCTYPE html><html></html>"]) {
+		const ws = createWorkspace();
+		const result = runWriteTool(ws, deps(), "draft_append", { segment: content });
+		assert.equal(result.ok, false);
+		assert.match(result.text, /封笔和记账后|收尾格式/);
+		assert.equal(ws.draft, "");
+	}
+});
+
+test("稿纸单拍边界：计划漏过时正文仍拒绝跳到放学或体育馆", () => {
+	const ws = createWorkspace();
+	const result = runWriteTool(ws, deps(), "draft_append", {
+		segment: "他吃完饭离开食堂，放学后又去了体育馆参加交流会。",
+	});
+	assert.equal(result.ok, false);
+	assert.match(result.text, /当前场景/);
+	assert.equal(ws.draft, "");
+});
+
+test("beat_plan 固定小窗口：wordRange 放宽也不授权更多事件", () => {
+	assert.equal(planStepBudget(), 3);
+	assert.equal(planStepBudget({ min: 500, max: 800 }), 3);
+	assert.equal(planStepBudget({ min: 2000, max: 4000 }), 3);
+
+	const ws = createWorkspace();
+	const d = minRules();
+	const r = runWriteTool(ws, d, "beat_plan", { steps: ["一", "二", "三", "四", "五", "六", "七", "八"] });
+	assert.equal(r.ok, false, "长叙事也只能先规划固定候选窗口");
+	assert.match(r.text, /最多 3 条/);
 });
 
 test("beat_step_done：按序号勾掉并回报剩余；越界/重复勾/无计划都拒收", () => {
@@ -246,6 +306,65 @@ test("draft_append：追加不覆盖；封笔前无验收报告，封笔后事�
 	assert.doesNotMatch(r3.text, /待修|违规|修正/, "验收恒为事实陈述（P2）");
 });
 
+test("draft_write：不以固定字数限制模型，格式尾巴完整保留", () => {
+	const body = "字".repeat(MAX_DRAFT_BODY_CHARS);
+	const tail = `<StatusBlock>${"状态".repeat(2000)}</StatusBlock>`;
+	const ws = createWorkspace();
+	const accepted = runWriteTool(ws, deps(), "draft_write", { content: body + tail });
+	assert.equal(accepted.ok, true, "正文刚好触顶且巨大格式尾巴仍可收稿");
+	assert.equal(ws.draft, body + tail, "输出合约尾巴完整保留");
+	assert.equal(ws.appendLimitReached, false);
+
+	const before = ws.draft;
+	const rejected = runWriteTool(ws, deps(), "draft_write", { content: "字".repeat(MAX_DRAFT_ABSOLUTE_CHARS + 1) });
+	assert.equal(rejected.ok, true);
+	assert.notEqual(ws.draft, before, "长篇重交应正常覆盖，不截断");
+});
+
+test("draft_append：不限制续写段数，模型自行决定何时封笔", () => {
+	const ws = createWorkspace();
+	const d = minRules();
+	for (let i = 1; i <= MAX_APPENDS; i++) {
+		assert.equal(runWriteTool(ws, d, "draft_append", { segment: `第${i}段。` }).ok, true);
+	}
+	const before = ws.draft;
+	const fourth = runWriteTool(ws, d, "draft_append", { segment: "第4段。" });
+	assert.equal(fourth.ok, true);
+	assert.notEqual(ws.draft, before, "第4段应继续写入现稿");
+	assert.equal(ws.appendRejects, 0);
+	assert.equal(ws.appendLimitReached, false);
+	assert.equal(runWriteTool(ws, d, "draft_append", { segment: "第5段。" }).ok, true);
+	assert.equal(ws.appendRejects, 0);
+	assert.equal(runWriteTool(ws, d, "draft_seal", {}).ok, true);
+});
+
+test("draft_append：明确 2800-3200 长篇目标时，2200 字首段不提前封笔", () => {
+	const ws = createWorkspace();
+	const d = deps();
+	d.rules.wordRange = { min: 2800, max: 3200 };
+	const body = "字".repeat(2200);
+	const accepted = runWriteTool(ws, d, "draft_append", { segment: body });
+	assert.equal(accepted.ok, true);
+	assert.equal(ws.draft, body, "超过软预算的原子首段必须完整落稿，不截断");
+	assert.equal(ws.appendLimitReached, false);
+	assert.equal(ws.overBudget, false);
+	assert.equal(ws.sealed, false, "明确长篇目标必须允许继续补足篇幅");
+	assert.equal(runWriteTool(ws, d, "draft_append", { segment: "继续补足篇幅" }).ok, true);
+});
+
+test("draft_append：长稿不因固定字数上限拒收", () => {
+	const ws = createWorkspace();
+	const d = deps();
+	const rejected = runWriteTool(ws, d, "draft_append", { segment: "字".repeat(MAX_DRAFT_ABSOLUTE_CHARS + 1) });
+	assert.equal(rejected.ok, true);
+	assert.ok(ws.draft.length > MAX_DRAFT_ABSOLUTE_CHARS);
+	assert.equal(ws.appendLimitReached, false, "空稿拒收绝不能进入收笔阶段");
+	assert.equal(ws.sealed, false);
+	const retry = runWriteTool(ws, d, "draft_append", { segment: "池宽治是《催眠性指导》中的主要角色。" });
+	assert.equal(retry.ok, true, "长稿后仍可继续写");
+	assert.match(ws.draft, /池宽治/);
+});
+
 test("draft_append：追加进时间线是追加段（draft=true），不塌成替换", () => {
 	const ws = createWorkspace();
 	const d = deps();
@@ -359,9 +478,14 @@ test("draft_write：全量替换语义——第二稿覆盖第一稿", () => {
 });
 
 
-test("world_state_update：只验不改——合格入队，定稿前基准账本不动", () => {
+test("world_state_update：只在 sealed 后验收入队，基准账本不动", () => {
 	const ws = createWorkspace();
 	const d = deps();
+	const early = runWriteTool(ws, d, "world_state_update", { patch: { location: "藏经阁" } });
+	assert.equal(early.ok, false);
+	assert.match(early.text, /尚未封笔/);
+	runWriteTool(ws, d, "draft_write", { content: "她走进藏经阁。" });
+	runWriteTool(ws, d, "draft_seal", {});
 	const r = runWriteTool(ws, d, "world_state_update", {
 		patch: { location: "藏经阁", characters: { 林霜: { affinity: 35 } } },
 	});
@@ -377,6 +501,7 @@ test("world_state_update：只验不改——合格入队，定稿前基准账�
 test("world_state_update：非法 patch 拒收（非对象 / 全字段无效）", () => {
 	const ws = createWorkspace();
 	const d = deps();
+	runWriteTool(ws, d, "draft_write", { content: "正文。" });
 	assert.equal(runWriteTool(ws, d, "world_state_update", { patch: "藏经阁" }).ok, false);
 	assert.equal(runWriteTool(ws, d, "world_state_update", { patch: [1] }).ok, false);
 	const r = runWriteTool(ws, d, "world_state_update", { patch: { time: 42 } });
@@ -388,12 +513,53 @@ test("world_state_update：非法 patch 拒收（非对象 / 全字段无效）"
 test("world_state_update：角色键在投影上归一（大小写变体不裂成两人）", () => {
 	const ws = createWorkspace();
 	const d = deps();
+	runWriteTool(ws, d, "draft_write", { content: "正文。" });
+	runWriteTool(ws, d, "draft_seal", {});
 	runWriteTool(ws, d, "world_state_update", { patch: { characters: { Alice: { affinity: 10 } } } });
 	runWriteTool(ws, d, "world_state_update", { patch: { characters: { "alice ": { status: "警惕" } } } });
 	const proj = projectedState(ws, d.baseState);
 	assert.deepEqual(Object.keys(proj.characters), ["Alice"]);
 	assert.equal(proj.characters.Alice.affinity, 10);
 	assert.equal(proj.characters.Alice.status, "警惕");
+});
+
+test("world_state_update：兼容 OpenAI 端点二次序列化的 JSON 对象参数", () => {
+	const ws = createWorkspace();
+	const context = deps();
+	runWriteTool(ws, context, "draft_write", { content: "她走进教室。" });
+	runWriteTool(ws, context, "draft_seal", {});
+	const result = runWriteTool(ws, context, "world_state_update", { patch: JSON.stringify({ location: "D班教室" }) });
+	assert.equal(result.ok, true);
+	assert.equal(ws.patches.length, 1);
+	assert.equal(ws.patches[0]?.location, "D班教室");
+});
+
+test("world_state_update：角色 status/notes 命中 lore 名称时只记录来源，不伪称语义已验证", () => {
+	const ws = createWorkspace();
+	const d = deps();
+	d.loreEntries = [{
+		uid: 1,
+		keys: ["林霜"],
+		secondaryKeys: [],
+		comment: "林霜",
+		content: "林霜旧伤未愈。",
+		constant: false,
+		enabled: true,
+		selective: false,
+		order: 100,
+		source: "card",
+	}];
+	runWriteTool(ws, d, "draft_write", { content: "正文。" });
+	runWriteTool(ws, d, "draft_seal", {});
+	const result = runWriteTool(ws, d, "world_state_update", {
+		patch: { characters: { 林霜: { status: "已经痊愈", notes: "今日可动武" } } },
+	});
+	assert.equal(result.ok, true, "不做不可靠的自由文本冲突拦截");
+	assert.equal(ws.patchAudit.length, 1);
+	assert.deepEqual(ws.patchAudit[0]?.fields, ["status", "notes"]);
+	assert.equal(ws.patchAudit[0]?.lore[0]?.source, "card");
+	assert.match(ws.patchAudit[0]?.lore[0]?.fingerprint ?? "", /^[a-f0-9]{12}$/);
+	assert.equal(ws.patchAudit[0]?.verification, "not-semantic-verified");
 });
 
 test("未知写侧工具名：可读文本，不抛", () => {

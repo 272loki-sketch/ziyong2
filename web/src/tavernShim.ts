@@ -28,7 +28,84 @@ export type TavernChatBridge = {
 	sendPrompt: (text: string) => void;
 	/** 可选：执行梨园斜杠命令原文（如 /rewind） */
 	runCommand?: (text: string) => void;
+	/** 把程序卡 toastr 通知映射到梨园 toast */
+	notify?: (level: "info" | "success" | "warning" | "error", text: string) => void;
 };
+
+export type TavernWorldbookEntry = {
+	uid: number;
+	name: string;
+	comment?: string;
+	key?: string[];
+	keysecondary?: string[];
+	content?: string;
+	constant?: boolean;
+	selective?: boolean;
+	order?: number;
+	enabled: boolean;
+	[k: string]: unknown;
+};
+
+type TavernWorldbookResponse = { name: string; path: string; entries: TavernWorldbookEntry[] };
+
+async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
+	const res = await fetch(path, {
+		headers: { "content-type": "application/json" },
+		...init,
+	});
+	const data = (await res.json().catch(() => ({}))) as { error?: string } & T;
+	if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+	return data;
+}
+
+/**
+ * 当前挂载书名。酒馆公开 API 是同步函数，程序卡普遍直接读取 `.primary`，故这里使用
+ * 同源同步 XHR；只取极小的书名清单，不读取正文。世界书正文与写入仍走异步 fetch。
+ */
+export function getCharWorldbookNames(_scope?: string): { primary: string | null; additional: string[] } {
+	const xhr = new XMLHttpRequest();
+	xhr.open("GET", "/api/lorebooks", false);
+	xhr.send();
+	if (xhr.status < 200 || xhr.status >= 300) throw new Error(`读取挂载世界书失败：HTTP ${xhr.status}`);
+	const data = JSON.parse(xhr.responseText || "{}") as { active?: string[] };
+	const paths = Array.isArray(data.active) ? data.active : [];
+	const names = paths.map((p) => p.split(/[\\/]/).pop()?.replace(/\.json$/i, "") || p);
+	return { primary: names[0] ?? null, additional: names.slice(1) };
+}
+
+export async function getWorldbook(name?: string): Promise<TavernWorldbookEntry[]> {
+	const q = name ? `?name=${encodeURIComponent(name)}` : "";
+	const data = await apiJson<TavernWorldbookResponse>(`/api/tavern/worldbook${q}`);
+	return data.entries;
+}
+
+export async function replaceWorldbook(name: string, entries: TavernWorldbookEntry[]): Promise<void> {
+	await apiJson("/api/tavern/worldbook", {
+		method: "PUT",
+		body: JSON.stringify({ name, entries: entries.map((e) => ({ uid: e.uid, enabled: e.enabled })) }),
+	});
+}
+
+/** 酒馆 getChatMessages 的开场白子集：第 0 楼的 swipes 对应角色卡全部开场。 */
+export async function getChatMessages(): Promise<Array<{ swipes: string[]; swipe_id: number }>> {
+	const card = await apiJson<{ greetingIndex?: number; greetings?: Array<{ text?: string }> }>("/api/card");
+	return [{ swipes: (card.greetings ?? []).map((g) => String(g.text ?? "")), swipe_id: card.greetingIndex ?? 0 }];
+}
+
+/** 程序卡只用它切第 0 楼 swipe；正文楼层改写仍不开放。 */
+export async function setChatMessage(
+	_text: string,
+	messageId: number | string,
+	options?: { swipe_id?: number },
+): Promise<void> {
+	if (Number(messageId) !== 0 || !Number.isInteger(options?.swipe_id)) {
+		throw new Error("梨园仅支持程序卡切换第 0 楼开场白");
+	}
+	await apiJson("/api/greeting", {
+		method: "POST",
+		body: JSON.stringify({ index: options!.swipe_id, apply: true }),
+	});
+}
 
 type BusMap = Map<string, Set<(...args: unknown[]) => void>>;
 
@@ -79,10 +156,17 @@ export function installEventBus(target: object = typeof window !== "undefined" ?
  * 分段以 `|` 分隔（ST STscript 同款）。
  */
 export function parseSlashPipeline(raw: string): string[] {
-	return String(raw ?? "")
-		.split("|")
-		.map((s) => s.trim())
-		.filter(Boolean);
+	const source = String(raw ?? "");
+	// 只把后面紧跟斜杠命令名的 | 当管道符；开局正文里的普通竖线必须原样保留。
+	const matches = [...source.matchAll(/\|\s*(?=\/[a-z][\w-]*\b)/gi)];
+	const parts: string[] = [];
+	let start = 0;
+	for (const match of matches) {
+		parts.push(source.slice(start, match.index).trim());
+		start = (match.index ?? 0) + match[0].length;
+	}
+	parts.push(source.slice(start).trim());
+	return parts.filter(Boolean);
 }
 
 export type SlashExecResult = {
@@ -183,6 +267,12 @@ export function installParentTavernShim(): void {
 		TheaterAPI?: { call: (method: string, ...args: unknown[]) => Promise<unknown> };
 		handleTheaterAction?: (msg: unknown) => void;
 		triggerSlash?: (cmd: string) => Promise<string> | string;
+		getCharWorldbookNames?: (scope?: string) => { primary: string | null; additional: string[] };
+		getWorldbook?: (name?: string) => Promise<TavernWorldbookEntry[]>;
+		replaceWorldbook?: (name: string, entries: TavernWorldbookEntry[]) => Promise<void>;
+		getChatMessages?: (...args: unknown[]) => Promise<Array<{ swipes: string[]; swipe_id: number }>>;
+		setChatMessage?: (text: string, id: number | string, options?: { swipe_id?: number }) => Promise<void>;
+		toastr?: Record<"info" | "success" | "warning" | "error", (text: string) => void>;
 	};
 	if (w.__liyuanTavernShimInstalled) return;
 	w.__liyuanTavernShimInstalled = true;
@@ -190,6 +280,17 @@ export function installParentTavernShim(): void {
 	installEventBus(w);
 
 	w.triggerSlash = (cmd: string) => triggerSlash(cmd);
+	w.getCharWorldbookNames = getCharWorldbookNames;
+	w.getWorldbook = getWorldbook;
+	w.replaceWorldbook = replaceWorldbook;
+	w.getChatMessages = (..._args: unknown[]) => getChatMessages();
+	w.setChatMessage = setChatMessage;
+	w.toastr = {
+		info: (text) => chatBridge?.notify?.("info", String(text)),
+		success: (text) => chatBridge?.notify?.("success", String(text)),
+		warning: (text) => chatBridge?.notify?.("warning", String(text)),
+		error: (text) => chatBridge?.notify?.("error", String(text)),
+	};
 
 	// iframe 无 same-origin 时走 postMessage（测试桩可能没有 addEventListener）
 	if (typeof window.addEventListener === "function") {
@@ -283,6 +384,22 @@ try{
       }
     };
   }
+	/* 世界书/开场白兼容 API：脚本帧只代理父页，文件与会话主权仍在梨园。 */
+	/* getCharWorldbookNames 必须同步透传：社区程序卡直接读返回值的 .primary。 */
+	if(typeof g.getCharWorldbookNames!=="function"){
+		g.getCharWorldbookNames=function(){var p=parentWin();if(!p||typeof p.getCharWorldbookNames!=="function")return {primary:null,additional:[]};return p.getCharWorldbookNames.apply(p,arguments);};
+	}
+	var compat=["getWorldbook","replaceWorldbook","getChatMessages","setChatMessage"];
+	for(var ci=0;ci<compat.length;ci++)(function(name){
+		if(typeof g[name]==="function")return;
+		g[name]=function(){var p=parentWin();if(!p||typeof p[name]!=="function")return Promise.reject(new Error("梨园兼容 API 未就绪："+name));return p[name].apply(p,arguments);};
+	})(compat[ci]);
+	if(!g.toastr){
+		g.toastr={};
+		["info","success","warning","error"].forEach(function(level){
+			g.toastr[level]=function(text){var p=parentWin();if(p&&p.toastr&&typeof p.toastr[level]==="function")p.toastr[level](String(text||""));};
+		});
+	}
   try{
     if(g.parent&&g.parent.TheaterAPI)g.TheaterAPI=g.parent.TheaterAPI;
     else if(!g.TheaterAPI)g.TheaterAPI={call:function(){return Promise.resolve(null);}};
@@ -367,5 +484,8 @@ try{
       });
     };
   }
+	if(typeof g.errorCatched!=="function"){
+		g.errorCatched=function(fn){return function(){try{return fn.apply(this,arguments);}catch(e){console.error("[liyuan card init]",e);}};};
+	}
 }catch(e){console.error("[liyuan globals]",e);}
 })();</script>`;

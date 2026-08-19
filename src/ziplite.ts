@@ -30,6 +30,8 @@ interface CenEntry extends ZipEntryInfo {
 	localOffset: number;
 }
 
+const MAX_MEMORY_ENTRY = 64 * 1024 * 1024;
+
 function findEocd(buf: Buffer): number {
 	// EOCD 注释最长 65535，从尾部回扫
 	const min = Math.max(0, buf.length - 22 - 65535);
@@ -75,15 +77,31 @@ function readCentralDirectory(buf: Buffer): CenEntry[] {
 }
 
 function entryData(buf: Buffer, e: CenEntry): Buffer {
+	if (e.size > MAX_MEMORY_ENTRY || e.compressedSize > MAX_MEMORY_ENTRY) throw new Error(`zip 条目过大：${e.name}`);
 	const p = e.localOffset;
+	if (p < 0 || p + 30 > buf.length) throw new Error(`local header 越界：${e.name}`);
 	if (buf.readUInt32LE(p) !== LOC_SIG) throw new Error(`local header 损坏：${e.name}`);
 	const nameLen = buf.readUInt16LE(p + 26);
 	const extraLen = buf.readUInt16LE(p + 28);
 	const start = p + 30 + nameLen + extraLen;
 	const raw = buf.subarray(start, start + e.compressedSize);
 	if (e.method === 0) return Buffer.from(raw);
-	if (e.method === 8) return inflateRawSync(raw);
+	if (e.method === 8) return inflateRawSync(raw, { maxOutputLength: MAX_MEMORY_ENTRY });
 	throw new Error(`不支持的压缩方法 ${e.method}：${e.name}`);
+}
+
+/** 从内存中的 zip 读取第一条匹配文件，供 API 返回的压缩包直接消费。 */
+export function firstZipEntry(
+	buf: Buffer,
+	predicate: (entry: ZipEntryInfo) => boolean,
+): { entry: ZipEntryInfo; data: Buffer } | null {
+	for (const e of readCentralDirectory(buf)) {
+		if (e.isDir || !predicate(e)) continue;
+		const data = entryData(buf, e);
+		if (data.length !== e.size) throw new Error(`解压尺寸不符：${e.name}（${data.length} != ${e.size}）`);
+		return { entry: { name: e.name, size: e.size, isDir: false, mode: e.mode }, data };
+	}
+	return null;
 }
 
 /** 列出 zip 条目（调试/测试用） */

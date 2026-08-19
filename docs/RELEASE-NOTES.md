@@ -5,6 +5,10 @@
 
 ![主界面](images/home.png)
 
+> 最新能力：**角色卡自适应模块化世界引擎**（卡级长期画像 / 分支 Manifest / 事实信封 /
+> 独立审计 / 模块化世界 v2 / 关键路径分级），见 [v1.6.0 发布说明](RELEASE-v1.6.0.md) 与
+> [docs/PLAN-WORLD-ENGINE.md](PLAN-WORLD-ENGINE.md)。
+
 ---
 
 ## 下载

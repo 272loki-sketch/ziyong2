@@ -80,6 +80,8 @@ import {
 	resyncDraftSegs,
 	segmentsFromLegacy,
 	trailingText,
+	estimateTokens,
+	formatTokenCount,
 	type TurnSegment,
 } from "./timeline.ts";
 import type { DisplayRule } from "../../src/cardfront.ts";
@@ -232,6 +234,9 @@ export default function App() {
 	const [liveSegs, setLiveSegs] = useState<TurnSegment[]>([]);
 	const [thinkingLive, setThinkingLive] = useState(false);
 	const [busy, setBusy] = useState(false);
+	const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
+	const [turnElapsed, setTurnElapsed] = useState(0);
+	const [turnTokenEstimate, setTurnTokenEstimate] = useState(0);
 	const [toolNote, setToolNote] = useState<string | null>(null);
 	/** 本轮过程步骤（实时清单渲染用；与 turnActsRef 同内容） */
 	const [liveActs, setLiveActs] = useState<WireActivity[]>([]);
@@ -715,6 +720,7 @@ export default function App() {
 						setStreamThinking(streamThinkingRef.current);
 					}
 					pushSegDelta(frame.kind, frame.delta, frame.draft, frame.reset);
+					setTurnTokenEstimate((n) => n + estimateTokens(frame.delta));
 					break;
 				case "draft_resync":
 					// 修复后的稿件分段重同步：全部稿段原位替换成修后分段（该段原地变新）
@@ -735,6 +741,9 @@ export default function App() {
 						// 新一轮生成：解除停止冻结
 						abortingRef.current = false;
 						setBusy(true);
+						setTurnStartedAt(Date.now());
+						setTurnElapsed(0);
+						setTurnTokenEstimate(0);
 						resetActs();
 						resetSegs();
 					} else {
@@ -743,6 +752,7 @@ export default function App() {
 						const wasAborting = abortingRef.current;
 						if (!wasAborting) abortingRef.current = false;
 						setBusy(false);
+						setTurnStartedAt(null);
 						setThinkingLive(false);
 						setToolNote(null);
 						// 本轮 agent 可能写了技能/知识库/世界书等资产：通知 watchAgent 面板重拉
@@ -828,6 +838,7 @@ export default function App() {
 					if (frame.state === "end") pushToast(frame.ok === false ? "warning" : "info", frame.ok === false ? "压缩失败" : "上下文已压缩");
 					break;
 				case "sessions":
+					sessionsRequestPendingRef.current = false;
 					setSessions(frame.list);
 					break;
 				case "choice":
@@ -1088,6 +1099,14 @@ export default function App() {
 		if (greetingOnly || messages.some((m) => m.channel === "greeting")) void refreshGreetingMeta();
 	}, [greetingOnly, messages, refreshGreetingMeta]);
 
+	useEffect(() => {
+		if (!busy || turnStartedAt === null) return;
+		const tick = () => setTurnElapsed(Date.now() - turnStartedAt);
+		tick();
+		const timer = window.setInterval(tick, 250);
+		return () => window.clearInterval(timer);
+	}, [busy, turnStartedAt]);
+
 	// 跟随滚动：仅当用户本就在底部
 	useEffect(() => {
 		const el = listRef.current;
@@ -1204,10 +1223,11 @@ export default function App() {
 				if (inputRef.current) inputRef.current.style.height = "auto";
 				pushToast("info", "已从界面注入并发送");
 			},
-			runCommand: (cmd) => {
+			 runCommand: (cmd) => {
 				if (connRef.current !== "open") return;
 				ws.send({ type: "prompt", text: cmd });
 			},
+			notify: (level, text) => pushToast(level === "success" ? "info" : level, text),
 		});
 		return () => registerTavernChatBridge(null);
 	}, [ws, pushToast]);
@@ -1357,6 +1377,7 @@ export default function App() {
 			openLeft(next);
 			if (next === "sessions") {
 				setSessions(null);
+				sessionsRequestPendingRef.current = true;
 				ws.send({ type: "sessions" });
 			}
 		} else {
@@ -1369,12 +1390,16 @@ export default function App() {
 	};
 
 	// 欢迎区 / 会话面板：列表为空时补拉（含新建会话后 hello 清空）
+	const sessionsRequestPendingRef = useRef(false);
 	useEffect(() => {
 		if (conn !== "open") return;
-		if (welcome || (leftPanel === "sessions" && sessions === null)) {
+		if (sessions === null && !sessionsRequestPendingRef.current && (welcome || leftPanel === "sessions")) {
+			sessionsRequestPendingRef.current = true;
 			ws.send({ type: "sessions" });
 		}
-		// eslint-disable-next-line react-hooks/exhaustive-deps -- ws.send 稳定；sessions 变 null 时要重拉
+		// `ws` 是 useWire 每次 render 返回的包装对象，不可作为 effect 依赖；否则收到
+		// sessions → render → 新 ws 引用 → 再发 sessions，形成每秒数百次的无限 WS 循环。
+		// eslint-disable-next-line react-hooks/exhaustive-deps -- 只在连接/面板/空列表状态变化时请求
 	}, [conn, welcome, leftPanel, sessions]);
 
 	// 访问时间：未在欢迎态时心跳 + 离开页写入（久未访问 → 下次欢迎）
@@ -1915,12 +1940,24 @@ export default function App() {
 												fallbackName={b.msg.channel === "user" ? userName || "你" : charName}
 												avatarUrl={b.msg.channel === "user" ? userAvatarUrl : charAvatarUrl}
 												skin={cardSkin}
+												onSelectOption={(text) => {
+													setInput(text);
+													requestAnimationFrame(() => {
+														inputRef.current?.focus();
+														inputRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+													});
+												}}
 												onReroll={
 													!busy &&
 													!msgEdit &&
 													b.msg.channel === "narrative" &&
 													b.idx === lastNarrativeIdx
 														? () => ws.send({ type: "swipe", dir: "new" })
+														: undefined
+												}
+												onCurtainReroll={
+													!busy && !msgEdit && b.msg.channel === "narrative" && b.idx === lastNarrativeIdx
+														? () => ws.send({ type: "curtain_reroll" })
 														: undefined
 												}
 												swipe={
@@ -2034,6 +2071,7 @@ export default function App() {
 										<MsgAvatar src={charAvatarUrl} name={charName} kind="char" />
 										<span className="msg-name msg-name-char">{charName}</span>
 										<span className="msg-live-tag">生成中</span>
+										<span className="msg-live-metrics">{(turnElapsed / 1000).toFixed(1)} 秒 · 约 {formatTokenCount(turnTokenEstimate)} tokens</span>
 									</div>
 									{liveSegs.length > 0 ? (
 										<TurnTimeline segments={liveSegs} skin={liveSkin} live />
@@ -2200,6 +2238,7 @@ export default function App() {
 								}}
 							/>
 							<textarea
+								id="send_textarea"
 								ref={inputRef}
 								value={input}
 								placeholder={conn === "open" ? (userName ? `以「${userName}」的身份发言…` : "输入消息…") : "等待连接…"}
@@ -2297,9 +2336,24 @@ export default function App() {
 								</button>
 							) : (
 								<button
+									id="send_but"
 									className="btn btn-send"
-									onClick={send}
-									disabled={(!input.trim() && pending.length === 0) || conn !== "open"}
+									onClick={() => {
+										// ST 程序卡常直接赋值 #send_textarea 后立刻 click #send_but。
+										// React 尚未来得及重渲染时，闭包里的 input 仍是旧值，须以 DOM 当前值直发。
+										const injected = inputRef.current?.value.trim() ?? "";
+										if (injected && injected !== input.trim() && conn === "open") {
+											setWelcome(false);
+											setAtHome(false);
+											touchVisit();
+											ws.send({ type: "prompt", text: injected });
+											setInput("");
+											setPending([]);
+											return;
+										}
+										send();
+									}}
+									disabled={conn !== "open"}
 									title="发送"
 									aria-label="发送"
 								>

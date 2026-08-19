@@ -49,11 +49,12 @@ function invalidateAfterWrite(writePath: string): void {
 		{ test: /^\/api\/mcp/, prefixes: ["/api/mcp"] },
 		{ test: /^\/api\/skills/, prefixes: ["/api/skills"] },
 		{ test: /^\/api\/memory/, prefixes: ["/api/memory"] },
-		{ test: /^\/api\/agent-/, prefixes: ["/api/agent-config", "/api/agent-profiles", "/api/models"] },
-		{ test: /^\/api\/models/, prefixes: ["/api/models", "/api/agent-config"] },
-		{ test: /^\/api\/channels/, prefixes: ["/api/models", "/api/agent-config", "/api/agent-profiles"] },
+		{ test: /^\/api\/agent-/, prefixes: ["/api/agent-config", "/api/agent-profiles", "/api/models", "/api/models/catalog"] },
+		{ test: /^\/api\/models/, prefixes: ["/api/models", "/api/models/catalog", "/api/agent-config"] },
+		{ test: /^\/api\/channels/, prefixes: ["/api/models", "/api/models/catalog", "/api/agent-config", "/api/agent-profiles"] },
 		{ test: /^\/api\/config/, prefixes: ["/api/config"] },
-		{ test: /^\/api\/backup/, prefixes: [] },
+		{ test: /^\/api\/world-profile/, prefixes: ["/api/world-profile"] },
+		{ test: /^\/api\/world-state/, prefixes: ["/api/world-state"] },
 		{ test: /^\/api\/upload/, prefixes: ["/api/uploads"] },
 	];
 	let hit = false;
@@ -133,7 +134,7 @@ export function apiGetCacheClearForPanel(panelId: string): void {
 		preset: ["/api/preset", "/api/presets"],
 		connect: ["/api/models", "/api/agent-config", "/api/agent-profiles"],
 		powers: ["/api/mcp", "/api/skills"],
-		settings: ["/api/config"],
+		settings: ["/api/config", "/api/world-profile", "/api/models/catalog"],
 		// 媒体列表挂在 GET /api/uploads 的 media 字段，无独立 /api/media
 		uploads: ["/api/uploads"],
 		worldline: ["/api/worldline"],
@@ -159,6 +160,7 @@ export function prefetchPanelApis(): void {
 		"/api/card",
 		"/api/personas",
 		"/api/config",
+		"/api/world-profile",
 		"/api/lorebooks",
 		"/api/preset",
 		"/api/presets",
@@ -166,6 +168,7 @@ export function prefetchPanelApis(): void {
 		"/api/skills",
 		"/api/mcp",
 		"/api/models",
+		"/api/models/catalog",
 		"/api/agent-config",
 		"/api/agent-profiles",
 		"/api/uploads",
@@ -209,6 +212,10 @@ export interface ModelsResponse {
 	current: CurrentModelInfo | null;
 	models: ModelInfo[];
 }
+
+export interface ModelRef { provider: string; id: string }
+export type SideModelStep = "writer" | "literaryContinuity" | "literaryDirector" | "literaryCharacter" | "literaryPersona" | "literaryWorld" | "worldProfile" | "literaryWorldFacts" | "literaryWorldAudit" | "ecologySearch" | "ecologyGlobal" | "ecologyCard" | "ecologyRuntime" | "contractDeclare" | "scribe" | "compaction" | "presetSort";
+export type StepModelOverrides = Partial<Record<SideModelStep, ModelRef>>;
 
 export interface AuthProviderInfo {
 	provider: string;
@@ -301,6 +308,12 @@ export interface RpConfigView {
 	creationMode?: "ask" | "silent";
 	/** 固定楼层压缩：每 N 个叙事轮主动压缩早期正文；0=仅被动压缩 */
 	compactEveryNTurns?: number;
+	literaryQuality?: "off" | "profile" | "guided";
+	literaryWorldEnabled?: boolean;
+	literaryEcologyEnabled?: boolean;
+	literaryProfileEveryNTurns?: number;
+	webResearchMode?: "off" | "auto" | "manual";
+	stepModels?: StepModelOverrides;
 }
 
 export interface CardResponse {
@@ -547,31 +560,6 @@ export const importCard = (file: File) =>
 			body: file,
 		},
 	);
-
-// ---------- 项目完整备份 / 恢复 ----------
-
-export const createBackup = () =>
-	api<{ ok: true; filename: string; files: number; bytes: number }>("/api/backup/create", {
-		method: "POST",
-		body: "{}",
-	});
-
-/** 导出备份包：走浏览器原生下载（携带访问 Cookie，服务器回 content-disposition） */
-export function downloadBackup(): void {
-	const a = document.createElement("a");
-	a.href = "/api/backup/download";
-	a.download = "";
-	document.body.appendChild(a);
-	a.click();
-	a.remove();
-}
-
-export const importBackup = (file: File) =>
-	api<{ ok: true; note?: string }>("/api/backup/import", {
-		method: "POST",
-		headers: { "content-type": "application/octet-stream" },
-		body: file,
-	});
 
 export function downloadJson(filename: string, data: unknown): void {
 	const blob = new Blob([JSON.stringify(data, null, "\t")], { type: "application/json" });

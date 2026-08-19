@@ -16,6 +16,7 @@ import {
 	patchLorebookFileEntry,
 	scanEntries,
 	searchEntries,
+	setLorebookEntriesEnabledByUid,
 } from "../src/lorebook.ts";
 
 const bookPath = fileURLToPath(new URL("../assets/lorebooks/Mistvale.json", import.meta.url));
@@ -37,6 +38,36 @@ test("卡内嵌格式归一化（keys/enabled/insertion_order）", () => {
 	assert.equal(entries[0].enabled, false);
 	assert.equal(entries[0].order, 42);
 	assert.equal(entries[0].comment, "t");
+});
+
+test("程序卡批量启停：按 uid 原地写 enabled/disable 并保留未知字段", () => {
+	const root = mkdtempSync(join(tmpdir(), "liyuan-lore-toggle-"));
+	const file = join(root, "book.json");
+	writeFileSync(
+		file,
+		JSON.stringify({
+			name: "测试书",
+			entries: {
+				"7": { uid: 7, key: ["A"], comment: "A", content: "alpha", disable: false, extensionField: 42 },
+				"8": { uid: 8, key: ["B"], comment: "B", content: "beta", enabled: false, disable: true },
+			},
+		}),
+		"utf8",
+	);
+	try {
+		const result = setLorebookEntriesEnabledByUid(file, new Map([[7, false], [8, true]]));
+		assert.equal(result.changed, 2);
+		assert.deepEqual(result.touchedFingerprints.sort(), [loreFingerprint("alpha"), loreFingerprint("beta")].sort());
+		const raw = JSON.parse(readFileSync(file, "utf8")) as { entries: Record<string, Record<string, unknown>> };
+		assert.equal(raw.entries["7"].enabled, false);
+		assert.equal(raw.entries["7"].disable, true);
+		assert.equal(raw.entries["7"].extensionField, 42);
+		assert.equal(raw.entries["8"].enabled, true);
+		assert.equal(raw.entries["8"].disable, false);
+		assert.deepEqual(loadLorebookFile(file).map((e) => e.enabled), [false, true]);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });
 
 test("合并去重（独立世界书与卡内嵌书内容相同）", () => {
@@ -256,39 +287,6 @@ test("patchLorebookFileEntry：改 constant/order 写回并保留其它条目", 
 		assert.equal(updated.order, 7);
 		// 文件仍是合法 JSON
 		assert.ok(JSON.parse(readFileSync(dest, "utf8")).entries);
-	} finally {
-		rmSync(dir, { recursive: true, force: true });
-	}
-});
-
-test("patchLorebookFileEntry：enabled 写回源文件（导入即关闭的条目可启用）", () => {
-	const dir = mkdtempSync(join(tmpdir(), "liyuan-lore-"));
-	try {
-		const dest = join(dir, "book.json");
-		// ST 对象 entries 格式，条目带 disable:true——导入即关闭的典型来源
-		writeFileSync(
-			dest,
-			JSON.stringify({
-				name: "book",
-				entries: {
-					"0": { uid: 0, key: ["x"], content: "c", disable: true, order: 100 },
-				},
-			}),
-			"utf8",
-		);
-		const before = loadLorebookFile(dest);
-		assert.equal(before[0].enabled, false, "源文件 disable:true 应归一化为停用");
-		const fp = loreFingerprint(before[0].content);
-		const r = patchLorebookFileEntry(dest, fp, { enabled: true });
-		assert.ok(r);
-		assert.equal(r.entry.enabled, true);
-		const after = loadLorebookFile(dest);
-		assert.equal(after[0].enabled, true, "写回后应可启用");
-		const raw = JSON.parse(readFileSync(dest, "utf8")) as {
-			entries: Record<string, { disable?: boolean; enabled?: boolean }>;
-		};
-		assert.equal(raw.entries["0"].disable, false, "ST 字段 disable 应翻为 false");
-		assert.equal(raw.entries["0"].enabled, true, "V2 字段 enabled 应翻为 true");
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}

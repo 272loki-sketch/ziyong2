@@ -1,0 +1,338 @@
+# Liyuan VPS 部署与运维
+
+本文档记录 Liyuan 在 VPS 上的生产部署信息、连接方式、服务管理、更新步骤和故障排查。
+
+## 1. 环境信息
+
+| 项目 | 值 |
+|---|---|
+| VPS | `47.98.210.60` |
+| SSH 用户 | `root` |
+| SSH 端口 | `44272` |
+| SSH 私钥 | `C:\Users\86186\Downloads\miyao\47.98.210.60_id_ed25519` |
+| 操作系统 | Alibaba Cloud Linux 8（kernel 5.10） |
+| Node.js | `/opt/node22/bin/node`（v22.23.2，独立安装，不依赖系统 npm） |
+| 服务管理 | systemd `liyuan.service` |
+| 源码目录 | `/root/Liyuan` |
+| Agent 数据目录 | `/var/lib/liyuan/agent` |
+| 应用内部端口 | `127.0.0.1:7620`（仅本机回环，不暴露公网） |
+| 公网入口 | `https://47.98.210.60:8788`（Nginx + 自签证书） |
+| 上游模型接口 | `https://new.00272.icu/v1` |
+| 上游模型 | `deepseek-v4-flash` |
+| 搜索代理 | `http://127.0.0.1:7890`（VPS 宿主机 mihomo，仅联网查证使用） |
+
+## 2. SSH 连接
+
+Windows PowerShell 示例：
+
+```powershell
+ssh -i "C:\Users\86186\Downloads\miyao\47.98.210.60_id_ed25519" -p 44272 root@47.98.210.60
+```
+
+注意事项：
+
+- 不要把私钥内容、API key、Basic Auth 密码写入代码、日志或文档提交记录。
+- VPS 上下载东西慢时，使用宿主机 `7890` 代理，例如：
+
+```bash
+curl -x http://127.0.0.1:7890 -fsSL https://nodejs.org/dist/...
+```
+
+## 3. 部署结构
+
+```text
+/root/Liyuan/
+├── server/                 Node 服务端
+├── src/                    领域层
+├── web/dist/               预构建前端
+├── node_modules/           生产依赖
+├── skills/                 内置文学工作流 Skill（随 GitHub 更新）
+├── .liyuan-stage-skills/   用户在面板编辑过的 Skill 覆盖（gitignore）
+├── liyuan.config.json      项目配置（角色卡/世界书/文学增强等）
+├── liyuan.agent.json       模型配置（含 API key，权限 600）
+└── deploy/
+    ├── nginx-8788.conf     Nginx 8788 HTTPS 虚拟主机模板
+    └── VPS-OPERATIONS.md   本文档
+
+/var/lib/liyuan/agent       会话、模型缓存、认证等运行时数据
+/opt/node22                 独立安装的 Node.js 22
+/www/server/panel/vhost/nginx/liyuan-8788.conf  实际生效的 Nginx 配置
+/www/server/nginx/conf/htpasswd/liyuan-8788      Basic Auth 凭据文件
+/www/server/panel/vhost/cert/47.98.210.60/       自签证书（与 Luker 共用）
+```
+
+## 4. 访问方式
+
+```text
+https://47.98.210.60:8788
+```
+
+Nginx 层配置了 Basic Auth：
+
+| 项目 | 值 |
+|---|---|
+| 账号 | `00272` |
+| 密码 | `z123000**` |
+
+修改 Basic Auth 凭据：
+
+```bash
+htpasswd -cb /www/server/nginx/conf/htpasswd/liyuan-8788 <账号> <密码>
+chown root:www /www/server/nginx/conf/htpasswd/liyuan-8788
+chmod 640 /www/server/nginx/conf/htpasswd/liyuan-8788
+/etc/init.d/nginx reload
+```
+
+如果 `htpasswd` 不可用，先安装：`dnf install -y httpd-tools`。
+
+浏览器访问自签证书会提示风险，需要手动继续访问。证书 SAN 已包含 `47.98.210.60`。
+
+建议在 Liyuan 网页“设置”里再配置一层应用访问密码，避免仅依赖 Nginx Basic Auth。
+
+## 5. 服务管理
+
+```bash
+# 查看状态
+systemctl status liyuan
+
+# 查看日志
+journalctl -u liyuan -n 100 --no-pager
+journalctl -u liyuan --since "-10 minutes" --no-pager
+
+# 重启
+systemctl restart liyuan
+
+# 启动 / 停止
+systemctl start liyuan
+systemctl stop liyuan
+
+# 开机自启
+systemctl enable liyuan
+systemctl disable liyuan
+```
+
+服务单元位置：`/etc/systemd/system/liyuan.service`
+
+```ini
+[Service]
+Type=simple
+User=liyuan
+Group=liyuan
+WorkingDirectory=/root/Liyuan
+Environment=NODE_ENV=production
+Environment=HOST=127.0.0.1
+Environment=PORT=7620
+Environment=LIYUAN_CODING_AGENT_DIR=/var/lib/liyuan/agent
+Environment=LIYUAN_WEB_RESEARCH_PROXY=http://127.0.0.1:7890
+Environment=NO_PROXY=localhost,127.0.0.1
+ExecStart=/opt/node22/bin/node server/main.ts
+Restart=always
+RestartSec=5
+```
+
+## 6. 健康检查
+
+```bash
+# 本机直连（跳过 Nginx）
+curl -fsS http://127.0.0.1:7620/healthz
+
+# 通过公网入口
+curl -k -u '00272:z123000**' -sS https://127.0.0.1:8788/healthz
+```
+
+正常返回：
+
+```json
+{"ok":true,"sessionId":"...","char":"青梧"}
+```
+
+## 7. 模型配置
+
+生产模型配置位于 `/root/Liyuan/liyuan.agent.json`（权限 `600`），内容迁移自 Luker Pi 工作流：
+
+```json
+{
+  "providers": {
+    "luker-pi": {
+      "baseUrl": "https://new.00272.icu/v1",
+      "api": "openai-completions",
+      "apiKey": "…",
+      "models": [{
+        "id": "deepseek-v4-flash",
+        "reasoning": false,
+        "contextWindow": 410000,
+        "maxTokens": 131072
+      }]
+    }
+  },
+  "defaultProvider": "luker-pi",
+  "defaultModel": "deepseek-v4-flash"
+}
+```
+
+修改后重启服务：
+
+```bash
+systemctl restart liyuan
+```
+
+也可以在网页“连接”面板里修改，即时生效。
+
+## 8. 证书
+
+Liyuan 复用了 Luker 的自签证书：
+
+```text
+证书：/www/server/panel/vhost/cert/47.98.210.60/fullchain.pem
+私钥：/www/server/panel/vhost/cert/47.98.210.60/privkey.pem
+SAN：47.98.210.60
+有效期：2026-02-25 至 2027-02-25
+```
+
+Nginx 8788 虚拟主机配置：
+
+```text
+/www/server/panel/vhost/nginx/liyuan-8788.conf
+```
+
+修改证书或 Nginx 配置后：
+
+```bash
+nginx -t && /etc/init.d/nginx reload
+```
+
+## 9. 联网查证与代理
+
+只有 `web_research`（按需联网查证工具）真正发起外部搜索请求时才使用代理，模型调用、文学画像、场记、压缩、预设分拣都不走该代理。
+
+```text
+LIYUAN_WEB_RESEARCH_PROXY=http://127.0.0.1:7890
+NO_PROXY=localhost,127.0.0.1
+```
+
+- 默认代理是宿主机 mihomo 的 `7890` 端口。
+- 设置 `LIYUAN_WEB_RESEARCH_PROXY=direct` 可改为直连。
+- 无公开作品出处的私人角色名会在发网前被拒绝。
+
+修改代理需编辑 `/etc/systemd/system/liyuan.service` 的 `Environment` 并重启。
+
+## 10. 数据与备份
+
+需要备份的内容：
+
+```text
+/root/Liyuan/liyuan.config.json      项目配置
+/root/Liyuan/liyuan.agent.json       模型配置（含 key）
+/root/Liyuan/.liyuan-*/              运行时数据
+/root/Liyuan/.liyuan-stage-skills/   Skill 用户覆盖（编辑过的，别丢）
+/root/Liyuan/skills/                 内置 Skill（随仓库，可再拉回）
+/var/lib/liyuan/agent                会话、认证、模型缓存
+/root/Liyuan/assets/cards            用户导入的角色卡
+/root/Liyuan/assets/lorebooks        用户挂载的世界书
+```
+
+一键备份示例：
+
+```bash
+TS=$(date +%Y%m%d-%H%M%S)
+mkdir -p /root/Liyuan-backups/$TS
+cp -a /root/Liyuan/liyuan.config.json /root/Liyuan/liyuan.agent.json /root/Liyuan-backups/$TS/
+tar -czf /root/Liyuan-backups/$TS/agent-data.tgz -C /var/lib/liyuan agent
+```
+
+## 11. 更新部署
+
+部署前：
+
+1. 确认没有正在进行的生成（看日志或健康检查）。
+2. 本地跑 `npm test`、`npm run web:build`。
+3. 备份 VPS 当前源码与配置。
+
+示例（本地打 tar 上传）：
+
+```powershell
+tar -czf "C:\Users\86186\AppData\Local\Temp\opencode\liyuan-update.tgz" --exclude=.git --exclude=node_modules --exclude=web/node_modules --exclude=data --exclude=liyuan.config.json --exclude=liyuan.agent.json -C "D:\zhuce\_non_reg" Liyuan
+scp -i "C:\Users\86186\Downloads\miyao\47.98.210.60_id_ed25519" -P 44272 "C:\Users\86186\AppData\Local\Temp\opencode\liyuan-update.tgz" root@47.98.210.60:/root/
+```
+
+VPS 上解压并重启：
+
+```bash
+cd /root
+cp -a /root/Liyuan /root/Liyuan-backups/$(date +%Y%m%d-%H%M%S)
+tar -xzf /root/liyuan-update.tgz -C /root
+chown -R liyuan:liyuan /root/Liyuan
+cd /root/Liyuan
+PATH=/opt/node22/bin:$PATH HTTPS_PROXY=http://127.0.0.1:7890 HTTP_PROXY=http://127.0.0.1:7890 npm ci --omit=dev --no-audit --no-fund
+systemctl restart liyuan
+```
+
+更新时不要覆盖：
+
+```text
+/root/Liyuan/liyuan.config.json
+/root/Liyuan/liyuan.agent.json
+/root/Liyuan/.liyuan-*/
+/root/Liyuan/.liyuan-stage-skills/
+/var/lib/liyuan/agent
+```
+
+## 12. 故障排查
+
+### 服务起不来
+
+```bash
+systemctl status liyuan
+journalctl -u liyuan -n 100 --no-pager
+```
+
+常见原因：
+
+- `liyuan.agent.json` 权限过宽或 JSON 非法：`chmod 600`、`node -e "JSON.parse(require('fs').readFileSync('/root/Liyuan/liyuan.agent.json','utf8'))"`
+- 端口被占：`ss -lntp | grep :7620`
+
+### 外部访问 401
+
+- 确认 Basic Auth 凭据正确。
+- 确认 htpasswd 文件权限：`chown root:www ... && chmod 640 ...`
+
+### 外部访问 502/504
+
+- 确认 `liyuan.service` 在运行。
+- 确认 `curl -fsS http://127.0.0.1:7620/healthz` 正常。
+- 查看 `/www/wwwlogs/liyuan-8788.error.log`。
+
+### 联网查证失败
+
+- 确认宿主机 `7890` 代理可用：`curl -x http://127.0.0.1:7890 -fsSL https://duckduckgo.com`
+- 检查服务环境变量：`systemctl show liyuan | grep Environment`
+
+### 模型生成失败
+
+- 确认 `liyuan.agent.json` 里的接口、key、模型名正确。
+- 在网页“连接”面板测试连接。
+- 查看服务日志是否有 provider 错误。
+
+## 13. 回滚
+
+保留旧源码的备份目录 ` /root/Liyuan-backups/<时间戳>`：
+
+```bash
+cd /root
+systemctl stop liyuan
+cp -a /root/Liyuan /root/Liyuan-prev-failed
+cp -a /root/Liyuan-backups/<时间戳>/. /root/Liyuan/
+chown -R liyuan:liyuan /root/Liyuan
+systemctl start liyuan
+```
+
+数据（`/var/lib/liyuan/agent`、`.liyuan-*`）不回滚，保留最新状态；如需一并回退，从对应备份恢复。
+
+## 14. 相关文档
+
+```text
+D:\zhuce\_non_reg\Liyuan\README.md                      项目介绍
+D:\zhuce\_non_reg\Liyuan\docs\STANDALONE-INTEGRATION-BASELINE.md  脱离 Luker 整合基线
+D:\zhuce\_non_reg\Liyuan\deploy\README.md               官方部署说明
+D:\zhuce\_non_reg\Liyuan\deploy\VPS-OPERATIONS.md       本文档
+```

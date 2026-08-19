@@ -99,3 +99,9 @@ test("inventory：全字符串数组不产生警告（不误报）", () => {
 	const r = applyPatch(defaultState(), { inventory: ["猎刀", "草药"] });
 	assert.deepEqual(r.warnings, []);
 });
+
+test("日历仍是世界投影，不能作为第二时间权威写入 rp-state", () => {
+	const result = applyPatch(defaultState(), { calendar: { currentDate: "2015-04-06" } } as never);
+	assert.equal("calendar" in result.state, false);
+	assert.match(result.warnings.join("；"), /calendar/);
+});

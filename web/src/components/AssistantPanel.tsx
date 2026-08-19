@@ -12,6 +12,7 @@ import { apiGet, type ModelsResponse } from "../api.ts";
 import type { AssistantModelInfo, AssistantMsg, AssistantSessionInfo, WireActivity } from "../wire.ts";
 import { LiveSteps, RichContent, ThinkingBlock, ZoomImg } from "./Messages.tsx";
 import { IconPlus, IconSend, IconStop, IconTrash } from "./icons.tsx";
+import { usePanelData } from "./kit.tsx";
 
 /** 助手交付的媒体（show_media）：图片走 lightbox，音视频走原生播放器 */
 function AsstMedia({ media }: { media: NonNullable<AssistantMsg["media"]> }) {
@@ -165,23 +166,11 @@ export function AssistantPanel({
 	onPickModel,
 }: AssistantPanelProps) {
 	const [input, setInput] = useState("");
-	const [models, setModels] = useState<ModelsResponse | null>(null);
+	const modelData = usePanelData(() => apiGet<ModelsResponse>("/api/models/catalog"), { cacheKey: "/api/models/catalog", watchModels: true });
+	const models = modelData.data;
 	const [histOpen, setHistOpen] = useState(false);
 	const listRef = useRef<HTMLDivElement>(null);
 	const stickRef = useRef(true);
-
-	// 模型清单：打开面板拉一次（选择器数据；失败静默，选择器只剩「跟随」）
-	useEffect(() => {
-		let alive = true;
-		apiGet<ModelsResponse>("/api/models")
-			.then((r) => {
-				if (alive) setModels(r);
-			})
-			.catch(() => {});
-		return () => {
-			alive = false;
-		};
-	}, []);
 
 	// 打开面板时拉一次助手历史（按当前卡）
 	useEffect(() => {

@@ -17,11 +17,19 @@ export const PanelRefreshContext = createContext(0);
 /** watchAgent 面板额外订阅的外部 bump（与 agentTick 正交） */
 let watchBumpEpoch = 0;
 const watchBumpListeners = new Set<(n: number) => void>();
+let modelCatalogEpoch = 0;
+const modelCatalogListeners = new Set<(n: number) => void>();
 
 /** 通知所有 watchAgent 面板重拉数据（导入挂载世界书、外部写资产后调用） */
 export function bumpWatchPanels(): void {
 	watchBumpEpoch += 1;
 	for (const l of watchBumpListeners) l(watchBumpEpoch);
+}
+
+/** 连接面板修改模型后，让设置/助手等模型选择器立即重拉同一 runtime catalog。 */
+export function bumpModelCatalog(): void {
+	modelCatalogEpoch += 1;
+	for (const listener of modelCatalogListeners) listener(modelCatalogEpoch);
 }
 
 export interface PanelData<T> {
@@ -39,7 +47,7 @@ export interface PanelData<T> {
  */
 export function usePanelData<T>(
 	loader: () => Promise<T>,
-	opts?: { watchAgent?: boolean; /** 与 apiGet 路径一致，用于同步水合 */ cacheKey?: string },
+	opts?: { watchAgent?: boolean; watchModels?: boolean; /** 与 apiGet 路径一致，用于同步水合 */ cacheKey?: string },
 ): PanelData<T> {
 	const cacheKey = opts?.cacheKey;
 	const seeded = cacheKey ? apiGetPeek<T>(cacheKey) : null;
@@ -48,8 +56,9 @@ export function usePanelData<T>(
 	const [loading, setLoading] = useState(() => seeded == null);
 	const [tick, setTick] = useState(0);
 	const [watchBump, setWatchBump] = useState(0);
+	const [modelBump, setModelBump] = useState(0);
 	const agentTick = useContext(PanelRefreshContext);
-	const effectiveAgentTick = opts?.watchAgent ? agentTick + watchBump : 0;
+	const effectiveAgentTick = (opts?.watchAgent ? agentTick + watchBump : 0) + (opts?.watchModels ? modelBump : 0);
 	const hasDataRef = useRef(seeded != null);
 	const loaderRef = useRef(loader);
 	loaderRef.current = loader;
@@ -62,6 +71,12 @@ export function usePanelData<T>(
 			watchBumpListeners.delete(onBump);
 		};
 	}, [opts?.watchAgent]);
+	useEffect(() => {
+		if (!opts?.watchModels) return;
+		const onBump = (n: number) => setModelBump(n);
+		modelCatalogListeners.add(onBump);
+		return () => { modelCatalogListeners.delete(onBump); };
+	}, [opts?.watchModels]);
 
 	useEffect(() => {
 		let alive = true;

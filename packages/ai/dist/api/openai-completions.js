@@ -389,7 +389,9 @@ export const streamSimple = (model, context, options) => {
     getClientApiKey(model.provider, options?.apiKey, options?.headers);
     const base = buildBaseOptions(model, context, options, options?.apiKey);
     const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
-    const reasoningEffort = clampedReasoning === "off" ? undefined : clampedReasoning;
+    // 只有端点声明支持 reasoning_effort 时才发送；否则某些中转在携带 function tools
+    // 时会拒绝 reasoning_effort 字段（8/19 实测 gpt-5.6-sol / gpt-5.6-luna）。
+    const reasoningEffort = clampedReasoning === "off" || clampedReasoning === undefined || !getCompat(model).supportsReasoningEffort ? undefined : clampedReasoning;
     const toolChoice = options?.toolChoice;
     return stream(model, context, {
         ...base,
@@ -553,12 +555,6 @@ function buildParams(model, context, options, compat = getCompat(model), cacheRe
     else if (options?.reasoningEffort && model.reasoning && compat.supportsReasoningEffort) {
         // OpenAI-style reasoning_effort
         params.reasoning_effort = model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort;
-    }
-    else if (!options?.reasoningEffort && model.reasoning && compat.supportsReasoningEffort) {
-        const offValue = model.thinkingLevelMap?.off;
-        if (typeof offValue === "string") {
-            params.reasoning_effort = offValue;
-        }
     }
     // OpenRouter provider routing preferences
     if (model.compat?.openRouterRouting) {
@@ -983,6 +979,7 @@ function detectCompat(model) {
     const isNvidia = provider === "nvidia" || baseUrl.includes("integrate.api.nvidia.com");
     const isAntLing = provider === "ant-ling" || baseUrl.includes("api.ant-ling.com");
     const isNonStandard = isNvidia ||
+        provider === "hajimi" ||
         provider === "cerebras" ||
         baseUrl.includes("cerebras.ai") ||
         provider === "xai" ||

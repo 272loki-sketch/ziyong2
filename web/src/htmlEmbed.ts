@@ -13,6 +13,43 @@ export type TextPart =
 /** 标准容器标签白名单:皮肤/界面产物以它们开头;自定义标签(状态栏族)绝不在此列 */
 const BLOCK_TAGS = /^(div|section|article|table|figure|details|style)$/i;
 
+/** 可选注释 + style/script/link + 顶层容器组成一份皮肤 fragment。 */
+function claimAssetFragment(text: string): { start: number; end: number; html: string } | null {
+	const lineStart = /^(?:[ \t]*<!--[\s\S]*?--!?>\s*)?[ \t]*<(?:style|script|link)\b/im.exec(text);
+	if (!lineStart) return null;
+	let pos = lineStart.index;
+	const trivia = /^(?:\s|<!--[\s\S]*?--!?>)*/.exec(text.slice(pos));
+	if (trivia) pos += trivia[0].length;
+	let sawAsset = false;
+	for (;;) {
+		const style = /^<style\b[^>]*>[\s\S]*?<\/style\s*>/i.exec(text.slice(pos));
+		const script = /^<script\b[^>]*>[\s\S]*?<\/script\s*>/i.exec(text.slice(pos));
+		const link = /^<link\b[^>]*>/i.exec(text.slice(pos));
+		const asset = style ?? script ?? link;
+		if (!asset) break;
+		sawAsset = true;
+		pos += asset[0].length;
+		const nextTrivia = /^(?:\s|<!--[\s\S]*?--!?>)*/.exec(text.slice(pos));
+		if (nextTrivia) pos += nextTrivia[0].length;
+	}
+	if (!sawAsset) return null;
+	const open = /^<(div|section|article|main|table|figure|details)\b[^>]*>/i.exec(text.slice(pos));
+	if (!open) return null;
+	const tag = open[1];
+	const tagRe = new RegExp(`<${tag}\\b[^>]*>|<\\/${tag}\\s*>`, "gi");
+	tagRe.lastIndex = pos;
+	let depth = 0;
+	let token: RegExpExecArray | null;
+	while ((token = tagRe.exec(text))) {
+		depth += /^<\//.test(token[0]) ? -1 : 1;
+		if (depth === 0) {
+			const end = tagRe.lastIndex;
+			return { start: lineStart.index, end, html: text.slice(lineStart.index, end).trim() };
+		}
+	}
+	return null;
+}
+
 /** 文档内是否含可执行脚本（决定 HtmlFrame scripts 沙箱） */
 export function htmlLooksInteractive(html: string): boolean {
 	return /<script[\s>]/i.test(html) || /\bon[a-z]+\s*=/i.test(html);
@@ -126,6 +163,20 @@ export function claimFencedHtmlDocument(text: string): { html: string; scripts: 
 
 /** 在纯文本段中切出行首起始、深度配平的标准 HTML 块 */
 function splitTopLevelBlocks(text: string): TextPart[] {
+	const leadingAsset = claimAssetFragment(text);
+	if (leadingAsset) {
+		const firstContainer = /^[ \t]*<(?:div|section|article|table|figure|details)\b/im.exec(text);
+		// style/script 资产位于第一个容器之前时，优先把资产与随后的容器捏成同一帧。
+		if (!firstContainer || leadingAsset.start < firstContainer.index) {
+			const out: TextPart[] = [];
+			const before = text.slice(0, leadingAsset.start);
+			if (before.trim()) out.push({ kind: "text", text: before });
+			out.push({ kind: "html", html: leadingAsset.html, scripts: htmlLooksInteractive(leadingAsset.html) });
+			const after = text.slice(leadingAsset.end);
+			if (after.trim()) out.push(...splitTopLevelBlocks(after));
+			return out;
+		}
+	}
 	const openRe = /^[ \t]*<(\w+)(\s[^>]*)?>/gm;
 	const parts: TextPart[] = [];
 	let last = 0;
@@ -133,6 +184,32 @@ function splitTopLevelBlocks(text: string): TextPart[] {
 	while ((m = openRe.exec(text)) !== null) {
 		const tag = m[1];
 		if (!BLOCK_TAGS.test(tag)) continue;
+		// 外层容器本身已包住 style/script 时必须优先认领；否则先找到内层 style，
+		// 会把外层开标签和 CSS 当成普通正文。
+		if (/^(div|section|article|table|figure|details)$/i.test(tag)) {
+			const candidateEnd = (() => {
+				const candidateRe = new RegExp(`<(/?)${tag}(?:\\s[^>]*)?>`, "gi");
+				candidateRe.lastIndex = m!.index;
+				let candidateDepth = 0;
+				let candidate: RegExpExecArray | null;
+				while ((candidate = candidateRe.exec(text))) {
+					candidateDepth += candidate[1] ? -1 : 1;
+					if (candidateDepth === 0) return candidateRe.lastIndex;
+				}
+				return -1;
+			})();
+			if (candidateEnd > 0) {
+				const candidate = text.slice(m.index, candidateEnd);
+				if (/<(?:style|script)\b[^>]*>[\s\S]*?<\/(?:style|script)\s*>/i.test(candidate)) {
+					const before = text.slice(last, m.index);
+					if (before.trim()) parts.push({ kind: "text", text: before });
+					parts.push({ kind: "html", html: candidate.trim(), scripts: htmlLooksInteractive(candidate) });
+					last = candidateEnd;
+					openRe.lastIndex = candidateEnd;
+					continue;
+				}
+			}
+		}
 		// 从开标签起做同名深度配平
 		const tagRe = new RegExp(`<(/?)${tag}(?:\\s[^>]*)?>`, "gi");
 		tagRe.lastIndex = m.index;
@@ -152,6 +229,18 @@ function splitTopLevelBlocks(text: string): TextPart[] {
 		parts.push({ kind: "html", html: text.slice(m.index, end).trim(), scripts: false });
 		last = end;
 		openRe.lastIndex = end;
+	}
+	if (parts.length === 0) {
+		const asset = claimAssetFragment(text);
+		if (asset) {
+			const out: TextPart[] = [];
+			const before = text.slice(0, asset.start);
+			if (before.trim()) out.push({ kind: "text", text: before });
+			out.push({ kind: "html", html: asset.html, scripts: htmlLooksInteractive(asset.html) });
+			const after = text.slice(asset.end);
+			if (after.trim()) out.push(...splitTopLevelBlocks(after));
+			return out;
+		}
 	}
 	if (parts.length === 0) return [{ kind: "text", text }];
 	const rest = text.slice(last);

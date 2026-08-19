@@ -4,7 +4,7 @@
  * 对标 Claude Code 的 Read/Grep：动笔前查资料，不靠脑补。
  * 世界书族（lorebook_*）与向量库族（memory_*）已迁入统一工具层
  * （`src/tools/`，PLAN-RP-TOOLING M-D1~M-D3）；本模块只剩 world_state_get
- * 与 skill_read，外加统一层的装配与派发入口。
+ * 外加统一层的装配与派发入口。
  *
  * 封顶 MAX_LOOKUPS 次/拍：模型输出正文即视为动笔，工具循环自然结束。
  *
@@ -46,7 +46,6 @@ export interface StageToolDeps extends LoreDeps, MemoryDeps, CardDeps, Worldline
 	/** 世界状态账本（getState 必在；formatState 用于展示） */
 	getState: () => WorldState;
 	formatState: (s: WorldState) => string;
-	/** skill 内容解析（名称制）：skills/ 文件优先，拆层 D/E 进口包兜底；未注入＝无 skill_read 工具 */
 	getSkill?: (name: string) => string | undefined;
 }
 
@@ -68,12 +67,6 @@ export function stageTools(language: string, deps?: StageToolDeps): StageTool[] 
 	];
 }
 
-/**
- * skill 读取工具（M-R2 §4.C，writing_guide 名称制改造）：按名读取 skill 内容。
- * 来源两层：skills/ 文件（一等素材位）优先，拆层 D/E 进口包（topic 制遗产）兜底。
- * 关键性质：工具结果**不落历史**（rebuildHistory 只留定稿正文）——内容只活在当拍，
- * 谢幕即蒸发＝按需加载、用完即走。names 为空时不要注册本工具（不凭空点名）。
- */
 export function skillReadTool(language: string, names: string[]): StageTool {
 	return {
 		name: "skill_read",
@@ -90,7 +83,7 @@ export function skillReadTool(language: string, names: string[]): StageTool {
  * 写侧五件（M-A 三件 + M-B 的 draft_edit/read/search）。
  * schema 在此，执行在 workspace.ts（工作区状态归引擎单拍持有）。
  */
-export function writeTools(language: string): StageTool[] {
+export function writeTools(language: string, maxPlanSteps = 3): StageTool[] {
 	return [
 		{
 			name: "beat_plan",
@@ -107,6 +100,7 @@ export function writeTools(language: string): StageTool[] {
 						type: "array",
 						description: "本拍的步骤清单，每条一句话路标（不超过 60 字）",
 						items: { ...STR, description: "一步：一个动作或一个转折" },
+						maxItems: maxPlanSteps,
 					},
 				},
 				required: ["steps"],
@@ -216,8 +210,7 @@ export function writeTools(language: string): StageTool[] {
 				"提交世界状态账本补丁（合并语义）：time/location 字符串整体替换；characters 按角色名合并字段" +
 				"（affinity 数值/status/notes，传 null 删除该角色）；flags 按键合并（null 删除）；" +
 				"inventory/plot_threads 传**字符串数组**整体替换（如 [\"补气丹（已服用）\"]，元素不能是对象）。" +
-				"本拍剧情改变了世界（时间流逝/移动/关系变化/" +
-				"获得失去物品/剧情推进）就在定稿前提交——你是唯一知道现场发生了什么的人，不提交账本就会漂移。",
+				"仅在 draft_write 或 draft_seal 已封笔后受理。",
 			parameters: {
 				type: "object",
 				properties: {
@@ -281,17 +274,12 @@ export async function runStageTool(
 	// 统一工具层优先（PLAN-RP-TOOLING M-D1/M-D3）：世界书族与向量库族由那一份实现作答
 	const unified = await runUnifiedStageTool(deps, name, args, language);
 	if (unified) return { text: unified.text, ...(unified.activity ? { activity: unified.activity } : {}) };
-
 	if (name === "skill_read") {
 		const skillName = typeof args.name === "string" ? args.name.trim() : "";
 		const text = skillName ? deps.getSkill?.(skillName) : undefined;
-		if (!text) {
-			return { text: `没有名为「${skillName}」的 skill。按已有理解直接动笔即可。` };
-		}
-		return {
-			text: `【skill·${skillName}】\n\n${text}`,
-			activity: `读 skill「${skillName}」`,
-		};
+		return text
+			? { text: `【skill·${skillName}】\n\n${text}`, activity: `读 skill「${skillName}」` }
+			: { text: `没有名为「${skillName}」的 skill。按已有理解直接动笔即可。` };
 	}
 
 	if (name === "world_state_get") {

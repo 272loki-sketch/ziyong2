@@ -5,9 +5,11 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { api, apiGet, apiPut, createBackup, downloadBackup, importBackup, type RpConfigView } from "../api.ts";
+import { api, apiGet, apiPut, type ModelRef, type ModelsResponse, type RpConfigView, type SideModelStep, type StepModelOverrides } from "../api.ts";
 import { getTheme, setTheme, type ThemeMode } from "../theme.ts";
-import { ConfirmButton, PanelStatus, SliderField, Toggle, useAction, usePanelData } from "./kit.tsx";
+import { PanelStatus, SliderField, Toggle, useAction, usePanelData } from "./kit.tsx";
+import { ModelPlugSelector } from "./ModelPlugSelector.tsx";
+import { WorldProfileSection } from "./WorldProfileSection.tsx";
 
 type MemoryStoreStats = {
 	id: string;
@@ -33,6 +35,47 @@ type MemoryStatus = {
 	/** 当前对话作用域（角色卡 + 会话） */
 	scope?: { sessionId: string; card?: string; scopeId: string };
 };
+
+type NovelAiStatus = {
+	config: {
+		enabled: boolean; baseUrl: string; apiKey: string; apiKeyConfigured: boolean;
+		model: string; sampler: string; scheduler: string; steps: number; scale: number;
+		cfgRescale: number; width: number; height: number; positivePrefix: string;
+		positiveSuffix: string; negativePrompt: string;
+	};
+};
+
+function NovelAiSection({ toast }: { toast: (level: "info" | "warning" | "error", text: string) => void }) {
+	const { data, error, loading, reload } = usePanelData(() => apiGet<NovelAiStatus>("/api/novelai"), { cacheKey: "/api/novelai" });
+	const { busy, run } = useAction(toast);
+	const [form, setForm] = useState<NovelAiStatus["config"] | null>(null);
+	useEffect(() => { if (data) setForm(data.config); }, [data]);
+	if (loading && !form) return <section className="sp-section"><h4>NovelAI 生图</h4><div className="sp-empty">读取中…</div></section>;
+	if (error || !form) return <section className="sp-section"><h4>NovelAI 生图</h4><div className="sp-empty">{error || "配置不可用"}</div></section>;
+	const set = (patch: Partial<NovelAiStatus["config"]>) => setForm((current) => current ? { ...current, ...patch } : current);
+	const save = () => run(async () => {
+		await apiPut("/api/novelai", form);
+		await reload();
+	}, "NovelAI 配置已保存");
+	return <section className="sp-section">
+		<h4>NovelAI 生图</h4>
+		<div className="toggle-row"><span>启用剧情图片按钮</span><Toggle checked={form.enabled} onChange={(enabled) => set({ enabled })} /></div>
+		<label className="field-label">API Key</label>
+		<input className="field-input" type="password" value={form.apiKey === "••••••••" ? "" : form.apiKey} placeholder={form.apiKeyConfigured ? "已配置，留空保持不变" : "NovelAI API Key"} onChange={(event) => set({ apiKey: event.target.value })} />
+		<label className="field-label">接口地址</label><input className="field-input" value={form.baseUrl} onChange={(event) => set({ baseUrl: event.target.value })} />
+		<label className="field-label">模型</label><input className="field-input" value={form.model} onChange={(event) => set({ model: event.target.value })} />
+		<div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
+			<label>宽度<input className="field-input" type="number" step="64" value={form.width} onChange={(event) => set({ width: Number(event.target.value) })} /></label>
+			<label>高度<input className="field-input" type="number" step="64" value={form.height} onChange={(event) => set({ height: Number(event.target.value) })} /></label>
+			<label>步数<input className="field-input" type="number" value={form.steps} onChange={(event) => set({ steps: Number(event.target.value) })} /></label>
+			<label>CFG<input className="field-input" type="number" step="0.1" value={form.scale} onChange={(event) => set({ scale: Number(event.target.value) })} /></label>
+		</div>
+		<label className="field-label">固定正面提示词</label><textarea className="field-input" rows={3} value={form.positivePrefix} onChange={(event) => set({ positivePrefix: event.target.value })} />
+		<label className="field-label">固定负面提示词</label><textarea className="field-input" rows={3} value={form.negativePrompt} onChange={(event) => set({ negativePrompt: event.target.value })} />
+		<div className="field-hint">已从智慧姬迁移。模型回复中的 &lt;image&gt; 会显示为按钮，点击后才调用 API 和扣点。</div>
+		<button className="drawer-btn primary" disabled={busy} onClick={save}>保存 NovelAI 配置</button>
+	</section>;
+}
 
 type MemoryChunkRow = {
 	id: string;
@@ -278,6 +321,12 @@ function MemorySection({ toast }: { toast: (level: "info" | "warning" | "error",
 			else toast("info", `重向量化完成：${n}/${t} 条（${r.mode === "cloud" ? r.model : "本地"}）`);
 		});
 
+	const retryLatest = () =>
+		run(async () => {
+			await api("/api/memory/retry-latest", { method: "POST", body: "{}" });
+			reload();
+		}, "最近一轮已重新向量化入库");
+
 	const onImportFile = async (file: File) => {
 		const text = await file.text();
 		await run(async () => {
@@ -404,6 +453,9 @@ function MemorySection({ toast }: { toast: (level: "info" | "warning" | "error",
 							onClick={() => void reembedAll()}
 						>
 							按当前模式重向量化
+						</button>
+						<button type="button" className="drawer-btn" disabled={busy || !enabled || !narrativeOn} onClick={() => void retryLatest()}>
+							重试最近一轮入库
 						</button>
 					</div>
 
@@ -643,78 +695,9 @@ function AccessSection({ toast }: { toast: (level: "info" | "warning" | "error",
 	);
 }
 
-/** 项目完整备份：本机备份 / 导出下载 / 导入恢复（恢复覆盖当前项目，先留恢复前快照） */
-function BackupSection({ toast }: { toast: (level: "info" | "warning" | "error", text: string) => void }) {
-	const { busy, run } = useAction(toast);
-	const fileRef = useRef<HTMLInputElement>(null);
-	const [pendingFile, setPendingFile] = useState<File | null>(null);
-
-	const onBackup = () =>
-		run(async () => {
-			const r = await createBackup();
-			toast("info", `已在本机备份 ${r.files} 个文件（.liyuan-cache/backup/${r.filename}）`);
-		});
-
-	const onPickImport = (e: React.ChangeEvent<HTMLInputElement>) => {
-		const f = e.target.files?.[0];
-		if (f) setPendingFile(f);
-		if (fileRef.current) fileRef.current.value = "";
-	};
-
-	const doImport = () =>
-		run(async () => {
-			if (!pendingFile) return;
-			const r = await importBackup(pendingFile);
-			setPendingFile(null);
-			toast("info", r.note || "已导入，正在重启应用…");
-		});
-
-	return (
-		<section className="sp-section">
-			<h4>备份与恢复</h4>
-			<div className="field-hint">
-				完整备份本项目的角色卡、世界书、预设、会话、向量记忆、面板、知识库、素材与配置（含 API
-				密钥与访问密码，请妥善保管）。恢复会<strong>整体覆盖</strong>当前项目，并自动先留一份恢复前快照。
-			</div>
-			<div className="access-actions" style={{ flexWrap: "wrap" }}>
-				<button type="button" className="drawer-btn" disabled={busy} onClick={onBackup}>
-					备份
-				</button>
-				<button type="button" className="drawer-btn" disabled={busy} onClick={() => downloadBackup()}>
-					导出
-				</button>
-				<button type="button" className="drawer-btn" disabled={busy} onClick={() => fileRef.current?.click()}>
-					导入
-				</button>
-				<input
-					ref={fileRef}
-					type="file"
-					accept=".zip,application/zip"
-					hidden
-					onChange={onPickImport}
-				/>
-			</div>
-			{pendingFile && (
-				<div className="memory-chunk-mgr" style={{ marginTop: 8 }}>
-					<div className="field-hint">
-						待导入：{pendingFile.name}（覆盖当前项目全部数据）
-					</div>
-					<div className="access-actions">
-						<ConfirmButton className="drawer-btn" disabled={busy} confirmText="确认覆盖当前项目" onConfirm={() => void doImport()}>
-							开始导入
-						</ConfirmButton>
-						<button type="button" className="drawer-btn" disabled={busy} onClick={() => setPendingFile(null)}>
-							取消
-						</button>
-					</div>
-				</div>
-			)}
-		</section>
-	);
-}
-
 export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "error", text: string) => void }) {
 	const { data, error, loading, reload } = usePanelData(() => apiGet<{ config: RpConfigView }>("/api/config"), { cacheKey: "/api/config" });
+	const modelData = usePanelData(() => apiGet<ModelsResponse>("/api/models/catalog"), { cacheKey: "/api/models/catalog", watchModels: true });
 	const { busy, run } = useAction(toast);
 
 	const [scanDepth, setScanDepth] = useState(4);
@@ -722,8 +705,16 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 	const [compactEvery, setCompactEvery] = useState(30);
 	const [backendControl, setBackendControl] = useState(true);
 	const [askMode, setAskMode] = useState(false);
+	const [literaryProfile, setLiteraryProfile] = useState(false);
+	const [literaryGuided, setLiteraryGuided] = useState(false);
+	const [literaryEvery, setLiteraryEvery] = useState(8);
+	const [literaryWorldEnabled, setLiteraryWorldEnabled] = useState(true);
+	const [literaryEcologyEnabled, setLiteraryEcologyEnabled] = useState(false);
+	const [webResearchMode, setWebResearchMode] = useState<"off" | "auto" | "manual">("off");
+	const [stepModels, setStepModels] = useState<StepModelOverrides>({});
 	const [dirty, setDirty] = useState(false);
 	const [dark, setDark] = useState(() => getTheme() === "dark");
+	const formDisabled = busy;
 
 	useEffect(() => {
 		if (data) {
@@ -732,6 +723,13 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 			setCompactEvery(data.config.compactEveryNTurns ?? 30);
 			setBackendControl(data.config.backendControl !== false);
 			setAskMode(data.config.creationMode === "ask");
+			setLiteraryProfile(data.config.literaryQuality === "profile" || data.config.literaryQuality === "guided");
+			setLiteraryGuided(data.config.literaryQuality === "guided");
+			setLiteraryEvery(data.config.literaryProfileEveryNTurns ?? 8);
+			setLiteraryWorldEnabled(data.config.literaryWorldEnabled === true);
+			setLiteraryEcologyEnabled(data.config.literaryEcologyEnabled === true);
+			setWebResearchMode(data.config.webResearchMode ?? "off");
+			setStepModels(data.config.stepModels ?? {});
 			setDirty(false);
 		}
 	}, [data]);
@@ -755,13 +753,20 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 				compactEveryNTurns: compactEvery,
 				backendControl,
 				creationMode: askMode ? "ask" : "silent",
+				literaryQuality: literaryGuided ? "guided" : literaryProfile ? "profile" : "off",
+				literaryProfileEveryNTurns: literaryEvery,
+				literaryWorldEnabled,
+				literaryEcologyEnabled,
+				webResearchMode,
+				stepModels,
 			});
 			reload();
 		}, "已保存并重载会话");
 
 	return (
-		<div className="panel-body panel-body-sticky">
+		<div className="panel-body panel-body-sticky" aria-busy={busy} style={busy ? { pointerEvents: "none", opacity: 0.72 } : undefined}>
 			<PanelStatus loading={loading} error={error} hasData={!!data} />
+			{modelData.error && <div className="sp-empty">模型清单读取失败：{modelData.error}</div>}
 			<section className="sp-section">
 				<h4>外观</h4>
 				<div className="toggle-row">
@@ -771,8 +776,8 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 				<div className="field-hint">白昼 / 黑夜立刻切换，偏好记在本机浏览器，与会话配置无关。</div>
 			</section>
 			<AccessSection toast={toast} />
-			<BackupSection toast={toast} />
 			<MemorySection toast={toast} />
+			<NovelAiSection toast={toast} />
 			{data && (
 				<>
 					<section className="sp-section">
@@ -802,10 +807,130 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 					</section>
 
 					<section className="sp-section">
+						<h4>后台世界</h4>
+						<div className="toggle-row">
+							<span>每拍推演场外世界</span>
+							<Toggle checked={literaryWorldEnabled} onChange={(value) => { setLiteraryWorldEnabled(value); touch(); }} />
+						</div>
+						<div className="field-hint">规则来自 `.liyuan-stage-skills/世界推演/SKILL.md`；关闭时不调用模型、不注入世界动态，已有分支快照保留。</div>
+					</section>
+
+					<section className="sp-section">
+						<h4>鲜活世界生态</h4>
+						<div className="toggle-row">
+							<span>让人物、地点与事件独立运行</span>
+							<Toggle checked={literaryEcologyEnabled} onChange={(value) => { setLiteraryEcologyEnabled(value); touch(); }} />
+						</div>
+						<div className="field-hint">每拍调用模型规划搜索、扩充全局原型池、适配当前角色卡，并在演出前后推进人物生活与可错过事件。用户是世界中的探索者，不是世界的主宰。</div>
+					</section>
+
+					<WorldProfileSection enabled={literaryWorldEnabled} toast={toast} />
+
+					<section className="sp-section">
+						<h4>模型插头</h4>
+						<div className="field-hint">
+							总插头是连接面板当前选择的剧情模型。下列每个步骤都可分别选择模型；鲜活世界可使用你专门配置的长上下文、知识丰富模型。
+						</div>
+						{([
+							["writer", "主演正文"],
+							["literaryContinuity", "连续性补充"],
+							["literaryDirector", "文学导演"],
+							["literaryCharacter", "角色画像 Sogon"],
+							["literaryPersona", "用户画像 Sigon"],
+							["literaryWorld", "后台世界推演"],
+							["worldProfile", "角色卡世界画像"],
+							["literaryWorldFacts", "拍后事实信封"],
+							["literaryWorldAudit", "世界转移审计"],
+							["ecologySearch", "生态检索规划"],
+							["ecologyGlobal", "全局叙事原型池"],
+							["ecologyCard", "角色卡生态池"],
+							["ecologyRuntime", "人物与场所生态"],
+							["scribe", "场记与状态兜底"],
+							["compaction", "前情压缩"],
+							["presetSort", "预设 AI 分拣"],
+						] as Array<[SideModelStep, string]>).map(([step, label]) => (
+							<ModelPlugSelector key={step} label={label} value={stepModels[step] ?? null} models={modelData.data} disabled={formDisabled || modelData.loading || !!modelData.error}
+								onChange={(value: ModelRef | null) => {
+									setStepModels((current) => {
+										const next = { ...current };
+										if (value) next[step] = value;
+										else delete next[step];
+										return next;
+									});
+									touch();
+								}} />
+						))}
+					</section>
+
+					<section className="sp-section">
+						<h4>联网查证</h4>
+						<label className="field-label" htmlFor="web-research-mode">使用方式</label>
+						<select
+							id="web-research-mode"
+							className="field-input"
+							value={webResearchMode}
+							onChange={(event) => {
+								setWebResearchMode(event.target.value as "off" | "auto" | "manual");
+								touch();
+							}}
+						>
+							<option value="off">关闭</option>
+							<option value="manual">仅在我明确要求联网时</option>
+							<option value="auto">模型按需使用</option>
+						</select>
+						<div className="field-hint">
+							每拍最多三个公开事实查询，不再强制三搜；无公开作品出处的私人角色名会在发网前被拒绝。只有实际执行联网搜索时才读取代理设置；默认使用 127.0.0.1:7890，可用 LIYUAN_WEB_RESEARCH_PROXY=direct 改为直连。
+						</div>
+					</section>
+
+					<section className="sp-section">
+						<h4>文学画像</h4>
+						<div className="toggle-row">
+							<span>周期角色与用户画像（Sogon / Sigon）</span>
+							<Toggle
+								checked={literaryProfile}
+								onChange={(v) => {
+									setLiteraryProfile(v);
+									if (!v) setLiteraryGuided(false);
+									touch();
+								}}
+							/>
+						</div>
+						<div className="field-hint">
+							默认关闭。开启后按周期增加两次旁路模型调用，结果从下一拍起作为可修订写作参考，不修改角色卡、剧情事实或世界状态。
+						</div>
+						<div className="toggle-row">
+							<span>每拍文学导演候选</span>
+							<Toggle
+								checked={literaryGuided}
+								onChange={(v) => {
+									setLiteraryGuided(v);
+									if (v) setLiteraryProfile(true);
+									touch();
+								}}
+							/>
+						</div>
+						<div className="field-hint">
+							开启后每拍增加一次短旁路调用，只给角色主动性、个人线、幕后线和玩家停点；具体步骤仍由 beat_plan 决定。
+						</div>
+						<SliderField
+							label="画像刷新周期"
+							hint="每 N 个完成的剧情轮更新一次；首次开启会在下一拍完成后建立画像"
+							value={literaryEvery}
+							min={1}
+							max={30}
+							onChange={(v) => {
+								setLiteraryEvery(v);
+								touch();
+							}}
+						/>
+					</section>
+
+					<section className="sp-section">
 						<h4>上下文压缩</h4>
 						<SliderField
 							label="固定楼层压缩周期"
-							hint="每 N 个剧情轮把早期正文压成接力摘要（原文归档进剧情库可召回）；0 = 仅在上下文吃紧时被动压缩"
+							hint="每 N 个剧情轮把早期正文压成接力摘要（原文归档进剧情库可召回）；0 = 关闭自动压缩，仍可手动触发"
 							value={compactEvery}
 							min={0}
 							max={100}

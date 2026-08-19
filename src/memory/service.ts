@@ -282,6 +282,30 @@ export async function onNarrativeTurnEnd(
 	}
 }
 
+/** 重试最近一轮剧情入库：不递增轮次计数，专供自动入库失败后的人工重试。 */
+export async function retryNarrativeMemory(
+	cwd: string,
+	scope: MemoryScope,
+	assistantText: string,
+): Promise<{ stored: boolean; merged?: boolean; added?: number; noop?: boolean }> {
+	const cfg = loadMemoryConfig(cwd);
+	if (!cfg.enabled) throw new Error("向量记忆未启用");
+	const store = cfg.stores.find((s) => s.id === "narrative" && s.enabled);
+	if (!store) throw new Error("剧情数据库未启用");
+	const text = assistantText.trim();
+	if (text.length < 20) throw new Error("最近一轮正文为空或过短");
+	const summary = text.length > 1200 ? `${text.slice(0, 600)}\n…\n${text.slice(-400)}` : text;
+	const r = await mergeNarrativeText(
+		cwd,
+		normalizeScope(scope),
+		summary,
+		{ source: "narrative", sessionId: scope.sessionId, card: scope.card },
+		store.maxChunks,
+		embedCtxFrom(cfg),
+	);
+	return { stored: !r.noop, merged: r.merged, added: r.added, noop: r.noop };
+}
+
 export function defaultMemoryConfig(): MemoryConfig {
 	return structuredClone(DEFAULT_MEMORY_CONFIG);
 }

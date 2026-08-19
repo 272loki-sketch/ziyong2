@@ -120,7 +120,11 @@ powershell -File scripts/pack-for-linux.ps1
 - **MCP**：分**内置 / 外部**两栏。内置随梨园发布包走（见下条视觉识图）；外部启动时自动扫描 `~/.claude.json`、Cursor 配置、`~/.liyuan/mcp.json`、项目 `.mcp.json` / `.liyuan-mcp.json`。**默认全关**，在「扩展能力 → MCP」按对话开启；开关记为新对话默认；
 - **视觉识图（内置 MCP）**：给无视觉能力的主模型补眼睛——把图片交给任意 OpenAI 兼容的视觉模型分析。在「扩展能力 → MCP → 内置 → 视觉识图 → 编辑」的 `env` 里填 `LIYUAN_VISION_BASE_URL` / `LIYUAN_VISION_API_KEY` / `LIYUAN_VISION_MODEL`（须支持图片输入）即可；
 - **语音（TTS）**：配置环境变量 `LIYUAN_TTS_BASE_URL` + `LIYUAN_TTS_API_KEY`（或直接用 `OPENAI_API_KEY`）后，agent 可用语音工具朗读；模型与音色用 `LIYUAN_TTS_MODEL` / `LIYUAN_TTS_VOICE` 指定；
-- **技能**：`.liyuan-skills/` 下的 markdown 即技能，可让 agent 自写（详见上文第 4 条），也可手写后在「扩展能力」面板控制是否暴露给 agent。
+- **文学工作流 Skill**（扩展能力 → Skill）：拍前四件套——`文学连续性`、`Sogon角色深度`、`Sigon用户偏好`、`Stitches拍前导演`——加上 `主演分段演出`、`独立谢幕格式` 构成每拍「拍前分析 → 导演 → 分段演出 → 记账 → 独立谢幕」的完整编排；另有三件生态 Skill（`通用叙事原型池` / `角色卡生态池` / `人物与场所生态`）与写作参考类 Skill。正文由同一 agent 分段落笔；格式在封笔后由 agent 重新读取完整卡与预设自行判断生成（不同卡格式不同，白名单与固定标签识别一律不用）。内置 Skill 随 GitHub 更新；你在面板里编辑过的副本落在 `.liyuan-stage-skills/`（已 gitignore），拉取更新不会被覆盖，删掉副本即回到内置版；
+- **后台世界引擎**（设置面板「后台世界」开关，默认关）：每张角色卡形成**独立长期适配**——首次分析生成卡级画像（`.liyuan/world/cards/<key>/profile.json`，含尺度、时间步长、活跃度、模块、长期要求、优化记录），draft 状态每 8 拍结合实弹复盘、可锁定 `stable` 停止自动重建；分支 `rp-world-manifest` 钉住当拍采用的版本，回档/变体各自恢复。拍后世界链为「拍后事实信封 → 模块化世界提案 → 独立审计 → 确定性门禁 → 原子提交」：只按本卡启用的模块（制度日历/社会关系/城市资源/规则系统/任务目标/悬疑证据/组织战略/生存压力/区域环境/通用）运行，校园、修仙、TRPG、都市、单角色各取所需，代码不硬编码题材规则；审计失败保留旧世界，`rp-world-audit` 全程留痕。主演只收到裁剪后的【后台世界动态】，黑盒/秘密不泄内容。完整设计见 `docs/PLAN-WORLD-ENGINE.md`；
+- **鲜活世界生态**（设置面板「鲜活世界」开关，默认关）：让用户成为持续运行世界中的**探索者**而非主角。三层权威——全局叙事原型池（跨卡共享）、角色卡生态池（按卡复用）、`rp-ecology-state` 分支运行态（人物生活 / 地点活动 / 日程 / 可错过事件 / 幕后秘密）。每拍都联网搜索并更新双池，但双池备料在**后台**（running/ready + 串行写链）供后续拍消费，绝不阻塞当前正文；拍前 arrival 与连续性并行、拍后世界与人物生态并行计算后按固定顺序落树；aftermath 失败仍落降级快照。四个独立模型插头（`ecologySearch` / `ecologyGlobal` / `ecologyCard` / `ecologyRuntime`）可分别指定模型。DuckDuckGo 被反爬时自动熔断转 Bing。完整设计见 `docs/PLAN-LIVING-ECOLOGY.md`；
+- **两级重 Roll**：消息操作区两个明确按钮——「重Roll正文」复用上一版拍前分析工件直接从 writer 阶段重写，随后重新记账、重推世界、重做状态栏，旧回复保留为可左右切换的变体；「重Roll状态栏」只重做状态栏等非正文格式，正文、账本、世界状态一律不动。失败不自动重试，是否再次消耗 token 由你手动点击决定；
+- **助手服务笔记**：`.liyuan-skills/` 下的 markdown 是右栏助手摸通外部服务后自写的能力笔记，与台上文学工作流 Skill 是两套，互不混淆。
 
 ## 已知边界（如实说）
 
@@ -134,18 +138,26 @@ powershell -File scripts/pack-for-linux.ps1
 
 ```
 领域层  src/        card / lorebook / state / director / retention /
-                    scribe / panels / codex / worldline / mcp …（纯 TS，可独立测试）
+                    scribe / panels / codex / worldline / mcp …
+                    stage/      台上引擎（assemble / engine / workspace / tools）
+                    stage/literary-*.ts  拍前分析（连续性 / Sogon / Sigon / 导演）
+                    stage/literary-world-profile.ts  卡级长期画像 + 分支 Manifest
+                    stage/literary-world-modular.ts  模块化世界状态 v2（迁移/投影/wire）
+                    stage/literary-world-transition.ts  事实信封 / 提案 / 审计 / 原子提交
+                    stage/literary-world-signals.ts  世界⇄生态只读信号
+                    stage/literary-ecology.ts  鲜活世界生态（双池/运行态/工作集/降级快照）
+                    stage/skill-store.ts  文学工作流 Skill 装载（内置+用户覆盖）
 接线层  .liyuan/extensions/roleplay.ts   会话钩子与全部工具的挂载点
 Web 层  server/     WS + REST + 静态托管；web/  Vite + React 前端
 内核    packages/   @liyuan/*（agent 运行时，pi fork 冻结，file: 本地依赖）
 ```
 
 ```bash
-node --test test/*.test.ts     # 领域层单元测试
-node scripts/smoke-web.mjs     # Web 冒烟
+npx tsx --test test/*.test.ts     # 领域层单元测试（需 Node ≥ 22）
+node scripts/smoke-web.mjs        # Web 冒烟
 ```
 
-产品数据目录：`.liyuan-state/`（账本）· `.liyuan-artifacts/`（面板）· `.liyuan-codex/`（知识库）· `.liyuan-uploads/`（素材）· `.liyuan-skills/`（技能）等，均为纯 JSON / 文件，随时可备份迁移。
+产品数据目录：`.liyuan-state/`（账本）· `.liyuan-artifacts/`（面板）· `.liyuan-codex/`（知识库）· `.liyuan-uploads/`（素材）· `.liyuan-skills/`（助手能力笔记）· `.liyuan-stage-skills/`（文学工作流 Skill 的用户覆盖）· `.liyuan/world/cards/<key>/profile.json`（角色卡长期世界画像）· `.liyuan/ecology/`（鲜活世界双池）等，均为纯 JSON / 文件，随时可备份迁移。
 
 ## 许可证
 

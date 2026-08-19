@@ -26,6 +26,7 @@ import {
 	normalizeAgentConfig,
 	normalizeModels,
 	publicProvider,
+	repairDefaultProvider,
 	saveAgentConfig,
 	saveProfile,
 	seedProviderFromRuntime,
@@ -50,6 +51,7 @@ import {
 } from "../src/card.ts";
 import {
 	buildCardFrontSnapshot,
+	extractLorebookRegexScripts,
 	setSkinEnabled,
 	type CardFrontSnapshot,
 } from "../src/cardfront.ts";
@@ -71,6 +73,7 @@ import {
 	memoryImportText,
 	memoryListChunks,
 	memoryManualAdd,
+	retryNarrativeMemory,
 	memoryReembedScope,
 	memoryRemoveStore,
 	memorySearch,
@@ -78,9 +81,20 @@ import {
 	updateMemoryConfig,
 	updateStoreConfig,
 } from "../src/memory/index.ts";
+import { generateNovelAiImageCached, loadNovelAiConfig, publicNovelAiConfig, updateNovelAiConfig } from "../src/novelai.ts";
+import { normalizeStepModels, type SideModelStep } from "../src/model-routing.ts";
 import { resolveConfigPath } from "../src/paths.ts";
-import { scanSkillFiles } from "../src/stage/materials.ts";
-import { deleteStageSkill, saveStageSkill } from "../src/stage/skill-store.ts";
+import { loadStageMaterials } from "../src/stage/materials.ts";
+import { deleteStageSkill, saveStageSkill, scanSkillFiles, type WorkflowSkillStage } from "../src/stage/skill-store.ts";
+import {
+	buildWorldProfilePrompt,
+	defaultCardWorldProfile,
+	loadCardWorldProfile,
+	manifestFromProfile,
+	normalizeCardWorldProfile,
+	saveCardWorldProfile,
+	worldProfileFingerprint,
+} from "../src/stage/literary-world-profile.ts";
 import type { WorldlineView } from "../src/worldline.ts";
 import {
 	appendLorebookFileEntry,
@@ -95,6 +109,7 @@ import {
 	overlayPathFor,
 	patchLorebookFileEntry,
 	searchEntries,
+	setLorebookEntriesEnabledByUid,
 	setMountedLorebooks,
 	type LoreEntryPatch,
 } from "../src/lorebook.ts";
@@ -131,7 +146,6 @@ import {
 	type McpServerConfig,
 } from "../src/mcp.ts";
 import { listSkills, saveSkill } from "../src/skills.ts";
-import { buildBackupZip, stageRestore } from "../src/backup.ts";
 import { DEFAULT_CONFIG, type LorebookEntry, type RpConfig } from "../src/types.ts";
 import { readJsonFile } from "../src/jsonio.ts";
 import { formatBytes, listMedia, listUploads, saveUpload } from "../src/uploads.ts";
@@ -263,6 +277,8 @@ export interface RestHost {
 	ttsSpeak(text: string, caption?: string): Promise<{ src: string; bytes: number }>;
 	/** 向量记忆作用域：当前角色卡 + 当前对话（换卡/新对话 = 独立库） */
 	memoryScope(): { sessionId: string; card?: string };
+	/** 当前分支最后一条角色正文（自动向量入库失败后重试）。 */
+	latestNarrativeText(): string;
 	// ---- 在线更新（主页 chip → 弹窗 → toast；状态经 WS update 帧推送） ----
 	/** 手动检查（启动已静默查过一次；这里给弹窗里的重试） */
 	updateCheckNow(): Promise<void>;
@@ -277,10 +293,17 @@ export interface RestHost {
 	 * 返回模型文本或 { error }。默认关思考、4k tokens。
 	 */
 	runSideText(
+		step: SideModelStep,
 		systemPrompt: string,
 		userText: string,
-		opts?: { maxTokens?: number; reasoning?: string; signal?: AbortSignal },
+		opts?: { maxTokens?: number; reasoning?: string; signal?: AbortSignal; forceNonStreaming?: boolean },
 	): Promise<string | { error: string }>;
+	/** 将当前角色卡画像钉到当前会话分支。 */
+	appendWorldManifest(data: unknown): void;
+	/** 长旁路分析提交前用于拒绝分支或角色卡漂移。 */
+	worldProfileContext(): { leafId: string | null; card: string };
+	worldStateView(): unknown;
+	clearWorldModule(moduleId: string): void;
 }
 
 export interface SessionInfoLite {
@@ -309,7 +332,6 @@ export interface SessionSearchHit {
 
 const MAX_BODY = 32 * 1024 * 1024; // ST 聊天记录/预设上传上限 32MB
 const MAX_UPLOAD = 64 * 1024 * 1024; // 上传区文件上限 64MB
-const MAX_BACKUP_UPLOAD = 512 * 1024 * 1024; // 备份包上限（素材多，留裕量）
 
 function readBodyRaw(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
 	return new Promise((resolve, reject) => {
@@ -355,6 +377,7 @@ export function loadConfig(cwd: string): RpConfig {
 	if (!existsSync(p)) return { ...DEFAULT_CONFIG };
 	const raw = { ...DEFAULT_CONFIG, ...(JSON.parse(readFileSync(p, "utf8")) as Partial<RpConfig>) };
 	// 规范化：旧 lorebook 单本 → lorebooks 数组
+	raw.stepModels = normalizeStepModels(raw.stepModels);
 	return setMountedLorebooks(raw, mountedLorebookPaths(raw));
 }
 
@@ -406,6 +429,13 @@ const CONFIG_EDITABLE = new Set([
 	"backendControl",
 	"creationMode",
 	"assistantModel",
+	"compactEveryNTurns",
+	"literaryQuality",
+	"literaryProfileEveryNTurns",
+	"literaryWorldEnabled",
+	"literaryEcologyEnabled",
+	"webResearchMode",
+	"stepModels",
 ]);
 
 export function applyConfigPatch(config: RpConfig, patch: Record<string, unknown>): RpConfig {
@@ -425,6 +455,17 @@ export function applyConfigPatch(config: RpConfig, patch: Record<string, unknown
 	next.maxLoreInjections = clampInt(next.maxLoreInjections, 0, 20, DEFAULT_CONFIG.maxLoreInjections);
 	// 固定楼层压缩周期：0=关闭主动压缩；上限防手滑（500 轮≈永不触发）
 	next.compactEveryNTurns = clampInt(next.compactEveryNTurns, 0, 500, DEFAULT_CONFIG.compactEveryNTurns ?? 30);
+	if (!["off", "profile", "guided"].includes(String(next.literaryQuality))) next.literaryQuality = "off";
+	next.literaryWorldEnabled = next.literaryWorldEnabled === true;
+	next.literaryEcologyEnabled = next.literaryEcologyEnabled === true;
+	next.literaryProfileEveryNTurns = clampInt(
+		next.literaryProfileEveryNTurns,
+		1,
+		100,
+		DEFAULT_CONFIG.literaryProfileEveryNTurns ?? 8,
+	);
+	if (!["off", "auto", "manual"].includes(String(next.webResearchMode))) next.webResearchMode = "off";
+	next.stepModels = normalizeStepModels(next.stepModels);
 	next.greeting = next.greeting === true;
 	// 决策门禁档位：只认 ask / silent；非法值删除（扩展缺省按 silent）
 	if (next.creationMode !== "ask" && next.creationMode !== "silent") delete next.creationMode;
@@ -661,15 +702,8 @@ function loadOrSeedAgentConfig(host: RestHost): { path: string; exists: boolean;
 }
 
 function persistAgentConfig(host: RestHost, config: LiyuanAgentConfig): LiyuanAgentConfig {
-	const normalized = normalizeAgentConfig(config);
-	// 合并磁盘上已有的模型字段（用户手改的 compat / thinkingLevelMap / cost 等不会被面板覆盖丢失）
-	const onDisk = loadAgentConfig(host.cwd).config;
-	for (const [name, provider] of Object.entries(normalized.providers)) {
-		const diskProvider = onDisk.providers[name];
-		if (diskProvider && Array.isArray(diskProvider.models) && Array.isArray(provider.models)) {
-			provider.models = mergeModelsById(diskProvider.models, provider.models);
-		}
-	}
+	// 换到非当前启用渠道的模型时，把该渠道从仓库补回 providers，避免 defaultProvider 悬空。
+	const normalized = repairDefaultProvider(host.cwd, normalizeAgentConfig(config));
 	saveAgentConfig(host.cwd, normalized);
 	syncAgentConfigToRuntime(host.cwd, host.agentDir(), normalized);
 	host.refreshModels();
@@ -1381,48 +1415,6 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				const abs = join(host.cwd, ".liyuan-skills", base);
 				if (!existsSync(abs)) throw new Error("技能文件不存在");
 				unlinkSync(abs);
-				sendJson(res, 200, { ok: true });
-				return true;
-			}
-
-			// ---- 台上写作 skill 库（skills/<目录>/SKILL.md）：编辑器 CRUD 与引擎读同一份文件，
-			// 保存后下一拍装载即生效（loadStageMaterials 每拍现读）。与 .liyuan-skills（幕后服务笔记）无关。
-			case "GET /api/stage-skills": {
-				sendJson(res, 200, {
-					skills: scanSkillFiles(host.cwd).map((s) => ({
-						dir: s.dir ?? s.name,
-						name: s.name,
-						description: s.description,
-						resident: s.resident,
-						everyBeat: s.everyBeat,
-						chars: s.body.length,
-						body: s.body,
-					})),
-				});
-				return true;
-			}
-			case "POST /api/stage-skills": {
-				const body = JSON.parse(await readBody(req)) as {
-					dir?: string;
-					name?: string;
-					description?: string;
-					resident?: boolean;
-					everyBeat?: boolean;
-					body?: string;
-				};
-				const r = saveStageSkill(host.cwd, {
-					dir: typeof body.dir === "string" && body.dir.trim() ? body.dir : undefined,
-					name: body.name ?? "",
-					description: body.description ?? "",
-					resident: body.resident === true,
-					everyBeat: body.everyBeat === true,
-					body: body.body ?? "",
-				});
-				sendJson(res, 200, { ok: true, dir: r.dir, note: "下一拍装载即生效（引擎每拍现读 skills/）" });
-				return true;
-			}
-			case "DELETE /api/stage-skills": {
-				deleteStageSkill(host.cwd, query.get("dir") ?? "");
 				sendJson(res, 200, { ok: true });
 				return true;
 			}
@@ -2272,6 +2264,212 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				sendJson(res, 200, { ok: true, active: nextPaths });
 				return true;
 			}
+
+			case "GET /api/stage-skills": {
+				sendJson(res, 200, {
+					skills: scanSkillFiles(host.cwd).map((skill) => ({
+						dir: skill.dir,
+						name: skill.name,
+						description: skill.description,
+						workflow: skill.workflow,
+						resident: skill.resident,
+						everyBeat: skill.everyBeat,
+						worldModule: skill.worldModule,
+						chars: skill.body.length,
+						body: skill.body,
+						source: skill.source,
+					})),
+				});
+				return true;
+			}
+			case "POST /api/stage-skills": {
+				const body = JSON.parse(await readBody(req)) as {
+					dir?: string; name?: string; description?: string; workflow?: WorkflowSkillStage;
+					resident?: boolean; everyBeat?: boolean; body?: string;
+					worldModule?: string;
+				};
+				const saved = saveStageSkill(host.cwd, {
+					dir: body.dir,
+					name: body.name ?? "",
+					description: body.description ?? "",
+					workflow: body.workflow,
+					resident: body.resident === true,
+					everyBeat: body.everyBeat === true,
+					body: body.body ?? "",
+					worldModule: body.worldModule,
+				});
+				sendJson(res, 200, { ok: true, dir: saved.dir, note: "已保存到 .liyuan-stage-skills，GitHub 更新不会覆盖" });
+				return true;
+			}
+			case "DELETE /api/stage-skills": {
+				deleteStageSkill(host.cwd, query.get("dir") ?? "");
+				sendJson(res, 200, { ok: true });
+				return true;
+			}
+			case "GET /api/world-profile": {
+				const materials = loadStageMaterials(host.cwd);
+				const fingerprint = worldProfileFingerprint({ card: materials.card, entries: materials.entries, preset: materials.preset, greetingIndex: materials.config.greetingIndex });
+				const profile = loadCardWorldProfile(host.cwd, materials.config.card, materials.card.name, fingerprint, materials.card);
+				sendJson(res, 200, {
+					profile,
+					card: { key: profile?.cardKey ?? defaultCardWorldProfile(host.cwd, materials.config.card, materials.card.name, fingerprint, materials.card).cardKey, name: materials.card.name },
+					materialsChanged: !!profile && profile.sourceFingerprint !== fingerprint,
+				});
+				return true;
+			}
+			case "POST /api/world-profile/analyze": {
+				if (host.isStreaming()) { sendJson(res, 409, { error: "演出进行中，不能重建角色卡世界画像" }); return true; }
+				const sourceContext = host.worldProfileContext();
+				const materials = loadStageMaterials(host.cwd);
+				const skill = scanSkillFiles(host.cwd).find((item) => item.workflow === "world-profile");
+				if (!skill) throw new Error("缺少 workflow: world-profile 的角色卡世界画像 Skill");
+				const fingerprint = worldProfileFingerprint({ card: materials.card, entries: materials.entries, preset: materials.preset, greetingIndex: materials.config.greetingIndex });
+				const previous = loadCardWorldProfile(host.cwd, materials.config.card, materials.card.name, fingerprint, materials.card);
+				const prompt = buildWorldProfilePrompt({ skillBody: skill.body, card: materials.card, entries: materials.entries, preset: materials.preset, greetingIndex: materials.config.greetingIndex, previous });
+				let result = await host.runSideText("worldProfile", prompt.systemPrompt, prompt.userText, { maxTokens: 12288 });
+				if (typeof result !== "string") throw new Error(`画像分析失败：${result.error}`);
+				const targetContext = host.worldProfileContext();
+				if (sourceContext.leafId !== targetContext.leafId || sourceContext.card !== targetContext.card) throw new Error("画像分析期间切换了分支或角色卡，结果已丢弃");
+				const base = previous ?? defaultCardWorldProfile(host.cwd, materials.config.card, materials.card.name, fingerprint, materials.card);
+				let profile = normalizeCardWorldProfile(result, base, { preserveStatus: !!previous, sourceFingerprint: fingerprint });
+				if (!profile) {
+					const retry = await host.runSideText("worldProfile", prompt.systemPrompt, prompt.userText, { maxTokens: 12288, forceNonStreaming: true });
+					if (typeof retry === "string") { result = retry; profile = normalizeCardWorldProfile(retry, base, { preserveStatus: !!previous, sourceFingerprint: fingerprint }); }
+				}
+				if (!profile) {
+					const rawPath = join(host.cwd, ".liyuan", "world", "profile-last-invalid.txt");
+					mkdirSync(dirname(rawPath), { recursive: true });
+					writeFileSync(rawPath, result, "utf8");
+					throw new Error(`画像输出不可解析；原始输出已保存到 ${rawPath}`);
+				}
+				saveCardWorldProfile(host.cwd, materials.config.card, profile, materials.card);
+				const manifestApplied = targetContext.card === materials.config.card;
+				if (manifestApplied) host.appendWorldManifest(manifestFromProfile(profile));
+				sendJson(res, 200, { ok: true, profile, manifestApplied, ...(manifestApplied ? {} : { note: "卡级画像已保存；当前会话绑定另一张卡，未向该会话写入 Manifest" }) });
+				return true;
+			}
+			case "PUT /api/world-profile": {
+				if (host.isStreaming()) { sendJson(res, 409, { error: "演出进行中，不能修改角色卡世界画像" }); return true; }
+				const sourceContext = host.worldProfileContext();
+				const materials = loadStageMaterials(host.cwd);
+				const fingerprint = worldProfileFingerprint({ card: materials.card, entries: materials.entries, preset: materials.preset, greetingIndex: materials.config.greetingIndex });
+				const previous = loadCardWorldProfile(host.cwd, materials.config.card, materials.card.name, fingerprint, materials.card)
+					?? defaultCardWorldProfile(host.cwd, materials.config.card, materials.card.name, fingerprint, materials.card);
+				const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+				const candidate = {
+					...previous,
+					...(body.status === "stable" || body.status === "draft" ? { status: body.status } : {}),
+					...(body.worldActivity ? { worldActivity: body.worldActivity } : {}),
+					...(Array.isArray(body.modules) ? { modules: body.modules } : {}),
+					...(Array.isArray(body.disabledModules) ? { disabledModules: body.disabledModules } : {}),
+					...(Array.isArray(body.userRequirements) ? { userRequirements: body.userRequirements } : {}),
+					...(Array.isArray(body.optimizationNotes) ? { optimizationNotes: body.optimizationNotes } : {}),
+				};
+				const profile = normalizeCardWorldProfile(candidate, previous, { sourceFingerprint: fingerprint });
+				if (!profile) throw new Error("画像修改不可解析");
+				const targetContext = host.worldProfileContext();
+				if (sourceContext.leafId !== targetContext.leafId || sourceContext.card !== targetContext.card) throw new Error("画像修改期间切换了分支或角色卡，结果已丢弃");
+				saveCardWorldProfile(host.cwd, materials.config.card, profile, materials.card);
+				host.appendWorldManifest(manifestFromProfile(profile));
+				sendJson(res, 200, { ok: true, profile });
+				return true;
+			}
+			case "GET /api/world-state": {
+				sendJson(res, 200, host.worldStateView());
+				return true;
+			}
+			case "DELETE /api/world-state/module": {
+				if (host.isStreaming()) { sendJson(res, 409, { error: "演出进行中，不能清空世界模块" }); return true; }
+				const moduleId = query.get("moduleId")?.trim() ?? "";
+				if (!moduleId) throw new Error("缺少 moduleId");
+				host.clearWorldModule(moduleId);
+				sendJson(res, 200, { ok: true });
+				return true;
+			}
+			case "POST /api/memory/retry-latest": {
+				const text = host.latestNarrativeText().trim();
+				if (!text) throw new Error("当前分支没有可重试的角色正文");
+				const r = await retryNarrativeMemory(host.cwd, host.memoryScope(), text);
+				host.notify("info", r.noop ? "向量记忆：最近一轮已在剧情库中" : "向量记忆：最近一轮已重新入库");
+				sendJson(res, 200, { ok: true, ...r, ...getMemoryStatus(host.cwd, host.memoryScope()) });
+				return true;
+			}
+			/**
+			 * 程序卡世界书兼容面：对齐酒馆助手 getWorldbook / replaceWorldbook 的必要子集。
+			 *
+			 * 只允许访问当前挂载书；写侧只接受 uid+enabled，并落到 disabledLore 覆盖层，
+			 * 不改用户世界书源文件。这样程序卡能管理模块启停，同时保持梨园现有主权与回滚语义。
+			 */
+			case "GET /api/tavern/worldbook": {
+				const config = loadConfig(host.cwd);
+				const mounted = mountedLorebookPaths(config);
+				const requested = (query.get("name") ?? "").replace(/\\/g, "/").trim();
+				const path = requested
+					? mounted.find(
+							(p) =>
+								p === requested ||
+								basename(p).replace(/\.json$/i, "") === requested ||
+								basename(p) === requested,
+						)
+					: mounted[0];
+				if (!path) throw new Error(requested ? `世界书未挂载：${requested}` : "当前角色没有挂载世界书");
+				const abs = resolvePath(host.cwd, path);
+				if (!existsSync(abs)) throw new Error(`世界书文件不存在：${path}`);
+				const entries = applyDisabledLore(loadLorebookFile(abs), config.disabledLore);
+				sendJson(res, 200, {
+					name: basename(path).replace(/\.json$/i, ""),
+					path,
+					entries: entries.map((e) => ({
+						uid: e.uid,
+						name: e.comment,
+						comment: e.comment,
+						key: e.keys,
+						keysecondary: e.secondaryKeys,
+						content: e.content,
+						constant: e.constant,
+						selective: e.selective,
+						order: e.order,
+						enabled: e.enabled,
+					})),
+				});
+				return true;
+			}
+			case "PUT /api/tavern/worldbook": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse(await readBody(req)) as {
+					name?: string;
+					entries?: Array<{ uid?: number; enabled?: boolean }>;
+				};
+				if (!Array.isArray(body.entries)) throw new Error("缺少 entries");
+				const config = loadConfig(host.cwd);
+				const mounted = mountedLorebookPaths(config);
+				const requested = (body.name ?? "").replace(/\\/g, "/").trim();
+				const path = requested
+					? mounted.find(
+							(p) =>
+								p === requested ||
+								basename(p).replace(/\.json$/i, "") === requested ||
+								basename(p) === requested,
+						)
+					: mounted[0];
+				if (!path) throw new Error(requested ? `世界书未挂载：${requested}` : "当前角色没有挂载世界书");
+				const abs = resolvePath(host.cwd, path);
+				if (!existsSync(abs)) throw new Error(`世界书文件不存在：${path}`);
+				const desired = new Map<number, boolean>();
+				for (const item of body.entries) {
+					if (Number.isInteger(item?.uid) && typeof item.enabled === "boolean") desired.set(item.uid!, item.enabled);
+				}
+				const result = setLorebookEntriesEnabledByUid(abs, desired);
+				// 程序卡接管过的条目以源书 enabled/disable 为真源，清掉梨园用户覆盖避免双重状态。
+				const touched = new Set(result.touchedFingerprints);
+				const disabled = (config.disabledLore ?? []).filter((fp) => !touched.has(fp));
+				const next = { ...config, disabledLore: [...disabled] } as Record<string, unknown>;
+				if ((next.disabledLore as string[]).length === 0) delete next.disabledLore;
+				writeJsonWithBackup(configPath(host.cwd), next);
+				await host.softRefreshConfig();
+				sendJson(res, 200, { ok: true, path, changed: result.changed });
+				return true;
+			}
 			case "POST /api/lorebooks/import": {
 				const rawName = (query.get("name") ?? "").trim().replace(/\.json$/i, "");
 				if (!rawName) throw new Error("缺少 name");
@@ -2483,6 +2681,11 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				// 打开连接面板时：agent.json → models.json，并重绑当前模型（手改 maxTokens 等无需整进程重启）
 				loadOrSeedAgentConfig(host);
 				await rebindCurrentModel(host);
+				sendJson(res, 200, host.listModels());
+				return true;
+			}
+			case "GET /api/models/catalog": {
+				// 设置页只读模型目录：不得刷新 registry、重绑会话或写 model-change。
 				sendJson(res, 200, host.listModels());
 				return true;
 			}
@@ -2827,7 +3030,7 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				return true;
 			}
 			case "POST /api/channels/test": {
-				const body = JSON.parse(await readBody(req)) as { name?: string; baseUrl?: string; apiKey?: string };
+				const body = JSON.parse(await readBody(req)) as { name?: string; profileId?: string; baseUrl?: string; apiKey?: string };
 				let baseUrl = (body.baseUrl ?? "").trim();
 				let apiKey = (body.apiKey ?? "").trim() || undefined;
 				const name = (body.name ?? "").trim();
@@ -2840,6 +3043,14 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 						if (k && k !== "placeholder") apiKey = k; // $ENV 由 probe 解析
 					}
 				}
+				const profileId = (body.profileId ?? "").trim();
+				if (profileId && !apiKey) {
+					const profile = loadProfile(host.cwd, profileId);
+					if (!profile) throw new Error(`配置不存在：${profileId}`);
+					const provider = profile.config.providers[name] ?? Object.values(profile.config.providers)[0];
+					const k = typeof provider?.apiKey === "string" ? provider.apiKey : "";
+					if (k && k !== "placeholder") apiKey = k;
+				}
 				if (!baseUrl) throw new Error("缺少 name 或 baseUrl");
 				const result = await probeModelsEndpoint(baseUrl, apiKey);
 				sendJson(res, 200, { ok: result.ok, status: result.status, detail: result.detail });
@@ -2848,6 +3059,7 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 			case "POST /api/channels/fetch-models": {
 				const body = JSON.parse(await readBody(req)) as {
 					name?: string;
+					profileId?: string;
 					baseUrl?: string;
 					apiKey?: string;
 					apply?: boolean;
@@ -2864,6 +3076,14 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 						const k = typeof ch.apiKey === "string" ? ch.apiKey : "";
 						if (k && k !== "placeholder") apiKey = k;
 					}
+				}
+				const profileId = (body.profileId ?? "").trim();
+				if (profileId && !apiKey) {
+					const profile = loadProfile(host.cwd, profileId);
+					if (!profile) throw new Error(`配置不存在：${profileId}`);
+					const provider = profile.config.providers[name] ?? Object.values(profile.config.providers)[0];
+					const k = typeof provider?.apiKey === "string" ? provider.apiKey : "";
+					if (k && k !== "placeholder") apiKey = k;
 				}
 				if (!baseUrl) throw new Error("缺少 name 或 baseUrl");
 				const result = await probeModelsEndpoint(baseUrl, apiKey);
@@ -2894,6 +3114,27 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				writeJsonWithBackup(configPath(host.cwd), next);
 				await host.softRefreshConfig();
 				sendJson(res, 200, { config: next });
+				return true;
+			}
+			case "GET /api/novelai": {
+				sendJson(res, 200, { config: publicNovelAiConfig(loadNovelAiConfig(host.cwd)) });
+				return true;
+			}
+			case "PUT /api/novelai": {
+				const patch = JSON.parse(await readBody(req)) as Record<string, unknown>;
+				const config = updateNovelAiConfig(host.cwd, patch);
+				sendJson(res, 200, { config: publicNovelAiConfig(config) });
+				return true;
+			}
+			case "POST /api/novelai/generate": {
+				const body = JSON.parse(await readBody(req)) as { prompt?: string; negativePrompt?: string; caption?: string; seed?: number };
+				const prompt = String(body.prompt ?? "").trim();
+				if (!prompt) throw new Error("生图提示词为空");
+				const result = await generateNovelAiImageCached(host.cwd, prompt, {
+					negativePrompt: typeof body.negativePrompt === "string" ? body.negativePrompt : undefined,
+					seed: typeof body.seed === "number" ? body.seed : undefined,
+				});
+				sendJson(res, 200, { ...result, caption: String(body.caption ?? "").trim() });
 				return true;
 			}
 
@@ -3347,28 +3588,9 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				if (fps.length === 0) throw new Error("缺少 fingerprint(s)");
 				const config = loadConfig(host.cwd);
 				const disabled = new Set(config.disabledLore ?? []);
-				// 启用方向：光摘 disabledLore 恢复不了源文件里本就 disabled 的条目（导入即关闭是常态），
-				// 必须把 enable 写回源文件——否则「启用」对这类条目是空操作。
-				const enableCandidates = body.enabled
-					? (() => {
-							const card = loadCardFile(resolvePath(host.cwd, config.card));
-							const paths = listLorebookFiles(host.cwd, config).map((b) => resolvePath(host.cwd, b.path));
-							paths.push(overlayPathFor(host.cwd, card.name));
-							return paths;
-						})()
-					: null;
 				for (const fp of fps) {
-					if (body.enabled) {
-						disabled.delete(fp);
-						if (enableCandidates) {
-							for (const abs of enableCandidates) {
-								if (!existsSync(abs)) continue;
-								if (patchLorebookFileEntry(abs, fp, { enabled: true })) break;
-							}
-						}
-					} else {
-						disabled.add(fp);
-					}
+					if (body.enabled) disabled.delete(fp);
+					else disabled.add(fp);
 				}
 				const next = { ...config, disabledLore: [...disabled] } as Record<string, unknown>;
 				if ((next.disabledLore as string[]).length === 0) delete next.disabledLore;
@@ -3511,59 +3733,6 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				if (refuseWhileStreaming()) return true;
 				sendJson(res, 200, { ok: true });
 				// 先回包再退：前端收到 ok 后展示「重启中」并等重连
-				host.updateRestart();
-				return true;
-			}
-
-			// ---- 项目完整备份 / 恢复 ----
-			case "POST /api/backup/create": {
-				if (refuseWhileStreaming()) return true;
-				const dir = join(host.cwd, ".liyuan-cache", "backup");
-				mkdirSync(dir, { recursive: true });
-				const name = `liyuan-backup-${new Date().toISOString().replace(/[:.]/g, "-")}.zip`;
-				const outPath = join(dir, name);
-				const r = buildBackupZip(host.cwd, host.agentDir(), outPath);
-				host.notify("info", `已在本机备份 ${r.count} 个文件（${formatBytes(r.bytes)}）`);
-				sendJson(res, 200, { ok: true, filename: name, files: r.count, bytes: r.bytes });
-				return true;
-			}
-			case "GET /api/backup/download": {
-				if (refuseWhileStreaming()) return true;
-				const dir = join(host.cwd, ".liyuan-cache", "backup");
-				mkdirSync(dir, { recursive: true });
-				const name = `liyuan-backup-${new Date().toISOString().replace(/[:.]/g, "-")}.zip`;
-				const outPath = join(dir, name);
-				buildBackupZip(host.cwd, host.agentDir(), outPath);
-				res.writeHead(200, {
-					"content-type": "application/zip",
-					"content-disposition": `attachment; filename="${name}"`,
-				});
-				createReadStream(outPath).pipe(res);
-				res.on("finish", () => {
-					try {
-						rmSync(outPath, { force: true });
-					} catch {
-						/* 清理临时导出失败无碍 */
-					}
-				});
-				return true;
-			}
-			case "POST /api/backup/import": {
-				if (refuseWhileStreaming()) return true;
-				const data = await readBodyRaw(req, MAX_BACKUP_UPLOAD);
-				if (data.length === 0) throw new Error("备份文件为空");
-				// 暂存 zip 放在 restore/ 的兄弟目录——stageRestore 会先清空 restore/，写进去会被自己删掉
-				const dir = join(host.cwd, ".liyuan-cache", "backup");
-				mkdirSync(dir, { recursive: true });
-				const zipPath = join(dir, "incoming.zip");
-				writeFileSync(zipPath, data);
-				const manifest = stageRestore(host.cwd, zipPath);
-				rmSync(zipPath, { force: true }); // 已解压进 restore/，暂存 zip 用完即删
-				// 先回包再退：前端收到 ok 后展示「重启中」
-				sendJson(res, 200, {
-					ok: true,
-					note: `恢复点已就绪（${manifest.fileCount} 个文件），正在重启应用以完成导入…`,
-				});
 				host.updateRestart();
 				return true;
 			}

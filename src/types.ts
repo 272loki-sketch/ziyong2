@@ -34,6 +34,8 @@ export interface LorebookEntry {
 	/** 是否要求次要关键词也命中（AND_ANY 语义，v0 仅实现该逻辑） */
 	selective: boolean;
 	order: number;
+	/** 统一知识集合中的来源，仅供审计；不参与检索或冲突判定。 */
+	source?: string;
 }
 
 /**
@@ -115,7 +117,7 @@ export interface RpConfig {
 	creationMode?: "ask" | "silent";
 	/**
 	 * 固定楼层压缩：每 N 个叙事轮主动压缩一次早期正文（被裁正文先完整归档进剧情库供召回）。
-	 * 0 = 关闭主动压缩，仅保留上下文吃紧时的被动压缩。缺省 30。
+	 * 0 = 关闭自动压缩（仍可手动触发）。缺省 30。
 	 */
 	compactEveryNTurns?: number;
 	/**
@@ -125,6 +127,18 @@ export interface RpConfig {
 	assistantModel?: { provider: string; id: string };
 	/** 一档卡皮肤:显示向美化正则被用户关闭的卡路径列表(默认开;spec 2026-07-22 §7 P1) */
 	cardSkinOff?: string[];
+	/** 文学工作流：profile=周期画像；guided=画像+条件连续性+每拍导演；均不修改状态 */
+	literaryQuality?: "off" | "profile" | "guided";
+	/** 文学画像刷新周期（完成的叙事拍数）；首次启用会在第一拍后生成 */
+	literaryProfileEveryNTurns?: number;
+	/** 后台世界推演；规则来自 workflow: world 的用户 Skill，状态随分支树回档。 */
+	literaryWorldEnabled?: boolean;
+	/** 鲜活世界生态：每拍补充双池并推进人物、地点、日程与可错过事件。 */
+	literaryEcologyEnabled?: boolean;
+	/** 联网查证：off=关闭；auto=模型按需；manual=仅用户本拍明确要求联网时可用 */
+	webResearchMode?: "off" | "auto" | "manual";
+	/** 各旁路步骤的项目级模型覆盖；缺少某项即继承当前剧情总插头 */
+	stepModels?: import("./model-routing.ts").StepModelOverrides;
 }
 
 export const DEFAULT_CONFIG: RpConfig = {
@@ -139,6 +153,11 @@ export const DEFAULT_CONFIG: RpConfig = {
 	greeting: true,
 	backendControl: true,
 	compactEveryNTurns: 30,
+	literaryQuality: "off",
+	literaryProfileEveryNTurns: 8,
+	literaryWorldEnabled: false,
+	literaryEcologyEnabled: false,
+	webResearchMode: "off",
 };
 
 /** 宏替换上下文 */

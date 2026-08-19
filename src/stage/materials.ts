@@ -8,7 +8,7 @@
  * 本模块只读盘、不写盘、零 pi 依赖。
  */
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 
 import { loadCardFile, applyMacros, readCardRawJson } from "../card.ts";
@@ -32,8 +32,11 @@ import {
 	type MarkerMaterials,
 } from "../preset-assemble.ts";
 import { loadPresetDoc, type PresetDoc } from "../preset-doc.ts";
+import { normalizeRpPreset, type RpPreset } from "../preset.ts";
 import { resolveConfigPath } from "../paths.ts";
 import { DEFAULT_CONFIG, type CharacterCard, type LorebookEntry, type RpConfig } from "../types.ts";
+import { normalizeStepModels } from "../model-routing.ts";
+import { scanSkillFiles, type SkillFile } from "./skill-store.ts";
 
 /**
  * 预设格式栈的已知标签：**只在送模历史整块剥**（防往拍模仿），显示层照常渲染。
@@ -50,10 +53,14 @@ export type { AssembledPiece } from "../preset-assemble.ts";
 export interface StageMaterials {
 	config: RpConfig;
 	card: CharacterCard;
-	/** 已挂载世界书 + 补充设定集 overlay，禁用项与外部插件协议条目已剔除 */
+	/** 角色卡原始 JSON。只供独立谢幕轮判断任意卡格式，不参与正文装配。 */
+	rawCard: Record<string, unknown>;
+	/** 卡内嵌书 + 已挂载世界书 + 补充设定集 overlay，禁用项与外部插件协议条目已剔除 */
 	entries: LorebookEntry[];
 	/** 预设文档（原文 + 归一条目）；null＝未配置且无默认预设 */
 	presetDoc: PresetDoc | null;
+	/** 旧文学旁路消费的归一预设视图；装配权威仍是 presetDoc 原始 JSON。 */
+	preset: RpPreset | null;
 	/** 装配产物：chatHistory 槽位之前的片段（含已归位的 marker 材料），按预设作者原序 */
 	presetBefore: AssembledPiece[];
 	/** injection_position=1 的深度注入片段（数据层保真；消费待后续里程碑接入） */
@@ -62,6 +69,8 @@ export interface StageMaterials {
 	declaredMarkers: Set<string>;
 	/** skill 一等素材位（M-R2）：工作目录 skills/<name>/SKILL.md 扫描产物 */
 	skillFiles: SkillFile[];
+	/** 文学主演附加指导；官方原始预设管线不再从预设拆出这一层。 */
+	writerGuidance: Array<{ topic: string; text: string }>;
 	/** 装配报告：每块去向（engine 落盘 .liyuan/preset-assembly.json） */
 	presetAssembly: AssembleReportItem[];
 	/** 历史前段全部求值后内容——机械规则提取（extractDraftRules）用 */
@@ -70,6 +79,8 @@ export interface StageMaterials {
 	markerMaterials: MarkerMaterials;
 	/** 任一渠道有启用块——扮演规范让位给预设的判定依据 */
 	presetActive: boolean;
+	/** 卡作者声明的格式入口，供独立谢幕材料裁剪。 */
+	statusBarFormats: string[];
 	/** 宏求值遇到的清单外宏名（供引擎降级告警） */
 	macroWarnings: string[];
 	/** M-C2：被判死的外部插件协议条目（世界书通道 H 类退场，进装配报告） */
@@ -91,64 +102,8 @@ export function loadStageConfig(cwd: string): RpConfig {
 			raw = { ...DEFAULT_CONFIG };
 		}
 	}
+	raw.stepModels = normalizeStepModels(raw.stepModels);
 	return setMountedLorebooks(raw, mountedLorebookPaths(raw));
-}
-
-/** skill 文件（agentskills.io 布局：skills/<name>/SKILL.md，frontmatter name+description 必填） */
-export interface SkillFile {
-	name: string;
-	/** L1 触发面（只写 when）；进 system `# 可用 skill` 索引 */
-	description: string;
-	/** 常驻档：正文随 system 送达（每拍都用的流程骨架）；拉取档走 skill_read */
-	resident: boolean;
-	/** 必定读取（每轮）：落笔前受理门强制先 skill_read（制造停顿=死磕燃料）；与 resident 互斥 */
-	everyBeat: boolean;
-	body: string;
-	/** 存储目录名（skills/<dir>/SKILL.md；编辑器按它定位文件，通常与 name 一致） */
-	dir?: string;
-}
-
-/**
- * 扫描 skills/ 目录（M-R2 §4.C）。frontmatter 缺 name/description 的包跳过（不猜）；
- * 解析是死板的数据读取——内容全部署名归包作者，harness 零改写。
- */
-export function scanSkillFiles(cwd: string): SkillFile[] {
-	const root = join(cwd, "skills");
-	if (!existsSync(root)) return [];
-	const out: SkillFile[] = [];
-	for (const dir of readdirSync(root, { withFileTypes: true })) {
-		if (!dir.isDirectory()) continue;
-		const file = join(root, dir.name, "SKILL.md");
-		if (!existsSync(file)) continue;
-		let raw = "";
-		try {
-			raw = readFileSync(file, "utf8");
-		} catch {
-			continue;
-		}
-		// frontmatter: --- fence, key: value lines (no regex; line-based)
-		const rawLines = raw.split("\n").map((l) => (l.endsWith("\r") ? l.slice(0, -1) : l));
-		if ((rawLines[0] ?? "").trim() !== "---") continue;
-		const endIdx = rawLines.findIndex((l, i) => i > 0 && l.trim() === "---");
-		if (endIdx < 0) continue;
-		const meta = new Map<string, string>();
-		for (const line of rawLines.slice(1, endIdx)) {
-			const colon = line.indexOf(":");
-			if (colon > 0) meta.set(line.slice(0, colon).trim(), line.slice(colon + 1).trim());
-		}
-		const name = meta.get("name") ?? "";
-		const description = meta.get("description") ?? "";
-		if (!name || !description) continue;
-		out.push({
-			name,
-			description: description.slice(0, 1024),
-			resident: meta.get("resident") === "true",
-			everyBeat: meta.get("每轮") === "true",
-			body: rawLines.slice(endIdx + 1).join("\n").trim(),
-			dir: dir.name,
-		});
-	}
-	return out;
 }
 
 /** 装载一拍所需全部素材；卡缺失/损坏时抛错（引擎转告用户，不演） */
@@ -157,29 +112,36 @@ export function loadStageMaterials(cwd: string): StageMaterials {
 
 	const cardAbs = resolvePath(cwd, config.card);
 	const card = loadCardFile(cardAbs);
+	const rawCard = readCardRawJson(cardAbs).raw;
 	// 卡原文（含 extensions.regex_scripts）：显示/送模两侧与 cardfront 快照同源
 	const cardRegexScripts = (() => {
 		try {
-			return extractRegexScripts(readCardRawJson(cardAbs).raw);
+			return extractRegexScripts(rawCard);
 		} catch {
 			return [];
 		}
 	})();
 
-	// 世界书：已挂载独立书（0..N）+ 补充设定集 overlay；卡内 character_book 不自动进上下文
+	// 剧情知识：卡内 character_book + 已挂载独立书（0..N）+ 补充设定集 overlay。
+	// 下游常驻、被动扫描、索引与主动检索只消费这一个去重后的权威集合。
 	const fileGroups: LorebookEntry[][] = [];
 	for (const rel of mountedLorebookPaths(config)) {
 		const abs = resolvePath(cwd, rel);
-		if (existsSync(abs)) fileGroups.push(loadLorebookFile(abs));
+		if (existsSync(abs)) fileGroups.push(loadLorebookFile(abs).map((entry) => ({ ...entry, source: `lorebook:${rel}` })));
 	}
 	const fileEntries = mergeEntries(...fileGroups);
 	const overlayFile = overlayPathFor(cwd, card.name);
-	const overlayEntries = existsSync(overlayFile) ? loadLorebookFile(overlayFile) : [];
+	const overlayEntries = existsSync(overlayFile)
+		? loadLorebookFile(overlayFile).map((entry) => ({ ...entry, source: "overlay" }))
+		: [];
 	// 用户级停用 → 外部插件协议判死（M-C2）。协议条目是 H 类「脑内 harness」：
 	// 指望酒馆插件解析的输出格式强制令，梨园无解析器且原生 world_state_update 已覆盖其功能，
 	// 留着只会与 draft_write「纯剧情文字」互斥（实测首拍 31% 思考 + 正文污染 + 双份记账）。
 	const protocolFiltered = stripProtocolEntries(
-		applyDisabledLore(mergeEntries(fileEntries, overlayEntries), config.disabledLore),
+		applyDisabledLore(
+			mergeEntries(card.book.map((entry) => ({ ...entry, source: "card" })), fileEntries, overlayEntries),
+			config.disabledLore,
+		),
 	);
 	const entries = protocolFiltered.entries;
 	const protocolDrops = protocolFiltered.dropped;
@@ -235,6 +197,7 @@ export function loadStageMaterials(cwd: string): StageMaterials {
 	const presetAssembly = assembled?.report ?? [];
 	const presetRuleTexts = presetBefore.filter((p) => p.source === "block").map((p) => p.text);
 	const presetActive = !!assembled && assembled.before.length + assembled.after.length + assembled.depth.length > 0;
+	const preset = presetDoc ? normalizeRpPreset(presetDoc.raw) : null;
 	const unsupported = new Set(assembled?.unsupported ?? []);
 
 	// 显示层折叠标签：预设约定的思维链/草稿标签在 UI 折叠（server 侧注册表）；
@@ -252,16 +215,25 @@ export function loadStageMaterials(cwd: string): StageMaterials {
 	return {
 		config,
 		card,
+		rawCard,
 		entries,
 		presetDoc,
+		preset,
 		presetBefore,
 		presetDepth,
 		declaredMarkers,
 		skillFiles: scanSkillFiles(cwd),
+		writerGuidance: [],
 		presetAssembly,
 		presetRuleTexts,
 		markerMaterials,
 		presetActive,
+		// 谢幕只需知道作者正则匹配哪些标签；replacement 可能是数十 KB HTML，绝不送料。
+		statusBarFormats: cardRegexScripts.flatMap((script) => {
+			if (!script || typeof script !== "object") return [];
+			const source = (script as Record<string, unknown>).findRegex;
+			return typeof source === "string" && source.trim() ? [source] : [];
+		}).slice(0, 32),
 		macroWarnings: [...unsupported],
 		protocolDrops,
 		// 送模侧作者正则：预设 + 卡（与 cardfront 显示侧同源；promptOnly/破坏性规则）

@@ -305,7 +305,9 @@ export function escapeScriptEndTags(html: string): string {
 	return out;
 }
 
-export function buildSrcDoc(html: string, scripts: boolean, seamless: boolean, viewportPx?: number): string {
+export function buildSrcDoc(html: string, scripts: boolean, seamless: boolean, viewportOrVariables?: number | unknown, variablesArg?: unknown): string {
+	const viewportPx = typeof viewportOrVariables === "number" ? viewportOrVariables : undefined;
+	const variables = typeof viewportOrVariables === "number" ? variablesArg : viewportOrVariables;
 	// 先修用户 HTML 内脚本截断，再注入带真实 </script> 的垫片
 	const raw = escapeScriptEndTags(html.trim());
 	// 静态无痕帧：作者样式里的 vh 折成真窗口高的 px。帧高按内容量，而 vh 的内容高又取决于帧高，
@@ -320,7 +322,10 @@ export function buildSrcDoc(html: string, scripts: boolean, seamless: boolean, v
 		: `default-src 'none'; style-src 'unsafe-inline' https: http: data:; img-src data: blob: https: http:; font-src data: https: http:; media-src data: blob: https: http:`;
 	const seamlessCss = isFull ? (takeover ? TAKEOVER_DOC_CSS : SEAMLESS_DOC_CSS) : SEAMLESS_FRAGMENT_CSS;
 	// 脚本帧：垫片桥必须先于卡脚本，保证 eventOn / TavernHelper / jQuery / 变量系统在初始化时已存在
-	const bridge = scripts ? IFRAME_TAVERN_BRIDGE_SNIPPET + IFRAME_TAVERN_GLOBALS_SNIPPET : "";
+	const variableSeed = scripts && variables !== undefined
+		? `<script>window.__liyuanVariables=${JSON.stringify(variables).replace(/</g, "\\u003c")};</script>`
+		: "";
+	const bridge = scripts ? variableSeed + IFRAME_TAVERN_BRIDGE_SNIPPET + IFRAME_TAVERN_GLOBALS_SNIPPET : "";
 	const head =
 		`<meta charset="utf-8">` +
 		`<meta http-equiv="Content-Security-Policy" content="${csp}">` +

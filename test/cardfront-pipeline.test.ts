@@ -11,7 +11,7 @@ import { prepareDisplayText } from "../src/postprocess.ts";
 import { applyCardSkin } from "../web/src/cardSkin.ts";
 import { isFullInterface, splitHtmlParts } from "../web/src/htmlEmbed.ts";
 import { buildSrcDoc } from "../web/src/frameDoc.ts";
-import { splitRichContentParts } from "../web/src/richContentParts.ts";
+import { splitRichContentParts, stripProjectedFormats } from "../web/src/richContentParts.ts";
 
 /** 淫宫美人录形态：开闭标签换皮（内含 <status>，会误触发 isPanelTagName） */
 const skinScripts = [
@@ -144,6 +144,15 @@ test("显示管线: 无作者正则时 StatusBlock 剥壳成裸文本(对齐酒�
 	// 前端这层只负责不把它抠成梨园灰框（作者没写正则 → 无 html 段）
 	const parts = splitRichContentParts(displayed, null);
 	assert.equal(parts.filter((p) => p.kind === "html").length, 0, "无正则不出 html 段");
+});
+
+test("原生投影: options 从正文隐藏，其他卡格式保持原样", () => {
+	const text = "正文\n<options>1. 左边\n2. 右边</options>\n<Small_theater>BBS</Small_theater>";
+	const stripped = stripProjectedFormats(text, { options: true });
+	assert.equal(stripped.includes("<options>"), false);
+	assert.match(stripped, /正文/);
+	assert.match(stripped, /<Small_theater>BBS<\/Small_theater>/);
+	assert.equal(stripProjectedFormats(text), text);
 });
 
 test("pipeline: 整楼界面判定", () => {

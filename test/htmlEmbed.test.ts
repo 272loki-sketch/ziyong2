@@ -46,6 +46,31 @@ test("splitHtmlParts: 正文中的顶层 <div> 块切为 html 段(皮肤产物�
 	assert.equal(p[2].kind, "text");
 });
 
+test("splitHtmlParts: style 与 class 容器作为同一个 HTML fragment", () => {
+	const text = `前文\n<!-- skin --!>\n<style>.cote-elite-content{color:red}</style>\n<div class="cote-elite-content">状态</div>\n后文`;
+	const p = splitHtmlParts(text);
+	assert.equal(p.length, 3);
+	assert.equal(p[0].kind, "text");
+	assert.equal(p[1].kind, "html");
+	if (p[1].kind === "html") {
+		assert.ok(p[1].html.includes("<style>"));
+		assert.ok(p[1].html.includes('class="cote-elite-content"'));
+	}
+	assert.equal(p[2].kind, "text");
+});
+
+test("splitHtmlParts: 外层 class 容器包住 style 时整个外层容器进同一帧", () => {
+	const text = `前文\n<div class="cote-elite-container"><style>.cote-elite-content{color:red}</style><div class="cote-elite-content">状态</div></div>\n后文`;
+	const p = splitHtmlParts(text);
+	assert.equal(p.length, 3);
+	assert.equal(p[1].kind, "html");
+	if (p[1].kind === "html") {
+		assert.ok(p[1].html.startsWith('<div class="cote-elite-container">'));
+		assert.ok(p[1].html.includes(".cote-elite-content"));
+		assert.ok(p[1].html.endsWith("</div>"));
+	}
+});
+
 test("splitHtmlParts: 嵌套同名 div 深度配平", () => {
 	const text = "<div><div>内</div></div>后文";
 	const p = splitHtmlParts(text);

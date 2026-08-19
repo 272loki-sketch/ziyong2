@@ -19,6 +19,8 @@ test("场记提示词：只记账，不含连续性审查", () => {
 	assert.ok(!systemPrompt.includes("连续性"), "不再做连续性审查");
 	assert.ok(!systemPrompt.includes("unasked_turn"), "不再做先斩后奏检测");
 	assert.ok(systemPrompt.includes("否定性事件"), "拒收类事件必须显式要求记账");
+	assert.match(systemPrompt, /保留完整日期/);
+	assert.match(systemPrompt, /不得猜造日期/);
 	assert.ok(systemPrompt.includes("青梧"));
 	assert.ok(userText.includes("【当前账本】"));
 	assert.ok(userText.includes("阿远：*我递出怀表*"));
@@ -50,6 +52,8 @@ test("场记输出解析：只取 patch，丢弃审查字段", () => {
 	assert.deepEqual(fenced.warnings, []);
 
 	assert.equal(parseScribeResult("模型拒绝输出 JSON 的散文"), null);
+	assert.equal(parseScribeResult('{"error":"rate limited"}'), null, "没有 patch 的错误对象不能伪装成空补丁");
+	assert.equal((parseScribeResult('示例 {"foo":1}，实际 {"patch":{"time":"2015年4月8日"}}')?.patch as { time?: string }).time, "2015年4月8日");
 	const malformed = parseScribeResult('{"patch": "不是对象", "warnings": [42, "有效告警", ""]}');
 	assert.ok(malformed);
 	assert.deepEqual(malformed.patch, {}, "非对象 patch 应回退为空");

@@ -24,6 +24,9 @@ export function HtmlFrame({
 	seamless = false,
 	minHeight = 120,
 	maxHeight = 560,
+	collapsible = false,
+	defaultOpen = true,
+	variables,
 }: {
 	html: string;
 	title?: string;
@@ -32,6 +35,10 @@ export function HtmlFrame({
 	seamless?: boolean;
 	minHeight?: number;
 	maxHeight?: number;
+	collapsible?: boolean;
+	defaultOpen?: boolean;
+	/** 梨园权威状态投影出的 ST/MVU 只读变量。 */
+	variables?: unknown;
 }) {
 	const frameId = useId();
 	const ref = useRef<HTMLIFrameElement>(null);
@@ -40,7 +47,14 @@ export function HtmlFrame({
 		programApp && typeof window !== "undefined" ? programViewportHeight(window) : minHeight,
 	);
 	const [showSource, setShowSource] = useState(false);
-	const srcDoc = buildSrcDoc(html, scripts, seamless, typeof window !== "undefined" ? window.innerHeight : undefined);
+	const [open, setOpen] = useState(defaultOpen);
+	const srcDoc = buildSrcDoc(
+		html,
+		scripts,
+		seamless,
+		typeof window !== "undefined" ? window.innerHeight : undefined,
+		variables,
+	);
 	/**
 	 * 沙箱矩阵：
 	 * - 静态 seamless：only same-origin（量高，无脚本）
@@ -52,7 +66,7 @@ export function HtmlFrame({
 	 */
 	const sandbox = scripts
 		? seamless
-			? "allow-scripts allow-same-origin allow-forms allow-modals allow-popups"
+			? "allow-scripts allow-forms allow-modals allow-popups allow-same-origin"
 			: "allow-scripts"
 		: seamless
 			? "allow-same-origin"
@@ -139,6 +153,8 @@ export function HtmlFrame({
 		<figure
 			className={`msg-html ${scripts ? "msg-html-scripts" : ""} ${seamless ? "msg-html-seamless" : ""} ${programApp ? "msg-html-program" : ""}`}
 		>
+			{collapsible && <button type="button" className="drawer-btn msg-html-collapse" onClick={() => setOpen((value) => !value)}>{open ? "收起界面" : `展开${title || "界面"}`}</button>}
+			{open && <>
 			{!seamless && (
 				<div className="msg-html-bar">
 					<span className="msg-html-title">{title?.trim() || (scripts ? "交互界面" : "HTML")}</span>
@@ -168,6 +184,7 @@ export function HtmlFrame({
 			/>
 			{showSource && <pre className="msg-html-source">{html}</pre>}
 			{!seamless && title?.trim() && !showSource && <figcaption className="msg-html-cap">{title}</figcaption>}
+			</>}
 		</figure>
 	);
 }

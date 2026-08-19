@@ -11,6 +11,7 @@ import { memoryTools, type MemoryDeps } from "../memory.ts";
 import { cardTools, type CardDeps } from "../card.ts";
 import { worldlineTools, type WorldlineDeps } from "../worldline.ts";
 import { panelTools, type PanelDeps } from "../panels.ts";
+import { webResearchTools, type WebResearchDeps } from "../web-research.ts";
 
 /** @liyuan/ai Tool 的结构子集（与 src/stage/tools.ts 的 StageTool 同形） */
 export interface StageToolShape {
@@ -20,10 +21,10 @@ export interface StageToolShape {
 }
 
 /** 台上统一层依赖（各族依赖包的并集；随里程碑推进逐族扩充） */
-export type UnifiedStageDeps = LoreDeps & MemoryDeps & CardDeps & WorldlineDeps & PanelDeps;
+export type UnifiedStageDeps = LoreDeps & MemoryDeps & CardDeps & WorldlineDeps & PanelDeps & WebResearchDeps;
 
 /** 台上可见的统一层工具（世界书族 + 向量库族 + 角色库族 + 世界线族 + 面板族） */
-const ALL_TOOLS = [...loreTools, ...memoryTools, ...cardTools, ...worldlineTools, ...panelTools] as ToolSpec<UnifiedStageDeps>[];
+const ALL_TOOLS = [...loreTools, ...memoryTools, ...cardTools, ...worldlineTools, ...panelTools, ...webResearchTools] as ToolSpec<UnifiedStageDeps>[];
 const STAGE_SPECS: ToolSpec<UnifiedStageDeps>[] = toolsFor(ALL_TOOLS, "stage");
 
 const ctxFor = (language: string): ToolContext => ({ surface: "stage", language });
@@ -44,6 +45,7 @@ function availableSpecs(deps: UnifiedStageDeps): ToolSpec<UnifiedStageDeps>[] {
 		if (s.name === "panel_write") return typeof deps.writePanel === "function";
 		if (s.name === "panel_read") return typeof deps.loadPanels === "function";
 		if (s.name === "panel_close") return typeof deps.closePanel === "function";
+		if (s.name === "web_research") return typeof deps.webResearch === "function";
 		return true;
 	});
 }

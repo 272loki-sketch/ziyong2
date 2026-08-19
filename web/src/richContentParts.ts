@@ -22,9 +22,17 @@ import { findFencedHtmlDocument, looksLikeHtmlDocument, splitHtmlParts } from ".
 
 export type RichPart =
 	| { kind: "text"; text: string }
+	| { kind: "imagePrompt"; prompt: string; title: string }
 	| { kind: "html"; html: string; scripts: boolean };
 
 export type SkinMacros = { rules: DisplayRule[]; charName: string; userName: string };
+
+/** 已由结构化投影原生渲染的格式不再在正文里重复展示。 */
+export function stripProjectedFormats(text: string, projected?: { options?: boolean }): string {
+	let out = text;
+	if (projected?.options) out = out.replace(/<options\b[^>]*>[\s\S]*?<\/options\s*>/gi, "");
+	return out.replace(/\n{3,}/g, "\n\n").trim();
+}
 
 /** 正文是否已是皮肤/围栏产物（再套规则会二次替换） */
 function alreadyDisplayHtml(text: string): boolean {
@@ -56,7 +64,19 @@ export function splitRichContentParts(text: string, skin?: SkinMacros | null): R
 			out.push({ kind: "html", html: p.html, scripts: p.scripts });
 			continue;
 		}
-		if (p.text.trim()) out.push({ kind: "text", text: p.text });
+		if (p.text.trim()) {
+			let last = 0;
+			const fenced = [...p.text.matchAll(/```[\s\S]*?```/g)].map((match) => [match.index ?? 0, (match.index ?? 0) + match[0].length] as const);
+			for (const match of p.text.matchAll(/<image>\s*([\s\S]*?)\s*<\/image>/gi)) {
+				const index = match.index ?? 0;
+				if (fenced.some(([start, end]) => index >= start && index < end)) continue;
+				if (index > last) out.push({ kind: "text", text: p.text.slice(last, index) });
+				const prompt = match[1];
+				out.push({ kind: "imagePrompt", prompt, title: prompt.trimStart().match(/^【([^】]+)】/)?.[1]?.trim() || "剧情画面" });
+				last = index + match[0].length;
+			}
+			if (last < p.text.length) out.push({ kind: "text", text: p.text.slice(last) });
+		}
 	}
 	return out;
 }

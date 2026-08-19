@@ -19,6 +19,11 @@ import { isBackstageText } from "../src/stance.ts";
 import { applyDraftOps, type DraftMsgLike } from "../src/draft.ts";
 import type { RpPanel } from "../src/panels.ts";
 import type { WorldState } from "../src/types.ts";
+import type { LiteraryWorldState } from "../src/stage/literary-world.ts";
+import type { EcologyWireView } from "../src/stage/literary-ecology.ts";
+import type { WorldAuditWireView } from "../src/stage/literary-world-transition.ts";
+import type { ModularWorldWireView } from "../src/stage/literary-world-modular.ts";
+import type { PresentationView, TavernVariablesView } from "../src/presentation.ts";
 
 export type { DisplaySkin };
 export { skinAtDepth };
@@ -57,6 +62,51 @@ export type WireSegment =
 	| { kind: "text"; text: string; draft?: boolean }
 	| { kind: "tool"; activities: WireActivity[] };
 
+export type WireWorkflowStatus = "success" | "degraded" | "skipped" | "reused";
+
+export interface WireWorkflowStage {
+	id: "continuity" | "director" | "ecology-arrival" | "writer" | "curtain";
+	label: string;
+	status: WireWorkflowStatus;
+	summary: string;
+}
+
+export interface WireBeatWorkflow {
+	version: 1;
+	containsReasoning: false;
+	stages: WireWorkflowStage[];
+	continuity?: {
+		positions: string[];
+		ongoingActions: string[];
+		promisesAndDeadlines: string[];
+		unresolvedPlayerChoices: string[];
+		uncertainties: string[];
+		knowledgeBoundaryCount: number;
+	};
+	director?: {
+		scenePressure?: string;
+		characterInitiatives: Array<{ character: string; motive: string; immediateIntent: string; limit: string }>;
+		personalThreads: string[];
+		candidateBeats: string[];
+		offstageCount: number;
+		withheldCount: number;
+		relationshipLimit?: string;
+		playerStop?: string;
+	};
+	writer: {
+		planWrites: number;
+		writes: number;
+		appends: number;
+		appendRejects: number;
+		edits: number;
+		lookups: number;
+		rounds: number;
+		outputTokens: number;
+		narrativeChars: number;
+		durationMs: number;
+	};
+}
+
 export interface WireMsg {
 	channel: WireChannel;
 	/** 发言者显示名（narrative/greeting 为角色名，user 为用户名） */
@@ -92,6 +142,22 @@ export interface WireMsg {
 	 * 右箭头在末条时 = 再生成一条（原回复保留在会话树旁支，不产生世界线）。
 	 */
 	swipe?: WireSwipe;
+	/** 本次回复的运行指标（引擎落树，刷新后仍可见）。 */
+	metrics?: { durationMs: number; outputTokens: number; rounds: number };
+	/** 本拍可审计工作流；只含结构化工件和计数，不含 prompt、原始模型输出或 reasoning。 */
+	workflow?: WireBeatWorkflow;
+	/** 当前分支的后台世界快照；只展示，不拼入正文。 */
+	world?: LiteraryWorldState;
+	/** 最近一拍后台世界审计的安全投影；不含事实、秘密或拒绝提案正文。 */
+	worldAudit?: WorldAuditWireView;
+	/** 模块化世界的动态展示视图；存在时前端优先于旧 v1 卡。 */
+	worldModules?: ModularWorldWireView;
+	/** 梨园原生展示投影：状态与日历只读自权威状态，不由模型重算。 */
+	presentation?: PresentationView;
+	/** ST/MVU 卡前端的只读变量兼容投影；不得反写权威账本。 */
+	tavernVariables?: TavernVariablesView;
+	/** 当前分支的鲜活世界生态投影；幕后信息仅在用户明确展开后显示。 */
+	ecology?: EcologyWireView;
 	/**
 	 * 开场白序号（0-based index + 非空总数）。
 	 * 挂在 greeting 消息上，避免只靠 /api/card 轮询导致「正文已是第 4 条、角标还是 2」。
@@ -213,8 +279,6 @@ export interface UpdateWire {
 	error?: string;
 	/** 启动脚本监护下运行（true 才能「立即重启」；直跑 node 只能下次启动时升级） */
 	supervised?: boolean;
-	/** Docker 部署：升级靠宿主机 git pull + rebuild，容器内不下载 zip（覆盖只写可写层、重建即丢） */
-	dockerDeploy?: boolean;
 }
 
 /** Server → Client 帧 */
@@ -226,6 +290,10 @@ export type ServerFrame =
 			userName: string;
 			messages: WireMsg[];
 			state: WorldState | null;
+			world: LiteraryWorldState;
+			worldAudit: WorldAuditWireView | null;
+			worldModules: ModularWorldWireView;
+			ecology: EcologyWireView;
 			stats: WireStats | null;
 			/** agent 自建面板（柱 2）：当前活跃面板全量（页签序） */
 			panels: RpPanel[];
@@ -307,6 +375,7 @@ export type ClientFrame =
 	 * - text 给出：编辑用户输入后整轮重来（旧 user+回复进旁支）
 	 */
 	| { type: "reroll"; text?: string }
+	| { type: "curtain_reroll" }
 	/**
 	 * ST 式变体导航 / 再生成（不写世界线）。
 	 * prev|next：在同一 user 下的 sibling 间切换；在末条 next = 等同 reroll 无参。
@@ -454,6 +523,55 @@ function hasToolCall(content: unknown): boolean {
 	);
 }
 
+const boundedStrings = (value: unknown, maximum: number, chars = 180): string[] => Array.isArray(value)
+	? value.filter((item): item is string => typeof item === "string").map((item) => item.trim().slice(0, chars)).filter(Boolean).slice(0, maximum)
+	: [];
+const finiteNumber = (value: unknown): number => typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : 0;
+
+/** details 内部工件到前端的显式安全投影；不透传生态秘密、幕后线、暂扣信息或 reasoning。 */
+function workflowView(details: Record<string, unknown>): WireBeatWorkflow | undefined {
+	const rawWorkflow = details.rpWorkflow;
+	if (!rawWorkflow || typeof rawWorkflow !== "object" || Array.isArray(rawWorkflow)) return undefined;
+	const wf = rawWorkflow as Record<string, unknown>;
+	const prep = details.rpPrep && typeof details.rpPrep === "object" && !Array.isArray(details.rpPrep) ? details.rpPrep as Record<string, unknown> : {};
+	const status = prep.workflowStatus && typeof prep.workflowStatus === "object" && !Array.isArray(prep.workflowStatus) ? prep.workflowStatus as Record<string, unknown> : {};
+	const stageStatus = (key: string, fallback: WireWorkflowStatus): WireWorkflowStatus => ["success", "degraded", "skipped", "reused"].includes(String(status[key])) ? status[key] as WireWorkflowStatus : fallback;
+	const continuity = prep.literaryContinuity && typeof prep.literaryContinuity === "object" && !Array.isArray(prep.literaryContinuity) ? prep.literaryContinuity as Record<string, unknown> : null;
+	const direction = prep.literaryDirectionData && typeof prep.literaryDirectionData === "object" && !Array.isArray(prep.literaryDirectionData) ? prep.literaryDirectionData as Record<string, unknown> : null;
+	const initiatives = Array.isArray(direction?.characterInitiatives) ? direction.characterInitiatives.flatMap((item) => {
+		if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+		const row = item as Record<string, unknown>;
+		const field = (key: string) => typeof row[key] === "string" ? row[key].trim().slice(0, 180) : "";
+		return [{ character: field("character"), motive: field("motive"), immediateIntent: field("immediateIntent"), limit: field("limit") }];
+	}).slice(0, 3) : [];
+	const writer = {
+		planWrites: finiteNumber(wf.planWrites), writes: finiteNumber(wf.writes), appends: finiteNumber(wf.appends), appendRejects: finiteNumber(wf.appendRejects),
+		edits: finiteNumber(wf.edits), lookups: finiteNumber(wf.lookups), rounds: finiteNumber(wf.rounds), outputTokens: finiteNumber(wf.outputTokens),
+		narrativeChars: finiteNumber(wf.narrativeChars), durationMs: finiteNumber(wf.durationMs),
+	};
+	const stages: WireWorkflowStage[] = [
+		{ id: "continuity", label: "文学连续性", status: stageStatus("continuity", continuity ? "success" : "skipped"), summary: continuity ? "已生成并交给拍前导演" : status.continuity === "degraded" ? "调用或解析失败，本拍无补充工件" : "本拍未触发" },
+		{ id: "director", label: "Stitches 导演", status: stageStatus("director", direction ? "success" : typeof prep.literaryDirection === "string" ? "reused" : "skipped"), summary: direction ? "方向已生成并注入主演" : typeof prep.literaryDirection === "string" ? "旧导演工件已注入主演" : status.director === "degraded" ? "调用或解析失败，主演无导演工件继续" : "本拍未运行" },
+		{ id: "ecology-arrival", label: "生态抵达", status: stageStatus("ecologyArrival", prep.literaryEcology ? "success" : "skipped"), summary: status.ecologyArrival === "degraded" ? "候选失败或被门禁拒绝，沿用上一快照" : prep.literaryEcology ? "生态切面已提供给导演" : "生态关闭或未运行" },
+		{ id: "writer", label: "主演分段演出", status: "success", summary: `${writer.appends || writer.writes} 个稿段 · ${writer.rounds} 轮` },
+		{ id: "curtain", label: "独立谢幕格式", status: typeof details.rpCurtain === "string" && details.rpCurtain.trim() ? "success" : "skipped", summary: typeof details.rpCurtain === "string" && details.rpCurtain.trim() ? "已生成非正文格式工件" : "本拍没有额外格式" },
+	];
+	return {
+		version: 1, containsReasoning: false, stages, writer,
+		...(continuity ? { continuity: {
+			positions: boundedStrings(continuity.positions, 4), ongoingActions: boundedStrings(continuity.ongoingActions, 4), promisesAndDeadlines: boundedStrings(continuity.promisesAndDeadlines, 4),
+			unresolvedPlayerChoices: boundedStrings(continuity.unresolvedPlayerChoices, 4), uncertainties: boundedStrings(continuity.uncertainties, 4), knowledgeBoundaryCount: boundedStrings(continuity.knowledgeBoundaries, 4).length,
+		} } : {}),
+		...(direction ? { director: {
+			...(typeof direction.scenePressure === "string" ? { scenePressure: direction.scenePressure.slice(0, 180) } : {}), characterInitiatives: initiatives,
+			personalThreads: boundedStrings(direction.personalThreads, 3), candidateBeats: boundedStrings(direction.candidateBeats, 3), offstageCount: boundedStrings(direction.offstageThreads, 3).length,
+			withheldCount: boundedStrings(direction.withheldInformation, 3).length,
+			...(typeof direction.relationshipLimit === "string" ? { relationshipLimit: direction.relationshipLimit.slice(0, 180) } : {}),
+			...(typeof direction.playerStop === "string" ? { playerStop: direction.playerStop.slice(0, 180) } : {}),
+		} } : {}),
+	};
+}
+
 /**
  * 单条 AgentMessage → WireMsg。不属于叙事流的消息（rp-inject、toolResult、
  * 纯工具轮 / 带 toolCall 的中间 assistant、未知类型）返回 null，调用方跳过。
@@ -524,12 +642,27 @@ export function toWireMsg(m: unknown, names: WireNames, opts?: ToWireOpts): Wire
 							: seg,
 					)
 				: undefined;
+		const workflow =
+			msg.details && typeof msg.details === "object" && !Array.isArray(msg.details)
+				? (msg.details as Record<string, unknown>).rpWorkflow
+				: undefined;
+		const wf = workflow && typeof workflow === "object" && !Array.isArray(workflow)
+			? (workflow as Record<string, unknown>)
+			: null;
+		const durationMs = typeof wf?.durationMs === "number" ? wf.durationMs : 0;
+		const outputTokens = typeof wf?.outputTokens === "number" ? wf.outputTokens : 0;
+		const rounds = typeof wf?.rounds === "number" ? wf.rounds : 0;
+		const rpWorkflow = msg.details && typeof msg.details === "object" && !Array.isArray(msg.details) ? workflowView(msg.details as Record<string, unknown>) : undefined;
 		return {
 			channel,
 			name: names.charName,
 			text: body,
 			...(thinking ? { thinking } : {}),
 			...(timeline ? { timeline } : {}),
+			...(durationMs > 0 || outputTokens > 0
+				? { metrics: { durationMs, outputTokens, rounds } }
+				: {}),
+			...(rpWorkflow ? { workflow: rpWorkflow } : {}),
 			...(aborted ? { unfinished: true } : {}),
 		};
 	}

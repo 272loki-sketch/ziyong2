@@ -229,6 +229,49 @@ export function patchLorebookFileEntry(
 }
 
 /**
+ * 程序卡世界书管理器按 uid 批量切换条目启用状态。
+ * 一次读写整本书，保留所有未知 ST 字段；同时写 enabled/disable 两种生态字段。
+ */
+export function setLorebookEntriesEnabledByUid(
+	path: string,
+	desired: ReadonlyMap<number, boolean>,
+): { changed: number; touchedFingerprints: string[] } {
+	if (desired.size === 0) return { changed: 0, touchedFingerprints: [] };
+	const json = readJsonFile(path) as Record<string, unknown>;
+	const raw = json.entries;
+	if (!raw || typeof raw !== "object") throw new Error("世界书 entries 无效");
+
+	let changed = 0;
+	const touchedFingerprints: string[] = [];
+	const patch = (item: unknown, fallbackUid: number): unknown => {
+		if (!item || typeof item !== "object") return item;
+		const entry = item as Record<string, unknown>;
+		const uid = typeof entry.uid === "number" ? entry.uid : typeof entry.id === "number" ? entry.id : fallbackUid;
+		const enabled = desired.get(uid);
+		if (enabled === undefined) return item;
+		const content = typeof entry.content === "string" ? entry.content : "";
+		if (content) touchedFingerprints.push(loreFingerprint(content));
+		const wasEnabled = entry.enabled === false ? false : entry.disable === true ? false : true;
+		if (wasEnabled === enabled && entry.enabled === enabled && entry.disable === !enabled) return item;
+		changed++;
+		return { ...entry, enabled, disable: !enabled };
+	};
+
+	if (Array.isArray(raw)) {
+		json.entries = raw.map((item, i) => patch(item, i));
+	} else {
+		const next: Record<string, unknown> = {};
+		for (const [key, item] of Object.entries(raw as Record<string, unknown>)) {
+			const numericKey = Number.parseInt(key, 10);
+			next[key] = patch(item, Number.isFinite(numericKey) ? numericKey : -1);
+		}
+		json.entries = next;
+	}
+	if (changed > 0) writeFileSync(path, `${JSON.stringify(json, null, "\t")}\n`, "utf8");
+	return { changed, touchedFingerprints: [...new Set(touchedFingerprints)] };
+}
+
+/**
  * 按内容指纹从世界书 JSON 里删除一条（其余条目原样保留，含未知 ST 字段）。
  * 兼容 ST 对象 entries（uid→条目）与卡内嵌/补充设定数组 entries。
  * 返回被删条目的归一化视图；未命中返回 null（文件不写）。

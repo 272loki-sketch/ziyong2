@@ -108,8 +108,21 @@ export function normalizeAgentConfig(raw: unknown): LiyuanAgentConfig {
 	for (const [name, p] of Object.entries(providersIn)) {
 		if (!p || typeof p !== "object" || Array.isArray(p)) continue;
 		const pr = p as Record<string, unknown>;
+		const api = typeof pr.api === "string" ? pr.api : undefined;
+		const baseUrl = typeof pr.baseUrl === "string" ? pr.baseUrl : "";
+		const officialOpenAi = /(?:api\.openai\.com|openai\.azure\.com|cognitiveservices\.azure\.com)/i.test(baseUrl);
+		const compat = pr.compat && typeof pr.compat === "object" && !Array.isArray(pr.compat)
+			? { ...(pr.compat as Record<string, unknown>) }
+			: {};
+		// 第三方 chat/completions 的最低公分母只有 system/user/assistant/tool。
+		// developer 与 reasoning_effort 均需端点明确支持，不能因换模型就乐观发送。
+		if (api === "openai-completions" && !officialOpenAi) {
+			if (compat.supportsDeveloperRole === undefined) compat.supportsDeveloperRole = false;
+			if (compat.supportsReasoningEffort === undefined) compat.supportsReasoningEffort = false;
+		}
 		providers[name] = {
 			...pr,
+			...(Object.keys(compat).length > 0 ? { compat } : {}),
 			models: normalizeModels(pr.models),
 		};
 	}
@@ -153,11 +166,48 @@ export function saveAgentConfig(cwd: string, config: LiyuanAgentConfig): void {
  * - 默认模型/思考/shell/skills → 项目 .liyuan/settings.json（合并）
  * - 默认模型/思考 → agentDir/settings.json（合并，影响全局默认）
  */
+/**
+ * 仓库里所有渠道（provider 名 → 档案）。跨配置可复用的渠道池：
+ * 运行时需要这些渠道，好让「模型插头」能选用任何已配置渠道的模型，
+ * 而不只是当前启用的那一个（hajimi 配置存在仓库、却不在当前启用配置时仍可选）。
+ */
+export function warehouseProviders(cwd: string): Record<string, AgentProvider> {
+	const dir = profilesDir(cwd);
+	if (!existsSync(dir)) return {};
+	const out: Record<string, AgentProvider> = {};
+	for (const f of readdirSync(dir)) {
+		if (!f.endsWith(".json")) continue;
+		const id = f.replace(/\.json$/i, "");
+		const rec = loadProfile(cwd, id);
+		if (!rec) continue;
+		for (const [pname, p] of Object.entries(rec.config.providers ?? {})) {
+			// models.json 的 schema 不接受空 apiKey；无有效鉴权的仓库配置也不会出现在
+			// getAvailable()，合并进去只会让整个模型目录加载失败（最终显示 unknown/unknown）。
+			if (!keyMeta(p.apiKey).hasKey || normalizeModels(p.models).length === 0) continue;
+			if (!out[pname]) out[pname] = p;
+		}
+	}
+	return out;
+}
+
+/** defaultProvider 指向的渠道不在 providers 里时（换渠道后配置损坏），从仓库补回。 */
+export function repairDefaultProvider(cwd: string, config: LiyuanAgentConfig): LiyuanAgentConfig {
+	if (!config.defaultProvider || config.providers[config.defaultProvider]) return config;
+	const p = warehouseProviders(cwd)[config.defaultProvider];
+	if (!p) return config;
+	return { ...config, providers: { ...config.providers, [config.defaultProvider]: p } };
+}
+
 export function syncAgentConfigToRuntime(cwd: string, agentDir: string, config: LiyuanAgentConfig): void {
 	const cfg = normalizeAgentConfig(config);
 
-	// providers → models.json
-	writeJsonBackup(join(agentDir, "models.json"), { providers: cfg.providers });
+	// providers → models.json：当前启用渠道 + 仓库全部渠道（运行时支持多渠道并存，
+	// 让文学/生态旁路模型插头可选用任何已配置的模型，故事总插头不受影响）。
+	const providers = { ...cfg.providers };
+	for (const [pname, p] of Object.entries(warehouseProviders(cwd))) {
+		if (!providers[pname]) providers[pname] = p;
+	}
+	writeJsonBackup(join(agentDir, "models.json"), { providers });
 
 	const patchSettings = (path: string, fields: Record<string, unknown>) => {
 		let cur: Record<string, unknown> = {};
@@ -226,15 +276,14 @@ export function seedProviderFromRuntime(input: {
 		reasoning?: boolean;
 		contextWindow?: number;
 		maxTokens?: number;
-		[key: string]: unknown;
 	}>;
 }): AgentProvider {
 	const models: AgentModelEntry[] = input.models.map((m) => {
-		const e: AgentModelEntry = { ...m, id: m.id };
-		// 清理 undefined 值
-		for (const k of Object.keys(e)) {
-			if (e[k] === undefined || e[k] === null) delete e[k];
-		}
+		const e: AgentModelEntry = { id: m.id };
+		if (m.name) e.name = m.name;
+		if (m.reasoning) e.reasoning = true;
+		if (m.contextWindow) e.contextWindow = m.contextWindow;
+		if (m.maxTokens) e.maxTokens = m.maxTokens;
 		return e;
 	});
 	const p: AgentProvider = { models };
@@ -413,14 +462,6 @@ export function enableProfile(cwd: string, agentDir: string, id: string): Liyuan
 	if (!rec) throw new Error(`配置不存在：${id}`);
 	const config = normalizeAgentConfig(rec.config);
 	materializeEnvKeysInConfig(config);
-	// 合并磁盘上已有的模型字段（用户手改的 compat / thinkingLevelMap / cost 等不被覆盖丢失）
-	const onDisk = loadAgentConfig(cwd).config;
-	for (const [name, provider] of Object.entries(config.providers)) {
-		const diskProvider = onDisk.providers[name];
-		if (diskProvider && Array.isArray(diskProvider.models) && Array.isArray(provider.models)) {
-			provider.models = mergeModelsById(diskProvider.models, provider.models);
-		}
-	}
 	saveAgentConfig(cwd, config);
 	syncAgentConfigToRuntime(cwd, agentDir, config);
 	saveActiveProfileId(cwd, id);

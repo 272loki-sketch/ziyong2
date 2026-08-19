@@ -9,6 +9,8 @@
 	"greeting": true,
 	"backendControl": true,
 	"creationMode": "ask",
+	"literaryWorldEnabled": false,
+	"literaryEcologyEnabled": false,
 	"importStripTags": [],
 	"greetingIndex": 0
 }

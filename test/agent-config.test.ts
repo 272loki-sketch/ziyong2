@@ -1,155 +1,127 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { test } from "node:test";
+import test from "node:test";
 
-import {
-	enableProfile,
-	type LiyuanAgentConfig,
-	mergeModelsById,
-	normalizeAgentConfig,
-	saveAgentConfig,
-	seedProviderFromRuntime,
-	loadAgentConfig,
-	saveProfile,
-} from "../src/agent-config.ts";
+import { normalizeAgentConfig } from "../src/agent-config.ts";
 
-function makeTmpDir(): string {
-	const d = mkdtempSync(join(tmpdir(), "agent-cfg-"));
-	return d;
-}
-
-function writeConfig(cwd: string, config: LiyuanAgentConfig): void {
-	writeFileSync(join(cwd, "liyuan.agent.json"), JSON.stringify(config, null, "\t"), "utf8");
-}
-
-test("mergeModelsById：保留旧条目的 compat 等额外字段", () => {
-	const old = [
-		{ id: "deepseek/deepseek-v4-flash", reasoning: true, compat: { supportsDeveloperRole: false, thinkingFormat: "deepseek" } },
-	];
-	const incoming = [
-		{ id: "deepseek/deepseek-v4-flash", reasoning: true, contextWindow: 1000000 },
-	];
-	const merged = mergeModelsById(old, incoming);
-	assert.equal(merged.length, 1);
-	assert.equal(merged[0].id, "deepseek/deepseek-v4-flash");
-	assert.equal(merged[0].contextWindow, 1000000); // 新值生效
-	assert.deepEqual(merged[0].compat, { supportsDeveloperRole: false, thinkingFormat: "deepseek" }); // 旧值保留
-});
-
-test("mergeModelsById：incoming 的显式值覆盖旧值", () => {
-	const old = [{ id: "m1", contextWindow: 8000, compat: { foo: true } }];
-	const incoming = [{ id: "m1", contextWindow: 128000, compat: { foo: false } }];
-	const merged = mergeModelsById(old, incoming);
-	assert.equal(merged[0].contextWindow, 128000);
-	assert.deepEqual(merged[0].compat, { foo: false });
-});
-
-test("seedProviderFromRuntime：传入的额外字段不丢失", () => {
-	const provider = seedProviderFromRuntime({
-		provider: "deepseek",
-		baseUrl: "https://api.deepseek.com/v1",
-		api: "openai-completions",
-		models: [
-			{
-				id: "deepseek/deepseek-v4-flash",
-				reasoning: true,
-				contextWindow: 1000000,
-				maxTokens: 384000,
-				compat: { supportsDeveloperRole: false, thinkingFormat: "deepseek" },
-				cost: { input: 0.14, output: 0.28 },
-				thinkingLevelMap: { off: null, max: "max" },
-			} as any,
-		],
-	});
-	const m = provider.models![0];
-	assert.equal(m.id, "deepseek/deepseek-v4-flash");
-	assert.deepEqual(m.compat, { supportsDeveloperRole: false, thinkingFormat: "deepseek" });
-	assert.deepEqual(m.cost, { input: 0.14, output: 0.28 });
-	assert.deepEqual(m.thinkingLevelMap, { off: null, max: "max" });
-});
-
-test("enableProfile：磁盘上的 model compat 在启用 profile 后保留", () => {
-	const cwd = makeTmpDir();
-	try {
-		// 磁盘上已有含 compat 的配置
-		writeConfig(cwd, {
-			version: 1,
-			defaultProvider: "deepseek",
-			defaultModel: "deepseek/deepseek-v4-flash",
-			providers: {
-				deepseek: {
-					baseUrl: "https://api.deepseek.com/v1",
-					api: "openai-completions",
-					apiKey: "sk-test",
-					models: [{ id: "deepseek/deepseek-v4-flash", reasoning: true, compat: { supportsDeveloperRole: false } }],
-				},
-			},
-		});
-		// 仓库里的 profile 没有 compat（保存时还没加）
-		saveProfile(cwd, "deepseek", "deepseek", {
-			version: 1,
-			defaultProvider: "deepseek",
-			defaultModel: "deepseek/deepseek-v4-flash",
-			providers: {
-				deepseek: {
-					baseUrl: "https://api.deepseek.com/v1",
-					api: "openai-completions",
-					apiKey: "sk-test",
-					models: [{ id: "deepseek/deepseek-v4-flash", reasoning: true }],
-				},
-			},
-		});
-		// 用一个 dummy agentDir（enableProfile 不需要真实 agentDir，syncAgentConfigToRuntime 只写文件）
-		const agentDir = join(cwd, ".liyuan", "agent");
-		mkdirSync(agentDir, { recursive: true });
-		enableProfile(cwd, agentDir, "deepseek");
-		// 重读磁盘上的 liyuan.agent.json
-		const after = loadAgentConfig(cwd).config;
-		const m = after.providers.deepseek?.models?.[0];
-		assert.ok(m, "model entry should exist");
-		assert.deepEqual(m.compat, { supportsDeveloperRole: false }, "compat should survive enableProfile");
-	} finally {
-		rmSync(cwd, { recursive: true, force: true });
-	}
-});
-
-test("normalizeAgentConfig：model 上的 compat 原样保留", () => {
-	const raw = {
+test("第三方 chat/completions 默认使用最低公分母兼容能力", () => {
+	const cfg = normalizeAgentConfig({
 		version: 1,
 		providers: {
-			test: {
-				baseUrl: "https://example.com",
-				models: [
-					{ id: "m1", compat: { supportsDeveloperRole: false, maxTokensField: "max_tokens" } },
-				],
+			custom: {
+				baseUrl: "https://relay.example/v1",
+				api: "openai-completions",
+				models: [{ id: "any-reasoning-model" }],
 			},
 		},
-	};
-	const cfg = normalizeAgentConfig(raw);
-	assert.deepEqual(cfg.providers.test.models![0].compat, { supportsDeveloperRole: false, maxTokensField: "max_tokens" });
+	});
+	assert.deepEqual(cfg.providers.custom.compat, {
+		supportsDeveloperRole: false,
+		supportsReasoningEffort: false,
+	});
 });
 
-test("saveAgentConfig → loadAgentConfig 往返保留 model compat", () => {
-	const cwd = makeTmpDir();
-	try {
-		const config: LiyuanAgentConfig = {
-			version: 1,
-			defaultProvider: "ds",
-			providers: {
-				ds: {
-					baseUrl: "https://api.deepseek.com/v1",
-					apiKey: "sk-test",
-					models: [{ id: "m1", compat: { supportsDeveloperRole: false }, thinkingLevelMap: { off: null } }],
-				},
+test("第三方渠道可显式声明高级兼容能力", () => {
+	const cfg = normalizeAgentConfig({
+		version: 1,
+		providers: {
+			custom: {
+				baseUrl: "https://relay.example/v1",
+				api: "openai-completions",
+				compat: { supportsDeveloperRole: true, supportsReasoningEffort: true },
+				models: [{ id: "model" }],
 			},
-		};
-		saveAgentConfig(cwd, config);
-		const loaded = loadAgentConfig(cwd).config;
-		assert.deepEqual(loaded.providers.ds.models![0].compat, { supportsDeveloperRole: false });
-		assert.deepEqual(loaded.providers.ds.models![0].thinkingLevelMap, { off: null });
-	} finally {
-		rmSync(cwd, { recursive: true, force: true });
-	}
+		},
+	});
+	assert.equal((cfg.providers.custom.compat as Record<string, unknown>).supportsDeveloperRole, true);
+	assert.equal((cfg.providers.custom.compat as Record<string, unknown>).supportsReasoningEffort, true);
+});
+
+test("OpenAI 官方端点保留自动能力检测", () => {
+	const cfg = normalizeAgentConfig({
+		version: 1,
+		providers: {
+			openai: {
+				baseUrl: "https://api.openai.com/v1",
+				api: "openai-completions",
+				models: [{ id: "gpt" }],
+			},
+		},
+	});
+	assert.equal(cfg.providers.openai.compat, undefined);
+});
+
+import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import {
+	repairDefaultProvider,
+	saveAgentConfig,
+	saveProfile,
+	syncAgentConfigToRuntime,
+	warehouseProviders,
+} from "../src/agent-config.ts";
+
+function tempCwd(): string {
+	const cwd = mkdtempSync(join(tmpdir(), "liyuan-agentcfg-"));
+	mkdirSync(join(cwd, "liyuan-profiles"), { recursive: true });
+	return cwd;
+}
+
+test("仓库渠道合并进运行时 models.json：启用配置不含 hajimi 时仍可选", () => {
+	const cwd = tempCwd();
+	const agentDir = join(cwd, "agent-runtime");
+	saveProfile(cwd, "hajimi", "hajimi", {
+		version: 1,
+		defaultProvider: "hajimi",
+		defaultModel: "gemini-3.7-flash",
+		providers: {
+			hajimi: {
+				baseUrl: "https://relay.example/v1",
+				api: "openai-completions",
+				apiKey: "sk-test",
+				models: [{ id: "gemini-3.7-flash" }, { id: "gemini-3.1-pro-preview" }],
+			},
+		},
+	});
+	saveAgentConfig(cwd, {
+		version: 1,
+		defaultProvider: "new",
+		providers: { new: { baseUrl: "https://new.example/v1", api: "openai-completions", apiKey: "sk-new", models: [{ id: "deepseek-v4-flash" }] } },
+	});
+	syncAgentConfigToRuntime(cwd, agentDir, {
+		version: 1,
+		defaultProvider: "new",
+		providers: { new: { baseUrl: "https://new.example/v1", api: "openai-completions", apiKey: "sk-new", models: [{ id: "deepseek-v4-flash" }] } },
+	});
+	const runtime = JSON.parse(readFileSync(join(agentDir, "models.json"), "utf8")) as { providers: Record<string, { models?: Array<{ id: string }> }> };
+	assert.ok(runtime.providers.hajimi, "hajimi 渠道应合并进运行时");
+	assert.ok(runtime.providers.hajimi.models?.some((m) => m.id === "gemini-3.1-pro-preview"));
+	assert.ok(runtime.providers.new, "当前启用渠道保留");
+	assert.deepEqual(Object.keys(warehouseProviders(cwd)), ["hajimi"]);
+});
+
+test("repairDefaultProvider：defaultProvider 指向仓库渠道时补回该渠道", () => {
+	const cwd = tempCwd();
+	saveProfile(cwd, "hajimi", "hajimi", {
+		version: 1,
+		defaultProvider: "hajimi",
+		providers: { hajimi: { baseUrl: "https://relay.example/v1", api: "openai-completions", apiKey: "sk-test", models: [{ id: "gemini-3.1-pro-preview" }] } },
+	});
+	const repaired = repairDefaultProvider(cwd, { version: 1, defaultProvider: "hajimi", providers: {} });
+	assert.ok(repaired.providers.hajimi);
+	assert.equal((repaired.providers.hajimi as { models: Array<{ id: string }> }).models[0]?.id, "gemini-3.1-pro-preview");
+});
+
+test("仓库渠道合并：空 Key 配置不得破坏整个运行时模型目录", () => {
+	const cwd = tempCwd();
+	saveProfile(cwd, "empty", "empty", {
+		version: 1,
+		providers: { empty: { baseUrl: "https://empty.example/v1", api: "openai-completions", apiKey: "", models: [{ id: "unavailable" }] } },
+	});
+	saveProfile(cwd, "ready", "ready", {
+		version: 1,
+		providers: { ready: { baseUrl: "https://ready.example/v1", api: "openai-completions", apiKey: "sk-ready", models: [{ id: "available" }] } },
+	});
+	assert.deepEqual(Object.keys(warehouseProviders(cwd)), ["ready"]);
 });

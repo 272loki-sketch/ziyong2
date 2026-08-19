@@ -43,6 +43,8 @@ export const MIN_COMPACT_CHARS = 2000;
  * 把人挡回去——只要真有可裁的早期剧情就压。仍留一个下限：几百字的开局压了等于没压。
  */
 export const MANUAL_MIN_COMPACT_CHARS = 500;
+/** 单次摘要旁路输入硬上限；更长历史先压较早窗口，后续拍继续滚动压缩。 */
+export const MAX_COMPACT_INPUT_CHARS = 120_000;
 
 export interface CompactPlan {
 	/** 覆盖到此条目为止（含）——装配时该条及之前不进历史 */
@@ -113,12 +115,27 @@ export function planCompaction(branch: BranchEntryLike[], opts: PlanCompactionOp
 	const coversThroughId = covered[covered.length - 1]?.id;
 	if (!coversThroughId) return null; // 无 id 的条目（异常树）不敢下刀
 
-	const conversationText = serializeForSummary(covered, opts.userName, opts.charName);
+	let boundedCovered = covered;
+	let conversationText = serializeForSummary(boundedCovered, opts.userName, opts.charName);
+	if (conversationText.length > MAX_COMPACT_INPUT_CHARS) {
+		// 按完整树条目递增找最大安全前缀，绝不在一条消息中间硬切。
+		let low = 1, high = covered.length, best = 1;
+		while (low <= high) {
+			const mid = Math.floor((low + high) / 2);
+			const candidate = serializeForSummary(covered.slice(0, mid), opts.userName, opts.charName);
+			if (candidate.length <= MAX_COMPACT_INPUT_CHARS) { best = mid; low = mid + 1; }
+			else high = mid - 1;
+		}
+		boundedCovered = covered.slice(0, best);
+		conversationText = serializeForSummary(boundedCovered, opts.userName, opts.charName);
+	}
 	if (conversationText.length < minChars) return null;
+	const boundedThroughId = boundedCovered[boundedCovered.length - 1]?.id;
+	if (!boundedThroughId) return null;
 
 	return {
-		coversThroughId,
-		covered,
+		coversThroughId: boundedThroughId,
+		covered: boundedCovered,
 		turns: beatStarts.length - keep,
 		conversationText,
 		...(active ? { previousSummary: active.summary } : {}),
@@ -196,6 +213,10 @@ export async function runCompaction(deps: CompactRunDeps, input: CompactRunInput
 		} catch {
 			// 归档失败不挡压缩（只丢细节召回能力，连续性仍由摘要保底）
 		}
+	}
+	if (deps.getLeafId() !== leafBefore) {
+		deps.onActivity?.("压缩已丢弃（归档期间切换了分支）");
+		return { kind: "stale" };
 	}
 
 	deps.appendSummaryEntry({

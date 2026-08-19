@@ -15,6 +15,7 @@ import { applyMacros } from "../card.ts";
 import { applyCardSkin } from "../cardSkin.ts";
 import { applyDraftOps, type DraftMsgLike } from "../draft.ts";
 import { cleanAssistantText } from "../postprocess.ts";
+import { initialStateFromGreeting } from "../greeting.ts";
 import { formatState, defaultState } from "../state.ts";
 import { isBackstageText } from "../stance.ts";
 import type { DisplayRule } from "../cardfront.ts";
@@ -32,7 +33,7 @@ export interface BranchEntryLike {
 	content?: unknown;
 	data?: unknown;
 	display?: boolean;
-	message?: { role?: string; content?: unknown; stopReason?: string };
+	message?: { role?: string; content?: unknown; stopReason?: string; details?: unknown };
 }
 
 /** 装配产物里的一条历史消息（引擎再转 @liyuan/ai Message） */
@@ -147,7 +148,12 @@ export function rebuildHistory(branch: BranchEntryLike[], promptRules: DisplayRu
 		if (e.type === "message" && e.message) {
 			const r = e.message.role;
 			if (r === "user" || r === "assistant") {
-				stream.push({ role: r, content: e.message.content, _role: r });
+				const details = e.message.details;
+				const narrative =
+					r === "assistant" && details && typeof details === "object" && !Array.isArray(details)
+						? (details as Record<string, unknown>).rpNarrative
+						: undefined;
+				stream.push({ role: r, content: typeof narrative === "string" ? narrative : e.message.content, _role: r });
 			}
 			continue;
 		}
@@ -232,6 +238,14 @@ export function stateFromBranch(branch: BranchEntryLike[]): WorldState {
 		const e = branch[i];
 		if (e.type === "custom" && e.customType === "rp-state" && e.data && typeof e.data === "object") {
 			return { ...defaultState(), ...(e.data as Partial<WorldState>) };
+		}
+	}
+	// 新会话尚无 rp-state 时，以卡作者开场白里的明确日期/地点作为首拍事实基线。
+	for (let i = branch.length - 1; i >= 0; i--) {
+		const e = branch[i];
+		if (e.type === "custom_message" && e.customType === "rp-greeting") {
+			const initial = initialStateFromGreeting(textOf(e.content));
+			if (initial) return initial;
 		}
 	}
 	return defaultState();
@@ -346,14 +360,6 @@ export function buildStageSystemPrompt({
 		);
 	}
 
-	// skill 素材位（M-R2 §4.C）：常驻包正文随 system 送达（署名数据，零 harness 引导语）；
-		// 非驻留 skill 的清单不在这里——由「skill指导」每轮必读时动态生成（一张表），此处零重复。
-	if (skills && skills.length > 0) {
-		for (const sk of skills.filter((x) => x.resident)) {
-			sections.push(`# skill：${sk.name}（常驻）\n${sk.body}`);
-		}
-	}
-
 	// MCP 外设（8/06 重接）：用户在「扩展能力 → MCP」接入的外部服务器。
 	// 工具已在清单里，这里只说明它们是什么、以及 RP 语境下的三条纪律。
 	// 措辞承自旧 director.ts（009e22e 换引擎时随 director 一起失联）。
@@ -432,6 +438,18 @@ export interface StageInjectionOptions {
 	loreIndex?: string;
 	/** 登场名录索引行（formatRosterIndex 产出） */
 	rosterIndex?: string;
+	/** 周期角色画像：候选写作指导，不是状态或既定事实 */
+	literaryCharacterProfile?: string;
+	/** 周期用户画像：只用于调整写法，不得覆盖本拍明确要求 */
+	literaryPersonaProfile?: string;
+	/** 拍前 Director 的瞬时候选，只定义叙事压力和玩家停点 */
+	literaryDirection?: string;
+	/** 分支化后台世界状态的裁剪投影；完整状态不直接占用主演上下文。 */
+	literaryWorld?: string;
+	/** 人物、地点、日程与可错过事件的拍前可见投影；秘密只露边界。 */
+	literaryEcology?: string;
+	/** 预设拆出的 D/E 方法论，直接作为本拍写作指导，不触发工具轮。 */
+	writerGuidance?: Array<{ topic: string; text: string }>;
 }
 
 /**
@@ -452,6 +470,12 @@ export function buildStageInjection({
 	wordRange,
 	loreIndex,
 	rosterIndex,
+	literaryCharacterProfile,
+	literaryPersonaProfile,
+	literaryDirection,
+	literaryWorld,
+	literaryEcology,
+	writerGuidance,
 }: StageInjectionOptions): string {
 	const macro: MacroContext = { charName: card.name, userName: config.userName };
 	const blocks: string[] = [];
@@ -475,6 +499,42 @@ export function buildStageInjection({
 
 	if (loreIndex) {
 		blocks.push(`【设定集索引】${loreIndex}`);
+	}
+
+	if (literaryCharacterProfile) {
+		blocks.push(
+			`【角色校准参考】\n以下内容是基于此前剧情的可修订候选指导，不是已发生事实；角色卡、世界状态和最近正文优先。\n${literaryCharacterProfile}`,
+		);
+	}
+
+	if (literaryPersonaProfile) {
+		blocks.push(
+			`【用户偏好参考】\n以下内容仅用于调整写法与候选方向；用户本拍明确要求永远优先，不能据此替用户作决定。\n${literaryPersonaProfile}`,
+		);
+	}
+
+	if (literaryDirection) {
+		blocks.push(
+			`【本拍文学导演候选】\n这是拍前决策边界，不是正文、事实、事件清单或 beat_plan。它只约束角色主动性、个人线、幕后线和玩家停点；具体事件、顺序、动作、对白、镜头与段落由随后 beat_plan 决定，不得照抄本块为正文。\n${literaryDirection}`,
+		);
+	}
+
+	if (literaryWorld) {
+		blocks.push(
+			`【后台世界动态】\n这是当前分支上的世界级事实与信息边界。只在眼前场景能通过合理渠道感知或影响到时自然体现；不得让角色读取未传播的后台信息，不得为了展示世界动态而强行打断当前互动。\n${literaryWorld}`,
+		);
+	}
+
+	if (literaryEcology) {
+		blocks.push(
+			`【鲜活世界生态】\n这是当前时间与地点周围独立运行的人物生活、场所活动和事件机会。用户是世界中的探索者，不是世界的主宰；世界条件可以改变场景，但不得强迫用户接任务或泄露其尚未发现的秘密。\n${literaryEcology}`,
+		);
+	}
+
+	if (writerGuidance?.length) {
+		blocks.push(
+			`【预设写作指导】\n以下是用户预设署名的写作方法与场景指导，只约束本拍写法，不是剧情事实、系统流程或待输出内容。按当前场景取用。\n${writerGuidance.map((item) => `## ${item.topic}\n${item.text}`).join("\n\n")}`,
+		);
 	}
 
 	// 预设末端内容：原文直通，零归拢零引导语（M-R1）

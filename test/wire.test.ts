@@ -323,6 +323,48 @@ test("wire + skin: narrative 先正则后策略，state 变成 HTML 载荷", () 
 	assert.ok(w!.text.includes("```html") || w!.text.includes("<!DOCTYPE html>"));
 });
 
+test("wire + skin: style + class fragment 不拆标签、不把 CSS 暴露成纯正文", () => {
+	const skin = {
+		rules: [{
+			name: "status",
+			source: "<comprehensive_now_status>([\\s\\S]*?)<\\/comprehensive_now_status>",
+			flags: "g",
+			replace: '<style>.cote-elite-content{color:red}</style>\n<div class="cote-elite-content">$1</div>',
+		}],
+		charName: "实教",
+		userName: "朱耀良",
+	};
+	const w = toWireMsg(
+		{ role: "assistant", content: [{ type: "text", text: "正文。\n<comprehensive_now_status>上午</comprehensive_now_status>" }] },
+		names,
+		{ skin },
+	);
+	assert.ok(w);
+	assert.ok(w!.text.includes("<style>"));
+	assert.ok(w!.text.includes('<div class="cote-elite-content">'));
+	assert.ok(!w!.text.includes("<comprehensive_now_status>"));
+});
+
+test("wire + skin: 外层 class 容器内的 style 不被 unwrap", () => {
+	const skin = {
+		rules: [{
+			name: "status",
+			source: "<comprehensive_now_status>([\\s\\S]*?)<\\/comprehensive_now_status>",
+			flags: "g",
+			replace: '<div class="cote-elite-container"><style>.cote-elite-content{color:red}</style><div class="cote-elite-content">$1</div></div>',
+		}],
+		charName: "实教",
+		userName: "朱耀良",
+	};
+	const w = toWireMsg(
+		{ role: "assistant", content: [{ type: "text", text: "<comprehensive_now_status>上午</comprehensive_now_status>" }] },
+		names,
+		{ skin },
+	);
+	assert.ok(w?.text.startsWith('<div class="cote-elite-container">'));
+	assert.ok(w?.text.includes("<style>"));
+});
+
 test("toolResult 与未知类型跳过；字符串与内容块数组两种 content 都可读", () => {
 	assert.equal(toWireMsg({ role: "toolResult", content: [{ type: "text", text: "lore" }] }, names), null);
 	assert.equal(toWireMsg({ role: "bashExecution", content: "ls" }, names), null);

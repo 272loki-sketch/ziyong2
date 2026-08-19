@@ -15,12 +15,14 @@
 
 import {
 	applyDraftEdits,
+	extractDraftBody,
 	searchDraft,
 	type DraftEditItem,
 	type DraftRules,
 } from "../draft.ts";
 import { applyPatch, canonicalizeCharacterKeys } from "../state.ts";
-import type { WorldState } from "../types.ts";
+import { loreFingerprint } from "../lorebook.ts";
+import type { LorebookEntry, WorldState } from "../types.ts";
 
 /** 拍内计划的一条：一个动作/一个转折，不是正文 */
 export interface BeatStep {
@@ -50,17 +52,34 @@ export interface TurnWorkspace {
 	writes: number;
 	/** draft_append 追加段数（M-E KPI：分段续写是否真发生） */
 	appends: number;
+	/** 达到单拍续段或正文预算上限后被拒绝的 draft_append 次数 */
+	appendRejects: number;
+	/** 续段或正文预算上限已触发；引擎据此进入判定/封笔日程 */
+	appendLimitReached: boolean;
+	/** 已完整受理的净正文超过软预算；只封笔，不截断或退回原子稿段。 */
+	overBudget: boolean;
 	/** draft_edit 成功套用的次数（M-B KPI：定点改稿是否真替代了全文重交） */
 	edits: number;
 	/**
-	 * 本拍查过几次世界（lorebook / memory / world_state_get；不含 skill_read）。
+	 * 本拍查过几次世界（lorebook / memory / world_state_get）。
 	 *
 	 * 用作「这一拍有没有戏」的外部事实：查过世界＝中途确实遇到了需要停下来处理的
 	 * 事，那这一拍本该一段一段演。draft_write 的门禁据此判定（见 runWriteTool）。
 	 */
 	lookups: number;
+	/** 按需读取 Skill 的次数。 */
+	skillReads: number;
+	/** 主 agent 实际处理的模型轮数（含首轮） */
+	rounds: number;
 	/** world_state_update 已验证入队的 patch（定稿后按序统一套用） */
 	patches: Record<string, unknown>[];
+	/** 角色状态补丁命中 lore 结构化名称时的来源记录；不代表语义冲突已验证。 */
+	patchAudit: Array<{
+		character: string;
+		fields: Array<"status" | "notes">;
+		lore: Array<{ fingerprint: string; source: string }>;
+		verification: "not-semantic-verified";
+	}>;
 	/**
 	 * 本拍面板写入次数（panel_write / panel_close 调用计数，engine 维护）。
 	 *
@@ -107,9 +126,15 @@ export function createWorkspace(): TurnWorkspace {
 		sealed: false,
 		writes: 0,
 		appends: 0,
+		appendRejects: 0,
+		appendLimitReached: false,
+		overBudget: false,
 		edits: 0,
 		lookups: 0,
+		skillReads: 0,
+		rounds: 0,
 		patches: [],
+		patchAudit: [],
 		panelWrites: 0,
 		timeline: [],
 	};
@@ -238,6 +263,10 @@ export interface WorkspaceDeps {
 	charName: string;
 	/** 本拍开演前的账本（= f(分支)）；patch 验证在其投影上干跑 */
 	baseState: WorldState;
+	/** 统一知识集合；只用于补丁来源审计，不做自由文本语义比较。 */
+	loreEntries?: LorebookEntry[];
+	/** 用户本拍明确要求跨到另一时间或场景。 */
+	transitionAuthorized?: boolean;
 }
 
 /** 已入队 patch 依序套在基准账本上的投影——后续 patch 的验证与定稿看到同一个世界 */
@@ -258,8 +287,34 @@ export interface WriteToolResult {
 
 /** 单条计划的长度上限：路标写得下，正文写不下（构思／排练的结构性分界） */
 export const MAX_STEP_LEN = 60;
-/** 一拍的计划条数上限：够铺一拍，多了就是在写大纲 */
-export const MAX_STEPS = 8;
+/** 一拍的固定候选计划窗口：长叙事靠后续重拟，不由篇幅授权更多事件。 */
+export const MAX_STEPS = 3;
+/** @deprecated 正常写作不再受段数/字数门控；保留旧导出避免外部引用破裂。 */
+export const MAX_APPENDS = 3;
+/** @deprecated 正常写作不再受段数/字数门控。 */
+export const MAX_DRAFT_BODY_CHARS = 1800;
+/** @deprecated 正常写作不再受段数/字数门控。 */
+export const MAX_DRAFT_ABSOLUTE_CHARS = 6000;
+
+/** 预算只计算正文，不含状态栏等格式尾巴与空白。 */
+function draftBodyChars(text: string): number {
+	return extractDraftBody(text).replace(/\s+/g, "").length;
+}
+
+// 收尾格式（非正文）：状态栏 / 日历 / 选项 / HTML / 围栏等。`<image>` 是**剧情插图占位**，
+// 与叙事正文同源、应按剧情就地穿插，故不在此拒收——前端把 <image> 块就地渲染成出图按钮，
+// 历史回读按 panel 策略整块剥离（不污染送模）。多图容器 <images> 仍按格式块拦截。
+const DELIVERY_FORMAT_RE = /<\/?(?:images|calendar|options|status|state\d*|StatusPlaceHolderImpl|UpdateVariable|main_output|content)\b|<!DOCTYPE\s+html|<html\b|```(?:html|css|javascript|js)\b/i;
+const CROSS_SCENE_RE = /(?:放学后|下午课程结束后|到了?傍晚|到了?夜晚|到了?深夜|次日|翌日|第二天|随后回宿舍|回到宿舍入睡|开始夜跑|前往交流会|前往体育馆|离开食堂(?:后|并)|走向教室|回到教室|时间跳转|数小时后|几天后)/i;
+
+function containsDeliveryFormat(text: string): boolean {
+	return DELIVERY_FORMAT_RE.test(text);
+}
+
+/** 计划只覆盖固定的小窗口；wordRange 不授权更多事件。 */
+export function planStepBudget(_wordRange?: { min: number; max: number }): number {
+	return MAX_STEPS;
+}
 
 /** 渲染清单：方框 + 待办，已完成的打勾划掉（□/☑ 与删除线同构于用户看到的任务列表） */
 export function formatPlan(plan: BeatStep[]): string {
@@ -311,9 +366,10 @@ export function runWriteTool(
 		}
 		const texts = raw.map((s) => (typeof s === "string" ? s.trim() : "")).filter((s) => s.length > 0);
 		if (texts.length === 0) return { text: "steps 里没有有效条目。", ok: false };
-		if (texts.length > MAX_STEPS) {
+		const maxSteps = planStepBudget(deps.rules.wordRange);
+		if (texts.length > maxSteps) {
 			return {
-				text: `未记计划：最多 ${MAX_STEPS} 条（收到 ${texts.length} 条）。合并后重新提交。`,
+				text: `未记计划：当前范围最多 ${maxSteps} 条（收到 ${texts.length} 条）。`,
 				ok: false,
 			};
 		}
@@ -323,6 +379,14 @@ export function runWriteTool(
 			return {
 				text: `未记计划：有 ${tooLong.length} 条超过 ${MAX_STEP_LEN} 字（路标上限）。压成一句话后重新提交。`,
 				activity: "计划过细被拦下",
+				ok: false,
+			};
+		}
+		const crossScene = !deps.transitionAuthorized && texts.find((t) => CROSS_SCENE_RE.test(t));
+		if (crossScene) {
+			return {
+				text: `未记计划：本拍只能处理用户最新输入所在的当前场景，不能提前跳到「${crossScene}」。删掉跨时间或跨地点的后续，只保留眼前互动与玩家停点。`,
+				activity: "跨场景计划被拦下",
 				ok: false,
 			};
 		}
@@ -360,6 +424,21 @@ export function runWriteTool(
 	if (name === "draft_write") {
 		const content = typeof args.content === "string" ? args.content : "";
 		if (!content.trim()) return { text: "content 为空——请提交完整正文。", ok: false };
+		if (containsDeliveryFormat(content)) {
+			return {
+				text: "正文未收：稿纸只接剧情正文，检测到状态、日历、选项或 HTML 等收尾格式。删掉格式块后重交；封笔和记账后再直接输出格式。`<image>` 插图除外——它是剧情画面，可在正文段落间就地穿插。",
+				activity: "正文夹带收尾格式被拦下",
+				ok: false,
+			};
+		}
+		if (!internal && !deps.transitionAuthorized && CROSS_SCENE_RE.test(content)) {
+			return {
+				text: "正文未收：本拍越过了用户输入所在的当前场景。删掉放学、回教室、体育馆、夜晚或次日等后续，只演眼前互动并把行动权交还用户。",
+				activity: "正文跨场景被拦下",
+				ok: false,
+			};
+		}
+		const bodyChars = draftBodyChars(content);
 		// 门禁：draft_write 只留给「这一拍没有戏」。查过世界（设定/旧账/账本）
 		// 说明中途确实遇到了要停下来处理的事——那这拍本该一段一段演。
 		// 已经在续写中（appends>0）则不拦：那是分段写到一半改用全量重交。
@@ -372,7 +451,9 @@ export function runWriteTool(
 		}
 		ws.draft = content;
 		ws.writes++;
-		ws.sealed = true; // 全量交稿即完整稿，天然封笔
+		// draft_write 只是全量写入，不替模型决定收笔；后续仍可继续 append 或显式 seal。
+		ws.sealed = false;
+		ws.overBudget = false;
 		// 时间线：正文按交稿位置入档。重交是**替换**不是追加——
 		// 末段若已是本工作区写过的正文，改写它，避免多稿在屏上叠成几份。
 		replaceDraftSegment(ws, content);
@@ -386,9 +467,26 @@ export function runWriteTool(
 	if (name === "draft_append") {
 		const seg = typeof args.segment === "string" ? args.segment : "";
 		if (!seg.trim()) return { text: "segment 为空——请提交要续写的段落。", ok: false };
+		if (containsDeliveryFormat(seg)) {
+			return {
+				text: "本段未受理：稿纸只接剧情正文，状态、日历、选项或 HTML 等格式应在封笔和记账后直接输出。删掉格式块后重交本段。`<image>` 插图除外——它是剧情画面，可在正文段落间就地穿插。",
+				activity: "正文夹带收尾格式被拦下",
+				ok: false,
+			};
+		}
+		if (!deps.transitionAuthorized && CROSS_SCENE_RE.test(seg)) {
+			return {
+				text: "本段未受理：本拍只能停留在用户最新输入所在的当前场景。删掉放学、回教室、体育馆、夜晚或次日等后续，改写为眼前人物的即时反应与玩家停点。",
+				activity: "正文跨场景被拦下",
+				ok: false,
+			};
+		}
 		const sep = ws.draft.trim().length > 0 ? "\n\n" : "";
-		ws.draft += sep + seg;
+		const nextDraft = ws.draft + sep + seg;
+		const bodyChars = draftBodyChars(nextDraft);
+		ws.draft = nextDraft;
 		ws.appends++;
+		ws.overBudget = false;
 		// 续写的正文入时间线：追加一段（不是替换——已写的部分是已经发生的事，不推翻）
 		ws.timeline.push({ kind: "text", text: seg, draft: true });
 		// 回执只留事实（§2.4）：进度与判定由轮次注入承载
@@ -421,8 +519,10 @@ export function runWriteTool(
 			// 整批未套用：现稿一字未动，回报每处失败原因供模型修正
 			return { text: `改稿未套用：\n${r.details.join("\n")}`, activity: "改稿未套用", ok: false };
 		}
+		const editedBodyChars = draftBodyChars(r.text);
 		ws.draft = r.text;
 		ws.edits++;
+		ws.overBudget = false;
 		// 时间线：定点改稿后正文原地更新（改的是同一份稿，不新开一段）。
 		// 续写形态下按段重切，保住「一段段长出来」的形态不塌成一整块。
 		if (ws.appends > 0) resyncDraftSegments(ws);
@@ -462,7 +562,13 @@ export function runWriteTool(
 	}
 
 	if (name === "world_state_update") {
-		const raw = args.patch;
+		if (!ws.sealed) return { text: "记账被拒：正文尚未封笔。", ok: false };
+		let raw = args.patch;
+		// 部分 OpenAI 兼容端点会把 object 参数二次序列化为 JSON 字符串。
+		// schema 语义仍是对象；这里只还原传输形态，不接受自由文本或非对象 JSON。
+		if (typeof raw === "string") {
+			try { raw = JSON.parse(raw); } catch { /* 交给下方对象门禁 */ }
+		}
 		if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
 			return { text: "patch 需为对象（合并补丁语义），例如 {\"location\":\"藏经阁\"}。", ok: false };
 		}
@@ -479,6 +585,21 @@ export function runWriteTool(
 			return { text: `记账被拒：${why}。核对字段语义后重试。`, ok: false };
 		}
 		ws.patches.push(patch);
+		const characters = patch.characters;
+		if (characters && typeof characters === "object" && !Array.isArray(characters)) {
+			for (const [character, value] of Object.entries(characters as Record<string, unknown>)) {
+				if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+				const fields = (["status", "notes"] as const).filter((field) => typeof (value as Record<string, unknown>)[field] === "string");
+				if (fields.length === 0) continue;
+				const normalized = character.trim().toLowerCase();
+				const lore = (deps.loreEntries ?? [])
+					.filter((entry) => entry.enabled && [entry.comment, ...entry.keys].some((name) => name.trim().toLowerCase() === normalized))
+					.map((entry) => ({ fingerprint: loreFingerprint(entry.content), source: entry.source ?? "unknown" }));
+				if (lore.length > 0) {
+					ws.patchAudit.push({ character, fields, lore, verification: "not-semantic-verified" });
+				}
+			}
+		}
 		const warn = dry.warnings.length > 0 ? `\n警告（相应字段已忽略）：${dry.warnings.join("；")}` : "";
 		return {
 			text: `已记账（定稿后生效）：\n${dry.applied.map((a) => `- ${a}`).join("\n")}${warn}`,

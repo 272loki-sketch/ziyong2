@@ -6,13 +6,20 @@
  * 过程条是元信息层（agent 工作过程），与正文明确区隔。
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { apiPost } from "../api.ts";
 import { attachmentUrl, splitAttachments } from "../attachments.ts";
 import { applyCardSkin } from "../cardSkin.ts";
 import { isFullInterface } from "../htmlEmbed.ts";
-import { splitRichContentParts, type SkinMacros } from "../richContentParts.ts";
+import { splitRichContentParts, stripProjectedFormats, type SkinMacros } from "../richContentParts.ts";
 import { splitMarkdownParts, splitRpInline } from "../markdown.ts";
-import type { WireActivity, WireChoice, WireMsg } from "../wire.ts";
+import type { WireActivity, WireBeatWorkflow, WireChoice, WireMsg } from "../wire.ts";
+import type { LiteraryWorldState } from "../../../src/stage/literary-world.ts";
+import type { WorldAuditWireView } from "../../../src/stage/literary-world-transition.ts";
+import type { ModularWorldWireView } from "../../../src/stage/literary-world-modular.ts";
+import type { CalendarMonthView, CalendarView, PresentationView, TavernVariablesView } from "../../../src/presentation.ts";
+import { serializeCalendarSource } from "../../../src/presentation.ts";
+import type { EcologyWireView } from "../../../src/stage/literary-ecology.ts";
 import { estimateTokens, formatTokenCount, type TurnSegment } from "../timeline.ts";
 import { HtmlFrame } from "./HtmlFrame.tsx";
 
@@ -50,6 +57,54 @@ export function ZoomImg({ src, alt, title }: { src: string; alt: string; title?:
 				</div>
 			)}
 		</>
+	);
+}
+
+let novelAiQueue: Promise<void> = Promise.resolve();
+let novelAiLastStartedAt = 0;
+const NOVELAI_MIN_START_GAP_MS = 10_000;
+
+function enqueueNovelAi<T>(task: () => Promise<T>): Promise<T> {
+	const run = novelAiQueue.then(async () => {
+		const wait = Math.max(0, NOVELAI_MIN_START_GAP_MS - (Date.now() - novelAiLastStartedAt));
+		if (wait) await new Promise((resolve) => window.setTimeout(resolve, wait));
+		novelAiLastStartedAt = Date.now();
+		return task();
+	});
+	novelAiQueue = run.then(() => undefined, () => undefined);
+	return run;
+}
+
+function NovelAiImageButton({ prompt, title }: { prompt: string; title: string }) {
+	const [busy, setBusy] = useState(false);
+	const [error, setError] = useState("");
+	const [src, setSrc] = useState("");
+	const running = useRef(false);
+	const generate = async () => {
+		if (running.current) return;
+		running.current = true;
+		setBusy(true);
+		setError("");
+		try {
+			const result = await enqueueNovelAi(() => apiPost<{ src: string }>("/api/novelai/generate", { prompt, caption: title }));
+			setSrc(result.src);
+		} catch (err) {
+			setError(err instanceof Error ? err.message : String(err));
+		} finally {
+			running.current = false;
+			setBusy(false);
+		}
+	};
+	useEffect(() => {
+		void generate();
+		// 自动生图只在该图片槽首次挂载时排队一次；generate 内部 running 防重入。
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, []);
+	return (
+		<div className="nai-image-slot">
+			{src ? <ZoomImg src={src} alt={title} title={title} /> : <button type="button" className="nai-generate-btn" disabled={busy} onClick={generate}>{busy ? "NovelAI 生图中…" : `生成图片 · ${title}`}</button>}
+			{error && <div className="nai-image-error">{error}</div>}
+		</div>
 	);
 }
 
@@ -218,7 +273,7 @@ export function Paragraphs({ text }: { text: string }) {
  * 作者正则皮肤 → HTML 块（seamless 帧）→ 其余 RP 排版。
  * 状态栏是作者正则产出的 HTML，走 html 分支；梨园不再按标签名抠「统一状态卡」。
  */
-export function RichContent({ text, skin }: { text: string; skin?: SkinProp | null }) {
+export function RichContent({ text, skin, collapsibleHtml = false, htmlTitle, variables }: { text: string; skin?: SkinProp | null; collapsibleHtml?: boolean; htmlTitle?: string; variables?: TavernVariablesView }) {
 	const parts = splitRichContentParts(text, skin);
 	const first = parts[0];
 	if (parts.length === 1 && first.kind === "text") {
@@ -227,8 +282,12 @@ export function RichContent({ text, skin }: { text: string; skin?: SkinProp | nu
 	return (
 		<>
 			{parts.map((p, i) => {
+				if (p.kind === "imagePrompt") return <NovelAiImageButton key={i} prompt={p.prompt} title={p.title} />;
 				// 皮肤/正文内嵌 HTML：无痕 seamless；agent show_html 通道不经此路径
-				if (p.kind === "html") return <HtmlFrame key={i} html={p.html} scripts={p.scripts} seamless />;
+				if (p.kind === "html") {
+					const isBbs = /post-container|Small_theater-wrapper|校园BBS/i.test(p.html);
+					return <HtmlFrame key={i} html={p.html} scripts={p.scripts} seamless title={htmlTitle || (isBbs ? "校园BBS" : undefined)} collapsible={collapsibleHtml || isBbs} variables={variables} />;
+				}
 				if (p.kind === "text" && p.text.trim()) return <Paragraphs key={i} text={p.text} />;
 				return null;
 			})}
@@ -298,10 +357,14 @@ export function ToolSegment({ activities, live }: { activities: WireActivity[]; 
 export function TurnTimeline({
 	segments,
 	skin,
+	variables,
 	live,
 }: {
 	segments: TurnSegment[];
 	skin?: SkinProp | null;
+	variables?: TavernVariablesView;
+	/** 展示选项点击后写入主输入框（不自动发送）。 */
+	onSelectOption?: (text: string) => void;
 	live?: boolean;
 }) {
 	const countOf = (segs: TurnSegment[]) => {
@@ -314,13 +377,15 @@ export function TurnTimeline({
 	};
 
 	if (!live) {
+		// 工件时间线可能同时保留旧谢幕和最新 override；同一段正文与格式在 msg.text
+		// 已合并为权威展示，因此定稿态只渲染最后一份格式段由 Bubble 单独补齐。
 		const texts = segments.filter((s) => s.kind === "text");
 		const process = segments.filter((s) => s.kind !== "text");
 		const { thinks, calls } = countOf(process);
 		return (
 			<>
 				{texts.map((seg, i) => (
-					<RichContent key={i} text={(seg as Extract<TurnSegment, { kind: "text" }>).text} skin={skin} />
+					<RichContent key={i} text={(seg as Extract<TurnSegment, { kind: "text" }>).text} skin={skin} variables={variables} />
 				))}
 				{process.length > 0 && (
 					<details className="turn-process">
@@ -356,7 +421,7 @@ export function TurnTimeline({
 	return (
 		<>
 			{groups.map((g, gi) => {
-				if (g.kind === "text") return <RichContent key={gi} text={g.seg.text} skin={skin} />;
+				if (g.kind === "text") return <RichContent key={gi} text={g.seg.text} skin={skin} variables={variables} />;
 				const active = gi === groups.length - 1; // 最新过程组=正在动的，展开跟读
 				const { thinks, calls } = countOf(g.segs);
 				return (
@@ -623,6 +688,7 @@ export interface BubbleProps {
 	avatarUrl?: string | null;
 	/** 尾部操作 */
 	onReroll?: () => void;
+	onCurtainReroll?: () => void;
 	onEdit?: () => void;
 	/** 回退到本条之前（含本条之后的剧情） */
 	onRewind?: () => void;
@@ -642,6 +708,8 @@ export interface BubbleProps {
 	edit?: BubbleEditState;
 	/** 一档卡皮肤（显示层；缺省 null=与旧行为一致） */
 	skin?: SkinProp | null;
+	/** 点击原生行动选项时填入主输入框。 */
+	onSelectOption?: (text: string) => void;
 }
 
 export function Bubble({
@@ -650,6 +718,7 @@ export function Bubble({
 	fallbackName,
 	avatarUrl,
 	onReroll,
+	onCurtainReroll,
 	onEdit,
 	onRewind,
 	onDelete,
@@ -661,6 +730,7 @@ export function Bubble({
 	swipe,
 	edit,
 	skin,
+	onSelectOption,
 }: BubbleProps) {
 	if (msg.channel === "info") {
 		return <div className="info-line">{msg.text}</div>;
@@ -742,6 +812,19 @@ export function Bubble({
 	// 整楼界面：皮肤应用后整条消息即界面（spec §4 落位 1）
 	const skinnedBody = !isUser && skin && skin.rules.length > 0 ? applyCardSkin(body, skin.rules, skin) : body;
 	const stage = !isUser && !editing && isFullInterface(skinnedBody);
+	const world = !isUser ? msg.world as LiteraryWorldState | undefined : undefined;
+	const worldAudit = !isUser ? msg.worldAudit as WorldAuditWireView | undefined : undefined;
+	const worldModules = !isUser ? msg.worldModules as ModularWorldWireView | undefined : undefined;
+	const presentation = !isUser ? msg.presentation as PresentationView | undefined : undefined;
+	const tavernVariables = !isUser ? msg.tavernVariables as TavernVariablesView | undefined : undefined;
+	const ecology = !isUser ? msg.ecology as EcologyWireView | undefined : undefined;
+	const workflow = !isUser ? msg.workflow as WireBeatWorkflow | undefined : undefined;
+	const displayBody = !isUser && presentation
+		? stripProjectedFormats(body, { options: !!presentation.options?.length })
+		: body;
+	const displayTimeline = timeline && presentation?.options?.length
+		? timeline.map((segment) => segment.kind === "text" ? { ...segment, text: stripProjectedFormats(segment.text, { options: true }) } : segment)
+		: timeline;
 	return (
 		<div
 			className={`msg ${isUser ? "msg-user" : "msg-char"} ${isUser && msg.backstage ? "msg-user-backstage" : ""} ${editing ? "msg-editing" : ""} ${stage ? "msg-stage" : ""}`}
@@ -758,6 +841,13 @@ export function Bubble({
 					)}
 					{editing && <span className="chip chip-edit">编辑中</span>}
 					{floor !== undefined && <span className="floor">#{floor}</span>}
+				</div>
+			)}
+			{!isUser && msg.metrics && (
+				<div className="msg-metrics" title={`模型调用 ${msg.metrics.rounds || 1} 轮`}>
+					{(msg.metrics.durationMs / 1000).toFixed(1)} 秒
+					<span>·</span>
+					{formatTokenCount(msg.metrics.outputTokens)} tokens
 				</div>
 			)}
 			{/* 有时间线时思考内联在时间线里（按发生顺序）；旧消息才走顶部固定块 */}
@@ -798,10 +888,10 @@ export function Bubble({
 				<>
 					{/* 时间线态：思考/工具/正文按发生顺序依次上屏（codex 式）。
 					    附件仍取自正文尾行，故正文用时间线渲染、附件另挂。 */}
-					{timeline ? (
-						<TurnTimeline segments={timeline} skin={skin} />
+					{displayTimeline ? (
+						<TurnTimeline segments={displayTimeline} skin={skin} variables={tavernVariables} />
 					) : (
-						body && (isUser ? <Paragraphs text={body} /> : <RichContent text={body} skin={skin} />)
+						displayBody && (isUser ? <Paragraphs text={displayBody} /> : <RichContent text={displayBody} skin={skin} variables={tavernVariables} />)
 					)}
 					{attachments.length > 0 && (
 						<div className="msg-attach">
@@ -821,6 +911,10 @@ export function Bubble({
 					)}
 					{/* 时间线态的工具步骤已内联在各自发生位置，不再末端重挂一份 */}
 					{!timeline && msg.activities && msg.activities.length > 0 && <ActivityBar activities={msg.activities} />}
+					{workflow && <BeatWorkflowCard workflow={workflow} />}
+					{worldModules && (worldModules.round > 0 || worldAudit) ? <ModularWorldCard world={worldModules} audit={worldAudit} /> : world && (world.round > 0 || worldAudit) && <WorldStateCard world={world} audit={worldAudit} />}
+					{presentation && <PresentationCards view={presentation} skin={skin} onSelectOption={onSelectOption} />}
+					{ecology && (ecology.round > 0 || ecology.public.actors.length > 0 || ecology.public.events.length > 0 || ecology.public.locations.length > 0 || ecology.discovered.actors.length > 0 || ecology.discovered.events.length > 0) && <EcologyStateCard ecology={ecology} />}
 					{(onReroll || onEdit || onRewind || onDelete || onCopy || onStore || onTts || greetingSwitch || swipe) && (
 						<div className="msg-actions">
 							{/* 开场白快速切换：不进详情页 */}
@@ -862,7 +956,7 @@ export function Bubble({
 										<IconChevronLeft size={16} />
 									</button>
 									<span className="msg-variant-idx">
-										{swipe.total > 0 ? `${swipe.index + 1}/${swipe.total}` : "1/1"}
+										重roll {Math.max(0, swipe.total - 1)} 次 · {swipe.total > 0 ? `${swipe.index + 1}/${swipe.total}` : "1/1"}
 									</span>
 									<button
 										type="button"
@@ -889,8 +983,13 @@ export function Bubble({
 								</button>
 							)}
 							{onReroll && (
-								<button className="act" onClick={onReroll} title="再生成一条变体（原回复保留；等同末条点右箭头）">
-									<IconRedo size={13} /> 生成
+								<button className="act" onClick={onReroll} title="复用拍前工件，从 writer 正文阶段重写；随后重新记账、推演世界和生成状态栏">
+									<IconRedo size={13} /> 重Roll正文
+								</button>
+							)}
+							{onCurtainReroll && (
+								<button className="act" onClick={onCurtainReroll} title="保留正文、账本和世界状态，只重做状态栏等非正文格式">
+									<IconRedo size={13} /> 重Roll状态栏
 								</button>
 							)}
 							{onEdit && (
@@ -929,4 +1028,160 @@ export function Bubble({
 			)}
 		</div>
 	);
+}
+
+function WorldStateCard({ world, audit }: { world: LiteraryWorldState; audit?: WorldAuditWireView }) {
+	const events = world.events.filter((item) => !/已消散|已完成|已失败/.test(item.stage));
+	const secrets = world.blackbox.secretActions.length + world.blackbox.secretAssets.length;
+	return (
+		<details className="world-state-card">
+			<summary>
+				<span className="world-state-title">世界动态</span>
+				<span className="world-state-round">第 {world.round} 轮</span>
+				<span className="world-state-digest">{world.digest}</span>
+			</summary>
+			<div className="world-state-body">
+				<p className="world-state-summary">{world.digest}</p>
+				{audit && <WorldRows label="审计" rows={[`${audit.status === "committed" ? "已提交" : "未提交"}｜${audit.summary}`, ...audit.warnings.map((item) => `提醒｜${item}`)]} />}
+				{events.length > 0 && <WorldRows label="事件" rows={events.map((item) => `${item.name} · ${item.stage || "进行中"} · Lv.${item.level}｜${item.description}`)} />}
+				{world.factions.length > 0 && <WorldRows label="势力" rows={world.factions.map((item) => `${item.name}｜${item.status || "状态未明"}｜${item.relation || "立场未明"}｜${item.goal || "目标未明"}`)} />}
+				{world.winds.length > 0 && <WorldRows label="风声" rows={world.winds.map((item) => `${item.content}｜${item.scope || "范围未明"}`)} />}
+				{world.trends.length > 0 && <WorldRows label="大势" rows={world.trends.map((item) => `${item.name}｜${item.description}`)} />}
+				{Object.keys(world.reputation).length > 0 && <WorldRows label="声誉" rows={Object.entries(world.reputation).map(([key, value]) => `${key}：${value}`)} />}
+				{(world.economy.climate || world.economy.signals.length > 0) && <WorldRows label="经济" rows={[world.economy.climate, ...world.economy.signals].filter(Boolean)} />}
+				{world.enemies.length > 0 && <WorldRows label="对立" rows={world.enemies.map((item) => `${item.name}｜${item.status}｜${item.reason}`)} />}
+				{secrets > 0 && <div className="world-secret-note">幕后有 {secrets} 条未公开信息。为避免剧透，不显示具体内容。</div>}
+			</div>
+		</details>
+	);
+}
+
+function WorldRows({ label, rows }: { label: string; rows: string[] }) {
+	return <div className="world-state-section"><div className="world-state-label">{label}</div><ul>{rows.map((row, index) => <li key={`${label}-${index}`}>{row}</li>)}</ul></div>;
+}
+
+function BeatWorkflowCard({ workflow }: { workflow: WireBeatWorkflow }) {
+	const succeeded = workflow.stages.filter((stage) => stage.status === "success" || stage.status === "reused").length;
+	const skipped = workflow.stages.filter((stage) => stage.status === "skipped").length;
+	const statusLabel = skipped === 0 ? "完整运行" : `${succeeded}/${workflow.stages.length} 运行`;
+	const director = workflow.director;
+	const continuity = workflow.continuity;
+	const writer = workflow.writer;
+	return <details className="world-state-card beat-workflow-card">
+		<summary><span className="world-state-title">本拍工作流</span><span className="world-state-round">{statusLabel}</span><span className="world-state-digest">导演、连续性与主演工件可核对</span></summary>
+		<div className="world-state-body beat-workflow-body">
+			<div className="bwf-rail">{workflow.stages.map((stage) => <span key={stage.id} className={`bwf-node ${stage.status}`} title={`${stage.label}：${stage.summary}`}>{stage.status === "success" ? "✓" : stage.status === "reused" ? "↺" : stage.status === "degraded" ? "!" : "○"}</span>)}</div>
+			<div className="bwf-stages">{workflow.stages.map((stage) => <div className="bwf-stage" key={stage.id}><span className={`bwf-status ${stage.status}`} /> <strong>{stage.label}</strong><span>{stage.summary}</span></div>)}</div>
+			{continuity && <details className="bwf-detail"><summary>连续性工件</summary>
+				{continuity.positions.length > 0 && <WorldRows label="位置" rows={continuity.positions} />}
+				{continuity.ongoingActions.length > 0 && <WorldRows label="进行中" rows={continuity.ongoingActions} />}
+				{continuity.promisesAndDeadlines.length > 0 && <WorldRows label="期限" rows={continuity.promisesAndDeadlines} />}
+				{continuity.unresolvedPlayerChoices.length > 0 && <WorldRows label="待选择" rows={continuity.unresolvedPlayerChoices} />}
+				{continuity.uncertainties.length > 0 && <WorldRows label="不确定" rows={continuity.uncertainties} />}
+				{continuity.knowledgeBoundaryCount > 0 && <div className="world-secret-note">另有 {continuity.knowledgeBoundaryCount} 条知情边界，未在普通前端展开。</div>}
+			</details>}
+			{director && <details className="bwf-detail"><summary>查看导演方向</summary>
+				{director.scenePressure && <WorldRows label="压力" rows={[director.scenePressure]} />}
+				{director.characterInitiatives.length > 0 && <WorldRows label="主动性" rows={director.characterInitiatives.map((item) => `${item.character || "未指定角色"}｜动机：${item.motive || "-"}｜意图：${item.immediateIntent || "-"}｜上限：${item.limit || "-"}`)} />}
+				{director.personalThreads.length > 0 && <WorldRows label="个人线" rows={director.personalThreads} />}
+				{director.candidateBeats.length > 0 && <WorldRows label="候选拍点" rows={director.candidateBeats.map((item) => `${item}（候选，非既定事实）`)} />}
+				{director.relationshipLimit && <WorldRows label="关系上限" rows={[director.relationshipLimit]} />}
+				{director.playerStop && <WorldRows label="玩家停点" rows={[director.playerStop]} />}
+				{(director.offstageCount > 0 || director.withheldCount > 0) && <div className="world-secret-note">幕后线 {director.offstageCount} 项 · 暂扣信息 {director.withheldCount} 项。为避免剧透，不显示正文。</div>}
+			</details>}
+			<div className="bwf-metrics"><span><small>计划</small><b>{writer.planWrites}</b></span><span><small>稿段</small><b>{writer.appends || writer.writes}</b></span><span><small>重评估拦截</small><b>{writer.appendRejects}</b></span><span><small>模型轮次</small><b>{writer.rounds}</b></span><span><small>正文</small><b>{writer.narrativeChars}</b></span><span><small>输出 tokens</small><b>{formatTokenCount(writer.outputTokens)}</b></span><span><small>耗时</small><b>{(writer.durationMs / 1000).toFixed(1)}s</b></span><span><small>检索</small><b>{writer.lookups}</b></span></div>
+			<div className="bwf-privacy">只展示结构化工件和运行结果，不包含模型隐藏思维链、prompt 或原始旁路输出。</div>
+		</div>
+	</details>;
+}
+
+function ModularWorldCard({ world, audit }: { world: ModularWorldWireView; audit?: WorldAuditWireView }) {
+	return <details className="world-state-card">
+		<summary><span className="world-state-title">世界模块</span><span className="world-state-round">第 {world.round} 轮</span><span className="world-state-digest">{world.digest}</span></summary>
+		<div className="world-state-body">
+			<p className="world-state-summary">{world.digest}</p>
+			{audit && <WorldRows label="审计" rows={[`${audit.status === "committed" ? "已提交" : "未提交"}｜${audit.summary}`, ...audit.warnings.map((item) => `提醒｜${item}`)]} />}
+			{world.modules.map((module) => <details className="ecology-discovered" key={module.id}><summary>{module.name} · v{module.revision}</summary>
+				{module.summary && <p className="world-state-summary">{module.summary}</p>}
+				{module.publicRecords.length > 0 && <WorldRows label="公开状态" rows={module.publicRecords.map((record) => `${record.label}｜${record.status || "持续中"}｜${record.summary}`)} />}
+				{module.discoverableRecords.length > 0 && <WorldRows label="可探索信息" rows={module.discoverableRecords.map((record) => `${record.label}｜${record.status || "待发现"}｜${record.summary}`)} />}
+				{module.secretCount > 0 && <div className="world-secret-note">幕后有 {module.secretCount} 条未公开记录，为避免剧透不显示内容。</div>}
+			</details>)}
+		</div>
+	</details>;
+}
+
+function PresentationCards({ view, skin, onSelectOption }: { view: PresentationView; skin?: SkinProp | null; onSelectOption?: (text: string) => void }) {
+	const hasCardStatusFront = skin?.rules.some((rule) =>
+		/StatusPlaceHolderImpl|StatusBlock|status(?:bar|_block)?|state\\?d/i.test(`${rule.name}\n${rule.source}`),
+	) ?? false;
+	return <div className="presentation-cards">
+		{!hasCardStatusFront && <details className="world-state-card"><summary><span className="world-state-title">当前状态</span><span className="world-state-digest">{view.status.time || "时间未定"} · {view.status.location || "地点未定"}</span></summary>
+			<div className="world-state-body"><WorldRows label={view.status.playerName} rows={[`时间｜${view.status.time || "未定"}`, `地点｜${view.status.location || "未定"}`, ...(view.status.inventory.length ? [`物品｜${view.status.inventory.join("、")}`] : []), ...Object.entries(view.status.flags).slice(0, 8).map(([key, value]) => `${key}｜${value}`)]} /></div>
+		</details>}
+		{view.calendar && skin?.rules.some((rule) => /calendar/i.test(rule.source))
+			? <RichContent text={serializeCalendarSource(view.calendar)} skin={skin} collapsibleHtml htmlTitle="日历" />
+			: view.calendar && <NativeCalendarCard calendar={view.calendar} />}
+		{view.options && view.options.length > 0 && <details className="world-state-card" open><summary><span className="world-state-title">行动选项</span><span className="world-state-round">点击填入输入框</span></summary><div className="world-state-body presentation-options">{view.options.map((option, index) => <button type="button" className="presentation-option" key={`${index}-${option}`} onClick={() => onSelectOption?.(option)}><span>{index + 1}</span>{option}</button>)}</div></details>}
+	</div>;
+}
+
+function NativeCalendarCard({ calendar }: { calendar: CalendarView }) {
+	const available = calendar.months?.length ? calendar.months : [{ year: calendar.year, month: calendar.month, monthName: `${calendar.month}月`, weekdayNames: ["周日", "周一", "周二", "周三", "周四", "周五", "周六"], currentDay: calendar.currentDay, previous: { year: calendar.year, month: calendar.month }, next: { year: calendar.year, month: calendar.month }, days: calendar.days } satisfies CalendarMonthView];
+	const authorityIndex = Math.max(0, available.findIndex((month) => month.year === calendar.year && month.month === calendar.month));
+	const [index, setIndex] = useState(authorityIndex);
+	const safeIndex = Math.min(Math.max(index, 0), available.length - 1);
+	const month = available[safeIndex] ?? available[authorityIndex]!;
+	const initialDay = month.currentDay ?? month.days.find((day) => day.events.length)?.day ?? 1;
+	const [selected, setSelected] = useState(initialDay);
+	useEffect(() => { setIndex(authorityIndex); setSelected(calendar.currentDay); }, [calendar.year, calendar.month, calendar.currentDay, authorityIndex, available.length]);
+	const selectedDay = month.days.find((day) => day.day === selected) ?? month.days[0];
+	const leading = month.days[0]?.weekday ?? 0;
+	return <details className="world-state-card presentation-calendar">
+		<summary><span className="world-state-title">日历</span><span className="world-state-round">{calendar.year}年{calendar.month}月{calendar.currentDay}日</span></summary>
+		<div className="world-state-body">
+			<div className="calendar-toolbar"><button type="button" className="calendar-nav" disabled={safeIndex <= 0} onClick={() => { setIndex((value) => Math.max(0, value - 1)); setSelected(1); }}><IconChevronLeft size={14} /></button><strong>{month.year}年 · {month.monthName}</strong><button type="button" className="calendar-nav" disabled={safeIndex >= available.length - 1} onClick={() => { setIndex((value) => Math.min(available.length - 1, value + 1)); setSelected(1); }}><IconChevronRight size={14} /></button></div>
+			<div className="calendar-weekdays" style={{ gridTemplateColumns: `repeat(${month.weekdayNames.length},minmax(0,1fr))` }}>{month.weekdayNames.map((name) => <span key={name}>{name.replace(/^周/, "")}</span>)}</div>
+			<div className="calendar-grid" style={{ gridTemplateColumns: `repeat(${month.weekdayNames.length},minmax(0,1fr))` }}>{Array.from({ length: leading }, (_, empty) => <span className="calendar-cell calendar-empty" key={`empty-${empty}`} />)}{month.days.map((day) => <button type="button" key={day.day} className={`calendar-cell${day.current ? " current" : ""}${day.day === selected ? " selected" : ""}`} onClick={() => setSelected(day.day)}><span>{day.day}</span><span className="calendar-cell-events">{day.events.slice(0, 3).map((event) => <i key={event.id} className={`calendar-event-dot ${event.source}`} />)}</span></button>)}</div>
+			<div className="calendar-agenda"><div className="world-state-label">{month.monthName}{selectedDay?.day ?? selected}日{selectedDay?.current ? " · 今天" : ""}</div>{selectedDay?.events.length ? selectedDay.events.map((event) => <div className="calendar-agenda-item" key={event.id}><div><strong>{event.title}</strong><span className={`calendar-source ${event.source}`}>{event.sourceLabel || (event.source === "world" ? "世界" : "生态")}</span><span className="calendar-source">{event.visibility === "public" ? "公开" : "可探索"}</span></div>{event.days > 1 && <small>{event.startDate} 至 {event.endDate} · 第 {event.dayIndex}/{event.days} 日</small>}<p>{event.summary || "暂无补充说明"}</p></div>) : <p className="world-state-summary">暂无公开安排。</p>}</div>
+		</div>
+	</details>;
+}
+
+function EcologyStateCard({ ecology }: { ecology: EcologyWireView }) {
+	const [revealed, setRevealed] = useState(false);
+	useEffect(() => { setRevealed(false); }, [ecology.round, ecology.digest]);
+	const cognition = ecology.spoilers.cognition ?? [];
+	const advances = ecology.spoilers.actorAdvances ?? [];
+	const propagation = ecology.propagation ?? [];
+	const spoilerCount = ecology.spoilers.actors.length + ecology.spoilers.events.length + ecology.spoilers.secrets.length + cognition.length + advances.length;
+	return <details className="world-state-card ecology-state-card">
+		<summary>
+			<span className="world-state-title">鲜活世界</span>
+			<span className="world-state-round">第 {ecology.round} 轮</span>
+			<span className="world-state-digest">{ecology.digest}</span>
+		</summary>
+		<div className="world-state-body">
+			<p className="world-state-summary">{ecology.digest}</p>
+			{ecology.public.locations.length > 0 && <WorldRows label="公开场所动态" rows={ecology.public.locations} />}
+			{ecology.public.events.length > 0 && <WorldRows label="公开事件" rows={ecology.public.events} />}
+			{propagation.length > 0 && <details className="ecology-discovered ecology-propagation"><summary>社会传播面 · {propagation.length}</summary>{propagation.map((item) => <div className="ecology-propagation-item" key={item.occurrenceId}><strong>{item.headline || item.eventName}</strong><span>{item.sourceType === "official" ? "官方" : item.sourceType === "mixed" ? "混合来源" : "非官方"} · {item.claimStatus === "fact" ? "已证实" : item.claimStatus === "rumor" ? "传闻" : "信息混杂"}</span><p>{item.publicity === "trace" ? item.trace : item.summary || item.trace}</p></div>)}</details>}
+			{ecology.public.actors.length > 0 && <WorldRows label="活跃人物" rows={ecology.public.actors} />}
+			{(ecology.discovered.events.length > 0 || ecology.discovered.actors.length > 0) && <details className="ecology-discovered"><summary>可探索信息</summary>
+				{ecology.discovered.events.length > 0 && <WorldRows label="进入场景后可能发现" rows={ecology.discovered.events} />}
+				{ecology.discovered.actors.length > 0 && <WorldRows label="场外人物" rows={ecology.discovered.actors} />}
+			</details>}
+			{spoilerCount > 0 && <div className="ecology-spoiler">
+				{!revealed ? <button type="button" className="drawer-btn ecology-reveal" onClick={() => setRevealed(true)}>查看幕后剧透（{spoilerCount} 条）</button> : <>
+					<div className="world-secret-note">以下是系统掌握但用户角色未必知道的幕后真相。</div>
+					{ecology.spoilers.actors.length > 0 && <WorldRows label="人物真实目标" rows={ecology.spoilers.actors} />}
+					{ecology.spoilers.events.length > 0 && <WorldRows label="秘密事件" rows={ecology.spoilers.events} />}
+					{ecology.spoilers.secrets.length > 0 && <WorldRows label="幕后真相" rows={ecology.spoilers.secrets} />}
+					{cognition.length > 0 && <WorldRows label="人物认知边界" rows={cognition} />}
+					{advances.length > 0 && <WorldRows label="后台人物推进" rows={advances} />}
+					<button type="button" className="drawer-btn" onClick={() => setRevealed(false)}>收起剧透</button>
+				</>}
+			</div>}
+		</div>
+	</details>;
 }
