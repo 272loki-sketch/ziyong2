@@ -242,40 +242,36 @@ tar -czf /root/Liyuan-backups/$TS/agent-data.tgz -C /var/lib/liyuan agent
 
 ## 11. 更新部署
 
-部署前：
-
-1. 确认没有正在进行的生成（看日志或健康检查）。
-2. 本地跑 `npm test`、`npm run web:build`。
-3. 备份 VPS 当前源码与配置。
-
-示例（本地打 tar 上传）：
-
-```powershell
-tar -czf "C:\Users\86186\AppData\Local\Temp\opencode\liyuan-update.tgz" --exclude=.git --exclude=node_modules --exclude=web/node_modules --exclude=data --exclude=liyuan.config.json --exclude=liyuan.agent.json -C "D:\zhuce\_non_reg" Liyuan
-scp -i "C:\Users\86186\Downloads\miyao\47.98.210.60_id_ed25519" -P 44272 "C:\Users\86186\AppData\Local\Temp\opencode\liyuan-update.tgz" root@47.98.210.60:/root/
-```
-
-VPS 上解压并重启：
-
-```bash
-cd /root
-cp -a /root/Liyuan /root/Liyuan-backups/$(date +%Y%m%d-%H%M%S)
-tar -xzf /root/liyuan-update.tgz -C /root
-chown -R liyuan:liyuan /root/Liyuan
-cd /root/Liyuan
-PATH=/opt/node22/bin:$PATH HTTPS_PROXY=http://127.0.0.1:7890 HTTP_PROXY=http://127.0.0.1:7890 npm ci --omit=dev --no-audit --no-fund
-systemctl restart liyuan
-```
-
-更新时不要覆盖：
+当前 VPS 使用本地双分支维护，不再通过 tar 覆盖整个源码目录：
 
 ```text
-/root/Liyuan/liyuan.config.json
-/root/Liyuan/liyuan.agent.json
-/root/Liyuan/.liyuan-*/
-/root/Liyuan/.liyuan-stage-skills/
-/var/lib/liyuan/agent
+origin/master  官方 GitHub 上游
+master         官方基线，只跟踪 origin/master
+local          VPS 实际运行版本（官方 + 本地增强）
 ```
+
+正常更新只需：
+
+```bash
+cd /root/Liyuan
+./scripts/update-local.sh
+```
+
+脚本会先备份 Git、配置、世界/生态数据、Skill 覆盖和会话树，再把 `origin/master` 合并到 `local`；完整测试和前端构建通过后才重启服务并执行 HTTP 健康检查。它不会向 GitHub 推送代码。
+
+执行前要求：
+
+1. 没有正在进行的生成。
+2. 当前分支是 `local`。
+3. `git status --short` 没有输出。
+
+冲突或失败语义：
+
+- 合并冲突：立即停止，服务不重启；可解决冲突后继续，或执行 `git merge --abort`。
+- 测试/构建失败：不重启服务，保留现场和更新前备份供修复。
+- 工作区不干净：拒绝运行，不自动 stash、不丢弃改动。
+
+用户配置和运行数据均被 `.gitignore` 排除，不参与代码合并；脚本仍会在每次更新前另行备份。完整说明、手工冲突处理和恢复步骤见 `docs/LOCAL-UPSTREAM-UPDATES.md`。
 
 ## 12. 故障排查
 
@@ -332,6 +328,7 @@ systemctl start liyuan
 
 ```text
 D:\zhuce\_non_reg\Liyuan\README.md                      项目介绍
+D:\zhuce\_non_reg\Liyuan\docs\LOCAL-UPSTREAM-UPDATES.md       本地分支与安全更新流程
 D:\zhuce\_non_reg\Liyuan\docs\STANDALONE-INTEGRATION-BASELINE.md  脱离 Luker 整合基线
 D:\zhuce\_non_reg\Liyuan\deploy\README.md               官方部署说明
 D:\zhuce\_non_reg\Liyuan\deploy\VPS-OPERATIONS.md       本文档

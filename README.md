@@ -114,6 +114,8 @@ powershell -File scripts/pack-for-linux.ps1
 
 配置文件分两份：**`liyuan.config.json`** 管角色卡 / 世界书 / 用户身份等（面板里也能改）；**`liyuan.agent.json`** 管模型与 Key（**勿提交仓库**）。旧版 `.rp-*` 目录与 `rp.config.json` 启动时自动迁移。
 
+长期维护了本地增强的 VPS 可采用 `master`（官方基线）+ `local`（实际运行版）双分支，通过 `scripts/update-local.sh` 自动备份、合并上游、测试、构建、重启和健康检查；该流程只拉取、不推送。详见 [本地增强版的上游更新流程](docs/LOCAL-UPSTREAM-UPDATES.md)。
+
 ## 进阶
 
 - **斜杠命令**（Web 输入框直接敲，带补全）：`/state` 账本 · `/lore` 设定检索 · `/import` 导入旧档 · `/store` `/back` `/line` 存档与世界线 · `/rewind` `/branch` 回退与分支 · `/compact` 手动压缩 等；

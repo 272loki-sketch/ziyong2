@@ -132,6 +132,7 @@ StageEngine              = 唯一正文所有者 + 独立谢幕格式轮唯一�
 | `docs/PLAN-WORLD-ENGINE.md` | 世界引擎：画像/Manifest/事实信封/模块化状态/提案/审计/原子 commit |
 | `docs/PLAN-LIVING-ECOLOGY.md` | 鲜活世界：三层权威 + running/ready 双池 + 跨域信号 + 失败语义 |
 | `docs/STANDALONE-INTEGRATION-BASELINE.md` | 脱离 Luker 的整合基线：权威边界 + Skill 化 + 配置 + REST |
+| `docs/LOCAL-UPSTREAM-UPDATES.md` | VPS 的 `master`/`local` 双分支、安全更新、冲突处理与恢复 |
 | `docs/PRESET-SPLIT-TAXONOMY.md` | 预设拆层：A–I 类去留 |
 | `docs/PLAN-RP-AGENT-EXEC.md` / `PLAN-RP-AGENT.md` | RP agent 编排 |
 | `docs/PLAN-RP-TOOLING.md` | 工具 schema 与写入门禁 |
