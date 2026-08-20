@@ -18,6 +18,9 @@ rp-world-state           = 模块化世界权威（ModularWorldState v2；旧 v1
 rp-world-manifest        = 当前分支采用的卡级世界适配版本
 rp-world-audit           = 世界转移审计留痕（不进主演上下文）
 rp-ecology-state         = 人物生活、地点活动、日程、通讯、认知、可错过事件
+rp-outline               = 当前分支动态大纲（未来方向、人物弧线、伏笔；低于已提交事实）
+rp-outline-proposal      = 大纲 pending/approved/rejected 提案与审计留痕
+rp-outline-chat          = 导演室讨论记录与即时场景建议（非正文、非事实）
 rp-summary               = 长局压缩接力摘要
 rp-curtain-override      = 状态栏重 Roll 覆盖工件（只改展示）
 .liyuan-memory           = 检索记忆（向量）
@@ -41,6 +44,7 @@ StageEngine              = 唯一正文所有者 + 独立谢幕格式轮唯一�
 | `src/stage/scribe-run.ts` | 场记兜底记账（主演未记账时） |
 | `src/stage/compact.ts` | 长局压缩（rp-summary + 归档） |
 | `src/stage/literary-*.ts` | 文学工作流各步：连续性、Sogon/Sigon、director、world-profile、world-modular、world-transition、world-signals、ecology |
+| `src/outline/` | 独立大纲系统：Schema/runtime parser、分支恢复、Proposal/Audit/Commit、研究库、消费者安全投影与 OutlineEngine |
 | `src/stage/calendar.ts` | 确定性历法/日期/跨月区间/年度重复投影（纯函数） |
 | `src/stage/skill-store.ts` | Skill 装载（内置 `skills/` + 用户覆盖 `.liyuan-stage-skills/`） |
 | `src/presentation.ts` | 状态栏/日历/选项原生投影（只读视图） |
@@ -48,6 +52,7 @@ StageEngine              = 唯一正文所有者 + 独立谢幕格式轮唯一�
 | `server/rest.ts` | REST API（card/config/world-profile/world-state/skills…） |
 | `server/wire.ts` | 会话树 → 前端 wire 协议翻译；`workflowView` 安全投影导演/连续性工件 |
 | `web/src/` | React 前端；`Messages.tsx` 渲染消息、世界/生态卡、本拍工作流卡 |
+| `web/src/planning/` | 独立故事导演工作台：综合编剧、下一拍、下一段对白、角色反应、节奏诊断、故事地图、人物弧线、伏笔、建议箱、版本与研究 |
 | `skills/` | 内置工作流 Skill（随版本更新） |
 | `.liyuan-stage-skills/` | Skill 用户覆盖（gitignore，不随版本覆盖） |
 | `packages/` | `@liyuan/*` agent 内核（pi fork，file: 依赖）；`packages/ai` 含 provider 请求与重试 |
@@ -72,6 +77,7 @@ StageEngine              = 唯一正文所有者 + 独立谢幕格式轮唯一�
   │   世界链：事实信封 → 到期模块提案 → 独立审计 → TS 门禁 → 原子 commit → rp-world-audit
   │   生态 aftermath → rp-ecology-state
   ├─ 独立谢幕格式轮 → rpCurtain（格式卡在 agent loop 内生成）
+  ├─ agent end 后：OutlineEngine 按 manual/suggest/auto 异步校准（不阻塞正文；下一拍生效）
   ├─ 压缩（按 everyNTurns，0=关闭自动）
   └─ onTurnEnd → agent:end → resyncAll（hello 全量重放）
 ```
@@ -133,6 +139,7 @@ StageEngine              = 唯一正文所有者 + 独立谢幕格式轮唯一�
 | `docs/PLAN-LIVING-ECOLOGY.md` | 鲜活世界：三层权威 + running/ready 双池 + 跨域信号 + 失败语义 |
 | `docs/STANDALONE-INTEGRATION-BASELINE.md` | 脱离 Luker 的整合基线：权威边界 + Skill 化 + 配置 + REST |
 | `docs/LOCAL-UPSTREAM-UPDATES.md` | VPS 的 `master`/`local` 双分支、安全更新、冲突处理与恢复 |
+| `docs/DIRECTOR-ROOM.md` | 导演室用户参考：五种讨论模式、即时建议卡、建议如何转大纲 |
 | `docs/PRESET-SPLIT-TAXONOMY.md` | 预设拆层：A–I 类去留 |
 | `docs/PLAN-RP-AGENT-EXEC.md` / `PLAN-RP-AGENT.md` | RP agent 编排 |
 | `docs/PLAN-RP-TOOLING.md` | 工具 schema 与写入门禁 |
