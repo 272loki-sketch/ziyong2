@@ -18,6 +18,7 @@ export const SIDE_MODEL_STEPS = [
 	"outlineForeshadowing",
 	"outlineAudit",
 	"outlineResearch",
+	"novelDigest",
 	"contractDeclare",
 	"scribe",
 	"compaction",
@@ -50,8 +51,23 @@ export function resolveStepModel<M>(
 	primary: M | undefined,
 	find: (provider: string, id: string) => M | undefined,
 	findById?: (id: string) => M | undefined,
+	fallbackChain?: SideModelStep[],
 ): { model?: M; requested?: ModelRef; fallback: boolean } {
 	if (!primary) return { fallback: false };
+	let fallbackResolved: {
+		requested?: ModelRef;
+		selected?: M;
+	} | undefined;
+	// novelDigest 未显式配置时回退 outlineResearch 插头（同一套研究旁路家族再落到总插头）。
+	if (!stepModels?.[step] && fallbackChain?.length) {
+		for (const candidate of fallbackChain) {
+			const requested = stepModels?.[candidate];
+			if (!requested) continue;
+			const selected = find(requested.provider, requested.id) ?? findById?.(requested.id);
+			if (selected) { fallbackResolved = { requested, selected }; break; }
+		}
+	}
+	if (fallbackResolved?.selected) return { model: fallbackResolved.selected, requested: fallbackResolved.requested, fallback: false };
 	const requested = stepModels?.[step];
 	if (!requested) return { model: primary, fallback: false };
 	// provider 是渠道配置名，用户删掉旧渠道再以新名字接入同一模型时会变化；

@@ -137,6 +137,12 @@ export interface RpConfig {
 	literaryEcologyEnabled?: boolean;
 	/** 联网查证：off=关闭；auto=模型按需；manual=仅用户本拍明确要求联网时可用 */
 	webResearchMode?: "off" | "auto" | "manual";
+	/** 小说长文消化：手动触发后台管道，纯手动无后台自动成本。 */
+	novelDigest?: {
+		enabled: boolean;
+		chunkChars: number;
+		maxCallsPerDoc: number;
+	};
 	/** 各旁路步骤的项目级模型覆盖；缺少某项即继承当前剧情总插头 */
 	stepModels?: import("./model-routing.ts").StepModelOverrides;
 }
@@ -158,6 +164,7 @@ export const DEFAULT_CONFIG: RpConfig = {
 	literaryWorldEnabled: false,
 	literaryEcologyEnabled: false,
 	webResearchMode: "off",
+	novelDigest: { enabled: true, chunkChars: 20000, maxCallsPerDoc: 800 },
 };
 
 /** 宏替换上下文 */

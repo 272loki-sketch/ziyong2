@@ -6,7 +6,7 @@ import type { StageMaterials } from "../stage/materials.ts";
 import { workflowSkill } from "../stage/skill-store.ts";
 import type { WebResearchItem } from "../tools/web-research.ts";
 import { buildOutlineAuditPrompt, buildOutlineChatPrompt } from "./prompts.ts";
-import { projectOutline } from "./projection.ts";
+import { projectOutline, projectCorpusWorkspace } from "./projection.ts";
 import { OutlineResearchStore, type OutlineResearchExtraction } from "./research.ts";
 import { parseOutlineAudit, parseOutlineProposal } from "./runtime.ts";
 import type { OutlineAudit, OutlineChatEntry, OutlineChatResult, OutlineDiscussionFocus, OutlineProposal, OutlineProposalEntry, OutlineSceneAdvice, OutlineSource } from "./schema.ts";
@@ -187,6 +187,14 @@ export class OutlineEngine {
 
 	researchView(): ReturnType<OutlineResearchStore["view"]> { return this.#research.view(this.#deps.getContext?.().cardKey ?? this.#deps.loadMaterials().config.card); }
 
+	/** 小说消化完成入库（CorpusEngine onReady 钩子）。 */
+	async digestReady(document: import("./corpus.ts").CorpusDocument, digest: import("./corpus.ts").CorpusDigest, extracted: OutlineResearchExtraction[]): Promise<import("./research.ts").OutlineResearchView["documents"]> {
+		return this.#research.mergeCorpus(document.cardKey, document, digest, extracted);
+	}
+
+	/** 删除文档后清理只被该文档引用的机制条目（CorpusEngine onRemoved 钩子）。 */
+	removeCorpus(docId: string): Promise<number> { return this.#research.removeCorpus(docId); }
+
 	async research(topic = ""): Promise<ReturnType<OutlineResearchStore["view"]>> {
 		if (!this.#deps.webResearch) throw new Error("当前环境没有启用联网研究");
 		const context = this.#deps.getContext?.();
@@ -292,7 +300,7 @@ export class OutlineEngine {
 		}).slice(-80);
 	}
 	#settings(branch: BranchEntryLike[]): OutlineSettings { for (let i = branch.length - 1; i >= 0; i--) { const row = branch[i]; if (row.type === "custom" && row.customType === SETTINGS_TYPE && row.data && typeof row.data === "object") { const data = row.data as Partial<OutlineSettings>; return { mode: ["manual", "suggest", "auto"].includes(String(data.mode)) ? data.mode! : "manual", researchMode: ["off", "manual", "auto"].includes(String(data.researchMode)) ? data.researchMode! : "off" }; } } return { mode: "manual", researchMode: "off" }; }
-	#modelContext(leafId: string): unknown { const context = this.#deps.getContext?.() ?? { cardKey: this.#deps.loadMaterials().config.card }; return { baseLeafId: leafId, ...context, trustedEvidenceRegistry: this.#trustedSources(this.#branch()).map(({ id, kind, title, locator }) => ({ id, kind, title, locator })), researchWorkspace: this.#research.view(context.cardKey) }; }
+	#modelContext(leafId: string): unknown { const context = this.#deps.getContext?.() ?? { cardKey: this.#deps.loadMaterials().config.card }; return { baseLeafId: leafId, ...context, trustedEvidenceRegistry: this.#trustedSources(this.#branch()).map(({ id, kind, title, locator }) => ({ id, kind, title, locator })), researchWorkspace: projectCorpusWorkspace(this.#research.view(context.cardKey), { maxDocs: 3 }) }; }
 	#trustedSources(branch: BranchEntryLike[]): OutlineSource[] { return branch.flatMap((row): OutlineSource[] => { const id = typeof row.id === "string" && row.id ? `branch:${row.id}` : ""; if (!id) return []; const kind: OutlineSource["kind"] | null = row.type === "assistant" || row.message?.role === "assistant" || ["rp-greeting", "rp-edited-reply"].includes(String(row.customType)) ? "narrative" : row.type === "user" || row.message?.role === "user" ? "user" : row.customType === "rp-state" ? "rp-state" : row.customType === "rp-world-state" || row.customType === "rp-ecology-state" ? "world" : null; return kind ? [{ id, kind, title: `${kind} ${row.id}`, locator: String(row.id), note: "由当前分支引擎注册的已提交证据" }] : []; }); }
 	#safeQueries(topic: string, context?: OutlineContext): string[] {
 		const source = topic.toLowerCase(), abstractTopic = [
