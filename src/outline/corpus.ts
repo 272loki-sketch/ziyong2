@@ -544,7 +544,7 @@ export class CorpusEngine {
 			}
 			const found2 = this.#docs.get(docId);
 			if (!found2) return;
-			if (!summary) summary = `(本块摘要生成失败，仅保留章节列表)`;
+			if (!summary) { console.error(`[corpus] 块 ${chunk.index} 摘要输出不可解析：${(typeof attempt === "string" ? attempt : (attempt as { error?: string }).error ?? "error")?.slice(0, 300)}`); summary = `(本块摘要生成失败，仅保留章节列表)`; }
 			digest.chunks.push({ index: chunk.index, chars: chunk.chars, chapters: chapterTitles(chunk.chapters, chunk.text), summary });
 			digest.updatedAt = new Date().toISOString();
 			this.#writeDigest(docId, digest);
@@ -563,7 +563,7 @@ export class CorpusEngine {
 			const parsed = typeof raw === "string" ? parseObject(raw) : null;
 			const summary = parsed ? cleanText(parsed.summary, 2000) : "";
 			if (summary) arcs.push({ title, chunkRange: [start, end], summary });
-			else { this.#fail(doc, "弧线摘要生成失败"); return; }
+			else { console.error(`[corpus] 弧线摘要不可解析：${(typeof raw === "string" ? raw : (raw as { error?: string }).error ?? "error")?.slice(0, 300)}`); this.#fail(doc, "弧线摘要生成失败"); return; }
 		}
 		digest.arcs = arcs; digest.updatedAt = new Date().toISOString(); this.#writeDigest(docId, digest);
 
@@ -572,7 +572,7 @@ export class CorpusEngine {
 		const finalRaw = await this.#call(skill, JSON.stringify({ task: "digest-reduce-final", doc_title: doc.title, arc_summaries: arcs.map((a) => a.summary) }), 8192);
 		if (this.#abort.signal.aborted || !this.#docs.has(docId)) return;
 		const finalParsed = typeof finalRaw === "string" ? parseObject(finalRaw) : null;
-		if (!finalParsed) { this.#fail(doc, "全书梗概生成失败"); return; }
+		if (!finalParsed) { console.error(`[corpus] 全书梗概输出不可解析：${(typeof finalRaw === "string" ? finalRaw : (finalRaw as { error?: string }).error ?? "error")?.slice(0, 300)}`); this.#fail(doc, "全书梗概生成失败"); return; }
 		digest.synopsis = cleanText(finalParsed.synopsis, 3000);
 		const s = finalParsed.structure && typeof finalParsed.structure === "object" && !Array.isArray(finalParsed.structure) ? finalParsed.structure as Record<string, unknown> : {};
 		digest.structure = {
@@ -605,7 +605,7 @@ export class CorpusEngine {
 			failureWarning: t.failureWarning,
 			sourceIds: [docId],
 		}));
-		doc.status = "ready"; doc.chunkCount = chunks.length; doc.chapterCount = detected ? chapters.length : 0; doc.synopsisPreview = digest.synopsis.slice(0, 400); doc.tropeCount = tropes.length; this.#persistDocuments();
+		doc.status = "ready"; doc.chunkCount = chunks.length; doc.chapterCount = detected ? chapters.length : 0; doc.synopsisPreview = digest.synopsis.slice(0, 400); doc.tropeCount = tropes.length; delete doc.error; this.#persistDocuments();
 		this.#job = null;
 
 		// 入库（宿主挂 onReady → research store.mergeCorpus）
@@ -617,8 +617,13 @@ export class CorpusEngine {
 
 	async #call(skill: string, user: string, maxTokens: number): Promise<string | { error: string }> {
 		try {
-			return await this.#deps.runSideModel("novelDigest", skill, user, { maxTokens, signal: this.#abort.signal });
+			const result = await this.#deps.runSideModel("novelDigest", skill, user, { maxTokens, signal: this.#abort.signal });
+			if (typeof result === "object" && result && "error" in result) {
+				console.error(`[corpus] novelDigest 调用失败：${(result as { error: string }).error.slice(0, 200)}`);
+			}
+			return result;
 		} catch (err) {
+			console.error(`[corpus] novelDigest 异常：${err instanceof Error ? err.message : String(err)}`);
 			return { error: err instanceof Error ? err.message : String(err) };
 		}
 	}
