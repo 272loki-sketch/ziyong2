@@ -54,6 +54,8 @@ import { loadStageMaterials } from "../src/stage/materials.ts";
 import { webResearchBatch } from "./web-research.ts";
 import { resolveStepModel } from "../src/model-routing.ts";
 import { OutlineEngine } from "../src/outline/engine.ts";
+import { CorpusEngine } from "../src/outline/corpus.ts";
+import { workflowSkill } from "../src/stage/skill-store.ts";
 import { literaryProfileFromBranch } from "../src/stage/literary-profile.ts";
 import {
 	activePanels,
@@ -223,6 +225,7 @@ const runtime = await createAgentSessionRuntime(createRuntime, {
 let session: AgentSession = runtime.session;
 let unsubscribe: (() => void) | undefined;
 let outline: OutlineEngine | undefined;
+let corpus: CorpusEngine | undefined;
 const turnRuntimeDiagnostics = new Map<string, import("../src/stage/diagnostics.ts").TurnRuntimeDiagnostic>();
 
 // ---------- WS 广播 ----------
@@ -1605,6 +1608,9 @@ const restHost: RestHost = {
 			config.stepModels,
 			session.model as unknown as StageModelLike | undefined,
 			(provider, id) => session.modelRegistry.getAvailable().find((item) => item.provider === provider && item.id === id) as unknown as StageModelLike | undefined,
+			undefined,
+			// novelDigest 未配置插头时回退 outlineResearch 插头（研究旁路家族），再落总插头。
+			step === "novelDigest" ? ["outlineResearch"] : undefined,
 		);
 		const model = resolved.model;
 		if (!model) return { error: "无可用模型" };
@@ -1703,6 +1709,14 @@ const restHost: RestHost = {
 		research: (topic) => outline!.research(topic),
 		settings: (value) => outline!.settings(value),
 	},
+	corpus: {
+		create: (file) => corpus!.create(file),
+		view: () => corpus!.view(),
+		detail: (id) => corpus!.getDetail(id),
+		pause: (id) => (corpus!.pause(id), corpus!.view()),
+		resume: (id) => (corpus!.resume(id), corpus!.view()),
+		remove: async (id) => ({ removedMechanisms: await corpus!.remove(id) }),
+	},
 };
 
 outline = new OutlineEngine({
@@ -1743,6 +1757,17 @@ outline = new OutlineEngine({
 	},
 	onState: () => resyncAll(),
 });
+
+corpus = new CorpusEngine({
+	cwd,
+	runSideModel: (step, systemPrompt, userText, options) => restHost.runSideText(step, systemPrompt, userText, options),
+	loadSkill: () => workflowSkill(loadStageMaterials(cwd).skillFiles, "novel-digest")?.body,
+	cardKey: () => loadStageMaterials(cwd).config.card,
+	onReady: (document, digest, extracted) => outline!.digestReady(document, digest, extracted).then(() => undefined),
+	onRemoved: (docId) => outline!.removeCorpus(docId),
+}, loadStageMaterials(cwd).config.novelDigest?.maxCallsPerDoc ?? 800);
+// 服务重启后：恢复未完成的消化任务（断点续跑）
+corpus.restore();
 
 // 启动时：liyuan.agent.json → models.json，重绑模型 + 应用思考档（配置 → 当前生效）
 try {

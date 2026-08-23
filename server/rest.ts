@@ -320,6 +320,15 @@ export interface RestHost {
 		research(topic?: string): Promise<unknown>;
 		settings(value?: { mode?: "manual" | "suggest" | "auto"; researchMode?: "off" | "manual" | "auto" }): unknown;
 	};
+	/** 小说长文消化（导演室研究库扩容，阶段 1） */
+	corpus: {
+		create(file: string): Promise<{ doc: unknown; estimatedCalls: number }>;
+		view(): unknown;
+		detail(id: string): unknown;
+		pause(id: string): unknown;
+		resume(id: string): unknown;
+		remove(id: string): Promise<{ removedMechanisms: number }>;
+	};
 }
 
 export interface SessionInfoLite {
@@ -459,6 +468,7 @@ const CONFIG_EDITABLE = new Set([
 	"literaryWorldEnabled",
 	"literaryEcologyEnabled",
 	"webResearchMode",
+	"novelDigest",
 	"stepModels",
 ]);
 
@@ -490,6 +500,18 @@ export function applyConfigPatch(config: RpConfig, patch: Record<string, unknown
 	);
 	if (!["off", "auto", "manual"].includes(String(next.webResearchMode))) next.webResearchMode = "off";
 	next.stepModels = normalizeStepModels(next.stepModels);
+	// 小说长文消化：纯手动触发。缺省 enabled=true 无后台自动成本；非法值回落默认。
+	if (next.novelDigest !== undefined && next.novelDigest !== null && typeof next.novelDigest === "object") {
+		const nd = next.novelDigest as { enabled?: unknown; chunkChars?: unknown; maxCallsPerDoc?: unknown };
+		const def = DEFAULT_CONFIG.novelDigest ?? { enabled: true, chunkChars: 20000, maxCallsPerDoc: 800 };
+		next.novelDigest = {
+			enabled: nd.enabled === true || nd.enabled === false ? nd.enabled : def.enabled,
+			chunkChars: clampInt(nd.chunkChars as number, 1000, 50000, def.chunkChars),
+			maxCallsPerDoc: clampInt(nd.maxCallsPerDoc as number, 100, 20000, def.maxCallsPerDoc),
+		};
+	} else if (next.novelDigest === null || next.novelDigest === undefined) {
+		next.novelDigest = DEFAULT_CONFIG.novelDigest ?? { enabled: true, chunkChars: 20000, maxCallsPerDoc: 800 };
+	}
 	next.greeting = next.greeting === true;
 	// 决策门禁档位：只认 ask / silent；非法值删除（扩展缺省按 silent）
 	if (next.creationMode !== "ask" && next.creationMode !== "silent") delete next.creationMode;
@@ -1013,6 +1035,15 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 			}
 			return true;
 		}
+		// 小说消化子路由：GET/:id、pause、resume、DELETE
+		const corpusDetail = /^GET \/api\/outline\/corpus\/([^/]+)$/.exec(route);
+		if (corpusDetail) { sendJson(res, 200, host.corpus.detail(decodeURIComponent(corpusDetail[1]))); return true; }
+		const corpusPause = /^POST \/api\/outline\/corpus\/([^/]+)\/pause$/.exec(route);
+		if (corpusPause) { sendJson(res, 200, host.corpus.pause(decodeURIComponent(corpusPause[1]))); return true; }
+		const corpusResume = /^POST \/api\/outline\/corpus\/([^/]+)\/resume$/.exec(route);
+		if (corpusResume) { sendJson(res, 200, host.corpus.resume(decodeURIComponent(corpusResume[1]))); return true; }
+		const corpusDelete = /^DELETE \/api\/outline\/corpus\/([^/]+)$/.exec(route);
+		if (corpusDelete) { sendJson(res, 200, await host.corpus.remove(decodeURIComponent(corpusDelete[1]))); return true; }
 		switch (route) {
 			case "GET /api/outline": { sendJson(res, 200, host.outline.getView()); return true; }
 			case "GET /api/turn-diagnostics": {
@@ -1059,6 +1090,19 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 			case "PUT /api/outline/settings": {
 				const body = JSON.parse(await readBody(req)) as { mode?: "manual" | "suggest" | "auto"; researchMode?: "off" | "manual" | "auto" };
 				sendJson(res, 200, { settings: host.outline.settings(body) }); return true;
+			}
+			// ---- 小说长文消化（导演室「小说研究」页签；纯手动触发） ----
+			case "POST /api/outline/corpus": {
+				const cfglite = loadConfig(host.cwd);
+				if (cfglite.novelDigest?.enabled === false) throw new Error("小说消化尚未启用");
+				const body = JSON.parse(await readBody(req)) as { file?: string };
+				const file = (body.file ?? "").trim();
+				if (!file) throw new Error("缺少 file（上传区文件名）");
+				sendJson(res, 201, await host.corpus.create(file)); return true;
+			}
+			case "GET /api/outline/corpus": {
+				res.setHeader("cache-control", "no-store");
+				sendJson(res, 200, host.corpus.view()); return true;
 			}
 			// ---- 命令清单（输入框补全用；单一来源 src/commands.ts） ----
 			case "GET /api/commands": {

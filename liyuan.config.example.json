@@ -11,6 +11,11 @@
 	"creationMode": "ask",
 	"literaryWorldEnabled": false,
 	"literaryEcologyEnabled": false,
+	"novelDigest": {
+		"enabled": true,
+		"chunkChars": 20000,
+		"maxCallsPerDoc": 800
+	},
 	"importStripTags": [],
 	"greetingIndex": 0
 }
