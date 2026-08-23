@@ -23,6 +23,7 @@
 - `docs/PLAN-ROUND-FLOW.md` — 分轮演出流程（最终形态 + 关键路径分级 + 落地记录）
 - `docs/PLAN-WORLD-ENGINE.md` — 角色卡自适应模块化世界引擎（画像/Manifest/事实信封/审计/模块化状态）权威设计
 - `docs/PLAN-LIVING-ECOLOGY.md` — 鲜活世界生态（三层权威 + 后台双池 running/ready）权威设计
+- `docs/PLAN-NOVEL-DIGEST.md` — 小说长文消化与研究库扩容（上传→分块摘要→套路库，导演室后台管道）权威设计
 - `docs/STANDALONE-INTEGRATION-BASELINE.md` — 文学工作流 Skill 化权威边界
 - `docs/READING-THINKING.md` — 读思考记录的**正确方法**（先读这个再碰会话文件）
 - `src/stage/` — 台上引擎（assemble 提示词 / engine 回合循环 / workspace 稿纸 /
