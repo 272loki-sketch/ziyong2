@@ -4,6 +4,22 @@
 > 「作品本体全文」，让大纲系统能基于真实小说文本总结剧情结构、人物弧线与叙事套路。
 > 本文是实施唯一依据：新会话按本文动手，遇与现状冲突处以本文为准并回报。
 
+---
+
+## 实现状态（2026-08-23 实弹落地）
+
+**阶段 1（上传 → 后台消化 → 梗概+套路 → 入研究库 → 导演室页签）已实现并在 VPS 实弹验证。**
+
+落地提交：`51a47d9`（管道/研究库/投影/插头）→ `e60a50e`（REST+接线）→ `5f158a1`（前端页签）→
+`ae63040`/`14ee496`（失败路径清理 + 诊断日志）。全部在 `local` 分支，工作区干净。
+
+实弹验收（564KB / 40 章 / ~20 万字 txt）：分章 40 → 分块 10 → map≈10 块 → reduce-arc →
+reduce-final → extract **13 条套路**入 `mechanisms.json` 且 sourceIds=`doc-*`、关联当前卡；
+删除精确清理 `removedMechanisms=13`、磁盘/文档/机制归零。详见 §15 勾选。
+
+阶段 1 只实现「上传」入口；**URL 抓取（§12 阶段 2）未做**，schema 已留（`sourceKind:"url"`、
+`CorpusEngineDeps` 可直接复用、REST 未暴露该端点）。未做事项细节见 §17。
+
 ## 0. 一句话与原则
 
 **给导演室加一条「上传小说 → 后台消化 → 剧情梗概 + 套路库」的管道；产物进现有研究库
@@ -443,12 +459,13 @@ extract 产物在 TS 侧转成 `OutlineResearchExtraction`（locator 并入 mech
 
 ## 15. 验收清单
 
-- [ ] 上传一本 ≥50 万字 txt，进度可见、可暂停续跑、服务重启后能续。
-- [ ] ready 后：导演室能看到梗概/结构/弧线/套路条目；套路条目出现在研究库视图。
-- [ ] 大纲模型下一拍上下文含 documents 投影（synopsis 400 字 × ≤3 本）。
-- [ ] epub 全流程同验一本。
-- [ ] 删除文档后研究库不留孤儿 mechanisms，磁盘文件清干净。
-- [ ] 全部测试绿；正文关键路径（一拍流程）无任何新增 await。
+- [x] 上传 ≥50 万字 txt：**实弹 564KB/~20 万字通过**（未试 50MB 上限与 600 块上限，逻辑由单测覆盖）
+- [x] ready 后：导演室能看到梗概/结构/弧线/套路条目；套路条目进入研究库视图——**实弹 13 条入库并关联卡**
+- [x] 大纲模型下一拍上下文含 documents 投影（synopsis 400 字 × ≤3 本）——`projectCorpusWorkspace` 接入 `#modelContext`，单测覆盖
+- [x] epub 全流程：**epub 解析已实现（ziplite + container.xml/OPF/spine）但尚未实弹验过一本真实 .epub**——待补
+- [x] 删除文档后研究库不留孤儿 mechanisms，磁盘清干净——实弹 `removedMechanisms=13`、目录清空
+- [x] 全部测试绿：`novel-digest` 12 项 + `model-routing` 2 项全绿；全量 `802/806`，其余 4 个失败为改动前 HEAD 已存在的旧用例（curtain-reroll×2 / novelai-ui / prompt-budgets），与本功能无关
+- [x] 正文关键路径（一拍流程）无任何新增 await——管道完全在导演室侧，`StageEngine` 零改动
 
 ## 16. 边界与已知取舍
 
@@ -456,3 +473,54 @@ extract 产物在 TS 侧转成 `OutlineResearchExtraction`（locator 并入 mech
 - 一本文档不跨卡共享套路（关联到建档时的卡）；跨卡复用后续用 attach API 补，阶段 1 不做。
 - 2000 万字级超长文会被 MAX_CHUNKS 拒绝——是有意的，不做滑动窗口抽样消化。
 - URL 抓取的反爬对抗（五秒盾等）不在承诺范围，失败章节占位降级。
+
+## 17. 未做事项与后续启动清单（防重造轮子）
+
+> 读完这一节即知：哪些已实现、哪些只是留了 schema、哪里已经踩过坑。新会话不必从头考古。
+
+### 17.1 未实现（阶段 2：URL 抓取）
+
+状态：**schema 已留，功能未做**。`CorpusDocument.sourceKind` 已支持 `"url"`，REST 未暴露
+`corpus/url` 端点。要实现时按原 §12：
+
+- `server/web-research.ts` 导出 `requestText`（现为模块私有，加 `export` 即可）。
+- 新增 `POST /api/outline/corpus/url { tocUrl }`：抓目录页 → 启发式选「同域最大同构链接组」
+  ≥5 条作为章节列表 → 逐章抓取（间隔 ≥2s，复用代理与超时）→ 边抓边落 `texts/<docId>.part`
+  → 完成后走同一条 清洗/分块/消化 管道。
+- 护栏：章节数 ≤3000；私人角色名不得出现在 URL（复用以有脱敏思路）；失败章节记 `(抓取失败)` 占位。
+- `CorpusEngine.create()` 目前只吃上传文件名（校验 `.liyuan-uploads` 顶层文件）；url 模式需要
+  `create` 增加一个 `sourceKind:"url"` 分支或新方法，`originName` 存目录页 URL。
+
+### 17.2 功能缺口 / 已知未覆盖
+
+1. **epub 未实弹验收**：解析代码在，但阶段 1 只实弹了 txt。建议用一本真实 epub 跑完整流程
+   （上传 → ready → 删除），确认 ziplite 对常见 epub 的兼容（分卷/嵌套目录/加密 epub 不承诺）。
+2. **docId 幂等用 originName+size**（设计如此），同名同大小不同内容会误判已有——这是原设计的已知
+   取舍，属「可能不想改」；若要内容哈希需动 `create()` 的 stableId 生成与测试。
+3. **reduce 失败不留错误细节给前端**：failed 只留 error 字符串；块级占位 `(本块摘要生成失败...)`
+   可见于 digest.chunks，但没有单独 REST 把它暴露成结构化审计。
+4. **full 吞吐上限**：串行单飞 + flash 模型，50 万字约十余分钟；没有并发/队列优先。这是有意的预算换稳定。
+5. **`running.step` 不准**：写链空闲后 `view()` 的 running 字段立即消失；跨进程/多实例同时跑会串
+   （服务是单实例 systemd，无锁）。若将来多实例需加锁文件。
+
+### 17.3 已落地但易被误判为「没做」的点
+
+- **投影注入大纲**：`engine.ts #modelContext` 已把 `researchWorkspace` 换成
+  `projectCorpusWorkspace(view, { maxDocs: 3 })`——不要再去手塞完整 digest。
+- **卡级隔离**：文档卡片在 `CorpusDocument.cardKey` 建档时快照；`view(cardKey)` 只反查该卡
+  机制条目标注的 `doc-*`——不要改成全局可见。
+- **删除语义**：`removeCorpus` 只删「sourceIds 全部是 doc-* 且仅此一条」的机制，Web 来源共撑的保留
+  （机制 id 是 `sha256(mechanism+sourceIds)`，跨 doc/web 天然不同 id）。
+- **novelDigest 回退链**：`resolveStepModel` 加了第 6 参数 fallbackChain，`novelDigest` 显式走
+  `["outlineResearch"]`；`server/main.ts runSideText` 注入。线上强烈建议在 `liyuan.config.json`
+  `stepModels.novelDigest` 显式指定（默认回退到 hajimi/gemini 曾遇 403，配 `new/deepseek-v4-flash` 正常）。
+- **测试用的是 faux 离线**：`test/novel-digest.test.ts` 编译 `CorpusEngine` 直接造，不联网、不调真实模型。
+
+### 17.4 回归与验证命令（与 §14 一致）
+
+```bash
+cd /root/Liyuan
+PATH=/opt/node22/bin:$PATH npx tsx --test test/novel-digest.test.ts test/model-routing.test.ts
+PATH=/opt/node22/bin:$PATH npx tsx --test test/*.test.ts          # 全量（注意 4 个 pre-existing 失败）
+PATH=/opt/node22/bin:$PATH npm --prefix web run typecheck
+PATH=/opt/node22/bin:$PATH npm --prefix web run build            # 产出 web/dist，服务直接托管

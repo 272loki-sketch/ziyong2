@@ -24,6 +24,7 @@ rp-outline-chat          = 导演室讨论记录与即时场景建议（非正�
 rp-summary               = 长局压缩接力摘要
 rp-curtain-override      = 状态栏重 Roll 覆盖工件（只改展示）
 rp-turn-diagnostic       = 只读结算留痕（场记结果、不成为第二套账本权威）
+.liyuan/outline/research/corpus/ = 小说消化产物（documents.json / texts / digests；`documents` 入 OutlineResearchView，机制进 mechanisms.json）
 .liyuan-memory           = 检索记忆（向量）
 .liyuan/world/cards/<key>/profile.json = 卡级长期世界画像（跨会话）
 StageEngine              = 唯一正文所有者 + 独立谢幕格式轮唯一时机
@@ -47,6 +48,7 @@ StageEngine              = 唯一正文所有者 + 独立谢幕格式轮唯一�
 | `src/stage/diagnostics.ts` | **本拍诊断只读投影**：从 Session Tree 动态构造回合诊断（关联、状态判定、安全裁剪、超大型截断与来源校验） |
 | `src/stage/literary-*.ts` | 文学工作流各步：连续性、Sogon/Sigon、director、world-profile、world-modular、world-transition、world-signals、ecology |
 | `src/outline/` | 独立大纲系统：Schema/runtime parser、分支恢复、Proposal/Audit/Commit、研究库、消费者安全投影与 OutlineEngine |
+| `src/outline/corpus.ts` | **小说长文消化管道**（PLAN-NOVEL-DIGEST）：解码/清洗/分章/分块纯函数 + 串行 CorpusEngine（断点续跑、暂停/恢复/删除、预算闸门、docId 幂等） |
 | `src/stage/calendar.ts` | 确定性历法/日期/跨月区间/年度重复投影（纯函数） |
 | `src/stage/skill-store.ts` | Skill 装载（内置 `skills/` + 用户覆盖 `.liyuan-stage-skills/`） |
 | `src/presentation.ts` | 状态栏/日历/选项原生投影（只读视图） |
@@ -168,6 +170,7 @@ StageEngine              = 唯一正文所有者 + 独立谢幕格式轮唯一�
 | `docs/PLAN-WORLD-ENGINE.md` | 世界引擎：画像/Manifest/事实信封/模块化状态/提案/审计/原子 commit |
 | `docs/PLAN-LIVING-ECOLOGY.md` | 鲜活世界：三层权威 + running/ready 双池 + 跨域信号 + 失败语义 |
 | `docs/PLAN-OUTLINE-SYSTEM.md` | 动态大纲系统：Proposal/Audit/Commit、伏笔状态机、安全投影、导演室工作台（含本拍诊断） |
+| `docs/PLAN-NOVEL-DIGEST.md` | 小说长文消化与研究库扩容：上传→分块摘要→套路库（§17 含实现状态与未做事项） |
 | `docs/STANDALONE-INTEGRATION-BASELINE.md` | 脱离 Luker 的整合基线：权威边界 + Skill 化 + 配置 + REST |
 | `docs/DIRECTOR-ROOM.md` | 导演室用户参考：五种讨论模式、即时建议卡、本拍诊断、建议如何转大纲 |
 | `docs/LOCAL-UPSTREAM-UPDATES.md` | VPS 的 `master`/`local` 双分支、安全更新、冲突处理与恢复 |

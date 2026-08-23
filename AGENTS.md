@@ -23,13 +23,14 @@
 - `docs/PLAN-ROUND-FLOW.md` — 分轮演出流程（最终形态 + 关键路径分级 + 落地记录）
 - `docs/PLAN-WORLD-ENGINE.md` — 角色卡自适应模块化世界引擎（画像/Manifest/事实信封/审计/模块化状态）权威设计
 - `docs/PLAN-LIVING-ECOLOGY.md` — 鲜活世界生态（三层权威 + 后台双池 running/ready）权威设计
-- `docs/PLAN-NOVEL-DIGEST.md` — 小说长文消化与研究库扩容（上传→分块摘要→套路库，导演室后台管道）权威设计
+- `docs/PLAN-NOVEL-DIGEST.md` — 小说长文消化与研究库扩容（上传→分块摘要→套路库，导演室后台管道）权威设计；**§17 含实现状态与未做事项（URL 抓取等），新会话先读这节**
 - `docs/STANDALONE-INTEGRATION-BASELINE.md` — 文学工作流 Skill 化权威边界
 - `docs/READING-THINKING.md` — 读思考记录的**正确方法**（先读这个再碰会话文件）
 - `src/stage/` — 台上引擎（assemble 提示词 / engine 回合循环 / workspace 稿纸 /
   tools 工具 schema / literary-*.ts 拍前分析 / literary-world-profile.ts 卡级画像+Manifest /
   literary-world-modular.ts 模块化世界 v2 / literary-world-transition.ts 事实信封+提案+审计 /
   literary-world-signals.ts 跨域信号 / literary-ecology.ts 生态 / skill-store.ts Skill 装载）
+- `src/outline/corpus.ts` — **小说长文消化管道**：解码/清洗/分章/分块 + 串行 CorpusEngine（断点续跑、暂停/恢复/删除、预算闸门）
 - `skills/` — 内置工作流 Skill（随版本更新；含世界模块包 `世界模块-*`）
 - `.liyuan-stage-skills/` — Skill 的用户覆盖（gitignore，不随版本覆盖；「世界推演」在此）
 - 测试：`npx tsx --test test/*.test.ts`（需 Node ≥ 22）
