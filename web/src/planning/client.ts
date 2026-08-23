@@ -1,5 +1,6 @@
-import { apiGet, apiPost, apiPut } from "../api.ts";
+import { apiGet, apiPost, apiPut, apiDelete } from "../api.ts";
 import type {
+	CorpusCreateResponse, CorpusDetailResponse, CorpusWorkbenchResponse,
 	OutlineChatResponse, OutlineDiscussionFocus, OutlineHistoryResponse, OutlineProposal, OutlineReconcileResponse,
 	OutlineResearchView, OutlineSceneAdvice, OutlineSettings, OutlineSettingsResponse, OutlineViewResponse, TurnDiagnosticsResponse,
 } from "./types.ts";
@@ -21,6 +22,12 @@ export const refreshOutlineResearch = (topic?: string) =>
 export const putOutlineSettings = (settings: Required<OutlineSettings>) =>
 	apiPut<OutlineSettingsResponse>("/api/outline/settings", settings);
 export const getTurnDiagnostics = (limit = 12) => apiGet<TurnDiagnosticsResponse>(`/api/turn-diagnostics?limit=${limit}`, { bypassCache: true });
+export const listCorpus = () => apiGet<CorpusWorkbenchResponse>("/api/outline/corpus", { bypassCache: true });
+export const createCorpus = (file: string) => apiPost<CorpusCreateResponse>("/api/outline/corpus", { file });
+export const getCorpusDetail = (id: string) => apiGet<CorpusDetailResponse>(`/api/outline/corpus/${encodeURIComponent(id)}`, { bypassCache: true });
+export const pauseCorpus = (id: string) => apiPost<CorpusWorkbenchResponse>(`/api/outline/corpus/${encodeURIComponent(id)}/pause`, {});
+export const resumeCorpus = (id: string) => apiPost<CorpusWorkbenchResponse>(`/api/outline/corpus/${encodeURIComponent(id)}/resume`, {});
+export const deleteCorpus = (id: string) => apiDelete<{ ok: true; removedMechanisms: number }>(`/api/outline/corpus/${encodeURIComponent(id)}`);
 
 export async function streamOutlineChat(message: string, researchMode?: OutlineSettings["researchMode"], focus: OutlineDiscussionFocus = "open", onDelta?: (text: string) => void): Promise<{ reply: string; options?: Array<string | { id?: string; title?: string; experience?: string; mechanism?: string; tradeoffs?: string | string[]; label?: string; text?: string; value?: string }>; proposal?: OutlineProposal; proposalHash?: string; warnings: string[]; focus?: OutlineDiscussionFocus; sceneAdvice?: OutlineSceneAdvice }> {
 	const res = await fetch("/api/outline/chat/stream", {

@@ -2,16 +2,18 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { IconClose, IconRefresh } from "../components/icons.tsx";
 import { ConfirmButton } from "../components/kit.tsx";
 import {
-	bootstrapOutline, confirmOutlineProposal, getOutline, getOutlineResearch,
+	bootstrapOutline, confirmOutlineProposal, getOutline, getOutlineResearch, createCorpus, deleteCorpus, getCorpusDetail, listCorpus, pauseCorpus, resumeCorpus,
 	getOutlineVersions, getTurnDiagnostics, putOutlineSettings, reconcileOutline, refreshOutlineResearch, rejectOutlineProposal, streamOutlineChat,
 } from "./client.ts";
+import { uploadFile } from "../api.ts";
 import type {
+	CorpusArcDigest, CorpusDetailResponse, CorpusDigest, CorpusDocument, CorpusWorkbenchResponse,
 	ForeshadowingStatus, OutlineChatResponse, OutlineDiscussionFocus, OutlineHistoryResponse, OutlineMode, OutlineNode,
 	OutlineProposalView, OutlineResearchMode, OutlineResearchView, OutlineSceneAdvice, OutlineViewResponse,
 	TurnDiagnosticStage, TurnDiagnosticView, TurnDiagnosticsResponse,
 } from "./types.ts";
 
-type Tab = "room" | "diagnostics" | "map" | "characters" | "foreshadowing" | "proposals" | "archive";
+type Tab = "room" | "diagnostics" | "map" | "characters" | "foreshadowing" | "proposals" | "archive" | "corpus";
 type Toast = (level: "info" | "warning" | "error", text: string) => void;
 type ChatLine = { role: "user" | "assistant"; text: string; options?: string[]; warnings?: string[]; focus?: OutlineDiscussionFocus; sceneAdvice?: OutlineSceneAdvice };
 type ResearchDisplayItem = {
@@ -29,7 +31,7 @@ type ResearchDisplayItem = {
 
 const TABS: Array<[Tab, string]> = [
 	["room", "编剧室"], ["diagnostics", "本拍诊断"], ["map", "故事地图"], ["characters", "人物弧线"],
-	["foreshadowing", "伏笔板"], ["proposals", "建议箱"], ["archive", "版本 / 研究"],
+	["foreshadowing", "伏笔板"], ["proposals", "建议箱"], ["corpus", "小说研究"], ["archive", "版本 / 研究"],
 ];
 const DISCUSSION_MODES: Array<{ id: OutlineDiscussionFocus; label: string; note: string; prompt: string }> = [
 	{ id: "open", label: "综合编剧", note: "长期路线与当前场景一起讨论", prompt: "结合当前剧情，判断接下来最值得发展的方向，并给出几种体验不同的方案。" },
@@ -84,6 +86,26 @@ function patchSummary(patch: Record<string, unknown> | undefined): string[] {
 		}
 	}
 	return rows.length ? rows : Object.keys(patch).map((key) => `修改 ${key}`);
+}
+const CORPUS_STATUS: Record<string, string> = {
+	pending: "排队中", cleaning: "清洗中", mapping: "分块摘要", reducing: "弧线归并", extracting: "提炼套路",
+	ready: "已完成", failed: "失败", paused: "已暂停",
+};
+function corpusMeta(doc: CorpusDocument): string {
+	const size = doc.chars > 10000 ? `${Math.round(doc.chars / 10000) / 100}万字` : `${doc.chars}字`;
+	return `${size} · ${doc.chunkCount}块 · ${CORPUS_STATUS[doc.status] ?? doc.status}`;
+}
+function CorpusDigestCard({ doc, detail }: { doc: CorpusDocument; detail: CorpusDetailResponse | undefined }) {
+	const digest: CorpusDigest | undefined = detail?.digest ?? undefined;
+	if (!digest) return <div className="planning-empty">该文档尚未完成消化，暂时没有可展示的梗概。</div>;
+	return <div className="planning-digest">
+		<section><h3>全书梗概</h3><p>{digest.synopsis}</p></section>
+		<div className="planning-section-head"><h3 className="planning-section-title">结构</h3><span>{digest.extractedCount} 条套路</span></div>
+		<div className="planning-grid">
+			{([["主线事件链", digest.structure.plotSpine], ["人物弧线", digest.structure.characterArcs], ["钩子与节奏", digest.structure.hooksAndPacing]] as Array<[string, string]>).map(([label, text]) => <article className="planning-research-card" key={label}><h4>{label}</h4><p>{text || "（未提炼）"}</p></article>)}
+		</div>
+		<section><h3 className="planning-section-title">弧线摘要</h3>{list(digest.arcs).map((arc: CorpusArcDigest) => <details key={arc.title} className="planning-arc"><summary>{arc.title}<span>块 {arc.chunkRange[0] + 1}–{arc.chunkRange[1] + 1}</span></summary><p>{arc.summary}</p></details>)}<div className="planning-page-note">块摘要与提炼出的可复用套路：套路条目会出现在「版本 / 研究 → 研究灵感」中，块摘要仅用于本卡参考、不会注入大纲模型。</div></section>
+	</div>;
 }
 function nodeCard(node: OutlineNode, extra?: React.ReactNode) {
 	return <article className="planning-card" key={node.id}>
@@ -174,6 +196,13 @@ export function StoryPlanningWorkbench({ onClose, toast }: { onClose: () => void
 	const [discussionFocus, setDiscussionFocus] = useState<OutlineDiscussionFocus>("open");
 	const transcriptRef = useRef<HTMLDivElement>(null);
 	const diagnosticsRequest = useRef(0);
+	const [corpus, setCorpus] = useState<CorpusWorkbenchResponse | null>(null);
+	const [corpusLoading, setCorpusLoading] = useState(false);
+	const [corpusError, setCorpusError] = useState("");
+	const [corpusDetail, setCorpusDetail] = useState<Record<string, CorpusDetailResponse>>({});
+	const [corpusUploading, setCorpusUploading] = useState(false);
+	const corpusRequest = useRef(0);
+	const corpusFileRef = useRef<HTMLInputElement>(null);
 
 	const load = async () => {
 		setError("");
@@ -199,6 +228,47 @@ export function StoryPlanningWorkbench({ onClose, toast }: { onClose: () => void
 		catch (cause) { if (request === diagnosticsRequest.current) setDiagnosticsError(cause instanceof Error ? cause.message : String(cause)); }
 		finally { if (request === diagnosticsRequest.current) setDiagnosticsLoading(false); }
 	};
+	const loadCorpus = async () => {
+		const request = ++corpusRequest.current;
+		setCorpusLoading(true); setCorpusError("");
+		try { const result = await listCorpus(); if (request === corpusRequest.current) setCorpus(result); }
+		catch (cause) { if (request === corpusRequest.current) setCorpusError(cause instanceof Error ? cause.message : String(cause)); }
+		finally { if (request === corpusRequest.current) setCorpusLoading(false); }
+	};
+	const uploadCorpusFile = async (file: File) => {
+		setCorpusUploading(true);
+		try {
+			const uploaded = await uploadFile(file);
+			const created = await createCorpus(uploaded.file);
+			if (created.estimatedCalls > 200) {
+				const ok = window.confirm(`「${created.doc.title}」需要约 ${created.estimatedCalls} 次旁路模型调用，继续吗？`);
+				if (!ok) { toast("info", "已取消建档（可在上传区删除该文件）"); return; }
+			}
+			toast("info", `已创建文档：${created.doc.title}（预计 ${created.estimatedCalls} 次辅助调用）`);
+			await loadCorpus();
+		} catch (cause) { toast("error", cause instanceof Error ? cause.message : String(cause)); }
+		finally { setCorpusUploading(false); if (corpusFileRef.current) corpusFileRef.current.value = ""; }
+	};
+	const toggleCorpusDetail = async (doc: CorpusDocument) => {
+		if (corpusDetail[doc.id]) { setCorpusDetail((c) => { const next = { ...c }; delete next[doc.id]; return next; }); return; }
+		try {
+			const detail = await getCorpusDetail(doc.id);
+			setCorpusDetail((c) => ({ ...c, [doc.id]: detail }));
+		} catch (cause) { toast("error", cause instanceof Error ? cause.message : String(cause)); }
+	};
+	const corpusAction = async (doc: CorpusDocument, kind: "pause" | "resume" | "delete") => {
+		try {
+			if (kind === "pause") { await pauseCorpus(doc.id); toast("info", "已暂停：当前块完成后停止"); }
+			else if (kind === "resume") { await resumeCorpus(doc.id); toast("info", "已恢复消化"); }
+			else {
+				if (!window.confirm(`删除「${doc.title}」？将同时清除其独立套路条目与研究文件。`)) return;
+				const result = await deleteCorpus(doc.id);
+				setCorpusDetail((c) => { const next = { ...c }; delete next[doc.id]; return next; });
+				toast("info", `已删除（清理 ${result.removedMechanisms} 条独占套路）`);
+			}
+			await loadCorpus();
+		} catch (cause) { toast("error", cause instanceof Error ? cause.message : String(cause)); }
+	};
 
 	useEffect(() => { void load(); }, []);
 	useEffect(() => {
@@ -206,6 +276,12 @@ export function StoryPlanningWorkbench({ onClose, toast }: { onClose: () => void
 		void loadDiagnostics();
 		const timer = window.setInterval(() => void loadDiagnostics(), 5_000);
 		return () => { window.clearInterval(timer); diagnosticsRequest.current++; };
+	}, [tab]);
+	useEffect(() => {
+		if (tab !== "corpus") return;
+		void loadCorpus();
+		const timer = window.setInterval(() => void loadCorpus(), 5_000);
+		return () => { window.clearInterval(timer); corpusRequest.current++; };
 	}, [tab]);
 	useEffect(() => {
 		const key = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
@@ -325,6 +401,29 @@ export function StoryPlanningWorkbench({ onClose, toast }: { onClose: () => void
 				{tab === "foreshadowing" && state && <div className="planning-page"><div className="planning-legend"><span className="conceived">仅构想：尚未进入正文</span><span className="planted">已埋设：有正文证据</span></div>{[...foreshadowGroups.entries()].map(([status, nodes]) => <section className="planning-foreshadow-group" key={status}><h3>{FORESHADOW_LABEL[status as ForeshadowingStatus] || status}<b>{nodes.length}</b></h3><div className="planning-grid">{nodes.map((node) => { const secret = node.visibility === "secret" && !revealed.has(node.id); return <article className={`planning-card planning-foreshadow ${status}`} key={node.id}><div className="planning-card-head"><strong>{secret ? "机密伏笔" : node.title}</strong><span>{list(node.evidenceRefs).length} 条证据</span></div>{secret ? <button className="planning-reveal" onClick={() => setRevealed((current) => new Set(current).add(node.id))}>本地揭示机密内容</button> : <><p>{node.setup || node.summary}</p>{node.payoff && <div className="planning-payoff">预期回收：{node.payoff}</div>}</>}</article>; })}</div></section>)}{foreshadowGroups.size === 0 && <div className="planning-empty">暂无伏笔记录</div>}</div>}
 
 				{tab === "proposals" && <div className="planning-page"><div className="planning-page-note">提案只有接受后才写入权威大纲；高风险修改必须在此明确确认。</div>{proposals.map((proposal) => { const issues = list(proposal.audit?.issues); const highRisk = proposal.audit?.verdict === "reject" || issues.some((issue) => issue.severity === "error") || /high|高/i.test(proposal.risk || ""); return <article className={`planning-proposal ${highRisk ? "high-risk" : ""}`} key={proposal.id}><header><div><span>PROPOSAL · {proposal.id.slice(0, 8)} · {proposal.status}</span><h3>{proposal.rationale || "大纲修改建议"}</h3></div><b>{highRisk ? "高风险 · 需确认" : proposal.audit?.verdict === "approve" ? "审计通过" : "待审阅"}</b></header><div className="planning-patch">{patchSummary(proposal.patch).map((row) => <span key={row}>{row}</span>)}</div>{proposal.audit?.summary && <p>{proposal.audit.summary}</p>}{issues.map((issue, index) => <div className={`planning-warning ${issue.severity === "error" ? "error" : ""}`} key={`${issue.code}-${index}`}>{issue.message || issue.code}</div>)}<footer><ConfirmButton className="drawer-btn primary" disabled={busy} confirmText={highRisk ? "再次确认高风险修改" : "再次确认接受"} onConfirm={() => void proposalAction(proposal, true)}>接受提案</ConfirmButton><ConfirmButton className="drawer-btn" disabled={busy} confirmText="再次确认拒绝" onConfirm={() => void proposalAction(proposal, false)}>拒绝</ConfirmButton></footer></article>; })}{proposals.length === 0 && <div className="planning-empty">建议箱已清空。编剧室产生的新方案会自动来到这里。</div>}</div>}
+
+				{tab === "corpus" && <div className="planning-page planning-corpus"><div className="planning-page-note"><strong>小说研究 · 后台消化。</strong>上传 txt/epub 小说后，系统在后台分块摘要成「剧情梗概 + 结构 + 弧线 + 可复用套路」，产物进研究库供大纲模型参考。请仅上传你有权使用的文本。正文只发往你选择的小说消化模型，不进入台上剧情。</div>
+				<div className="planning-research-refresh"><button className="drawer-btn primary" disabled={corpusUploading || busy} onClick={() => corpusFileRef.current?.click()}>{corpusUploading ? "上传中…" : "上传 txt/epub"}</button><input ref={corpusFileRef} type="file" hidden accept=".txt,.epub,text/plain" onChange={(e) => { const f = e.target.files?.[0]; if (f) void uploadCorpusFile(f); }} /><span>{corpusLoading ? "同步中…" : "5 秒自动刷新"}</span></div>
+				{corpusError && <div className="panel-error planning-error">{corpusError}</div>}
+				{!corpusLoading && !corpus && <div className="planning-empty">正在读取小说研究任务…</div>}
+				{corpus && list(corpus.documents).length === 0 && <div className="planning-empty">还没有上传过小说。txt / epub 会在后台自动分块消化。</div>}
+				{corpus?.running && <div className="planning-warning">正在消化：{corpus.documents.find((d) => d.id === corpus.running!.docId)?.title ?? corpus.running.docId} · {CORPUS_STATUS[corpus.running.step] ?? corpus.running.step} {corpus.running.done}/{corpus.running.total}</div>}
+				{list(corpus?.documents).map((doc) => {
+					const running = corpus?.running?.docId === doc.id;
+					const detail = corpusDetail[doc.id];
+					return <article className="planning-proposal planning-corpus-item" key={doc.id}>
+						<header><div><span>{doc.status === "ready" ? "DOCUMENT · READY" : `DOCUMENT · ${CORPUS_STATUS[doc.status] ?? doc.status}`}</span><h3>{doc.title}</h3></div><b>{corpusMeta(doc)}{doc.error ? ` · ${doc.error}` : ""}</b></header>
+						<div className="planning-corpus-acts">
+							{doc.status === "ready" && <button className="drawer-btn" disabled={busy} onClick={() => void toggleCorpusDetail(doc)}>{detail ? "收起" : "梗概▾"}</button>}
+							{doc.status === "failed" && <button className="drawer-btn" disabled={busy} onClick={() => void corpusAction(doc, "resume")}>重试</button>}
+							{doc.status === "paused" && <button className="drawer-btn" disabled={busy} onClick={() => void corpusAction(doc, "resume")}>续跑</button>}
+							{(doc.status === "mapping" || doc.status === "cleaning" || running) && doc.status !== "paused" && <button className="drawer-btn" disabled={busy} onClick={() => void corpusAction(doc, "pause")}>暂停</button>}
+							<ConfirmButton className="drawer-btn" disabled={busy} confirmText={`确认删除「${doc.title}」`} onConfirm={() => void corpusAction(doc, "delete")}>删除</ConfirmButton>
+						</div>
+						{detail && <CorpusDigestCard doc={doc} detail={detail} />}
+					</article>;
+				})}
+			</div>}
 
 				{tab === "archive" && <div className="planning-page planning-archive"><section className="planning-settings"><h3>工作模式</h3><label>规划决策<select value={mode} disabled={busy} onChange={(event) => void saveSettings(event.target.value as OutlineMode, researchMode)}><option value="manual">manual · 只记录，手动接受</option><option value="suggest">suggest · 主动给建议</option><option value="auto">auto · 低风险自动执行</option></select></label><label>研究方式<select value={researchMode} disabled={busy} onChange={(event) => void saveSettings(mode, event.target.value as OutlineResearchMode)}><option value="off">off · 关闭</option><option value="manual">manual · 明确要求时</option><option value="auto">auto · 按需研究</option></select></label></section><section><div className="planning-section-head"><h3 className="planning-section-title">版本记录</h3><span>当前 revision {state?.revision ?? "—"}</span></div><div className="planning-history">{history.map((item, index) => <article key={`${item.revision}-${index}`}><b>REV {item.revision ?? "—"}</b><span>{item.summary || item.rationale || "大纲快照"}</span><time>{item.createdAt || item.timestamp ? new Date(item.createdAt || item.timestamp || "").toLocaleString() : ""}</time></article>)}{history.length === 0 && <div className="planning-empty">暂无历史版本</div>}</div></section><section><div className="planning-section-head"><h3 className="planning-section-title">研究灵感</h3><div className="planning-research-refresh"><input value={researchQuestion} onChange={(event) => setResearchQuestion(event.target.value)} placeholder="想研究什么机制或类型？"/><button className="drawer-btn" disabled={busy} onClick={() => void refreshResearch()}>刷新研究</button></div></div>{researchWarnings.map((warning) => <div className="planning-warning" key={warning}>{warning}</div>)}<div className="planning-grid">{research.map((item, index) => <article className="planning-research-card" key={item.id || index}><h4>{item.url ? <a href={item.url} target="_blank" rel="noreferrer">{item.title || item.url}</a> : item.title || "未命名来源"}</h4>{item.excerpt && <blockquote>{item.excerpt}</blockquote>}<p>{item.mechanism || item.note}</p>{list(item.failureWarnings ?? item.warnings).map((warning) => <div className="planning-warning" key={warning}>失败警告：{warning}</div>)}</article>)}</div>{research.length === 0 && <div className="planning-empty">暂无研究来源。研究只提供灵感，不会自动成为剧情事实。</div>}</section></div>}
 			</div>

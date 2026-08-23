@@ -86,10 +86,47 @@ export interface OutlineProposalView extends OutlineProposal {
 export interface OutlineResearchSource { id: string; title: string; url: string; accessedAt: string }
 export interface OutlineResearchMechanism { id: string; sourceIds: string[]; mechanism: string; appliesWhen: string; failureWarning: string }
 export interface OutlineResearchCard { version: 1; cardKey: string; mechanismIds: string[]; updatedAt: string }
+export type CorpusDocStatus = "pending" | "cleaning" | "mapping" | "reducing" | "extracting" | "ready" | "failed" | "paused";
+export interface CorpusDocument {
+	id: string;
+	title: string;
+	sourceKind: "upload" | "url";
+	originName: string;
+	chars: number;
+	encoding: string;
+	chapterCount: number;
+	chunkCount: number;
+	status: CorpusDocStatus;
+	cardKey: string;
+	error?: string;
+	synopsisPreview?: string;
+	tropeCount?: number;
+	createdAt: string;
+	updatedAt: string;
+}
+export interface CorpusChunkDigest { index: number; chars: number; chapters: string[]; summary: string }
+export interface CorpusArcDigest { title: string; chunkRange: [number, number]; summary: string }
+export interface CorpusDigest {
+	version: 1;
+	docId: string;
+	chunks: CorpusChunkDigest[];
+	arcs: CorpusArcDigest[];
+	synopsis: string;
+	structure: { plotSpine: string; characterArcs: string; hooksAndPacing: string };
+	extractedCount: number;
+	updatedAt: string;
+}
+export interface CorpusWorkbenchResponse {
+	documents: CorpusDocument[];
+	running?: { docId: string; step: string; done: number; total: number };
+}
+export interface CorpusCreateResponse { doc: CorpusDocument; estimatedCalls: number }
+export interface CorpusDetailResponse { doc: CorpusDocument; digest: CorpusDigest | null }
 export interface OutlineResearchView {
 	sources: OutlineResearchSource[];
 	mechanisms: OutlineResearchMechanism[];
 	cards: OutlineResearchCard[];
+	documents: CorpusDocument[];
 }
 
 export interface OutlineSettings { mode: OutlineMode; researchMode: OutlineResearchMode }

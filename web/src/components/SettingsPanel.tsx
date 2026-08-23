@@ -849,6 +849,7 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 							["outlineChat", "大纲编剧讨论"],
 							["outlineReconcile", "大纲剧情校准"],
 							["outlineResearch", "大纲研究灵感"],
+								["novelDigest", "小说消化"],
 							["outlineAudit", "大纲提案审计"],
 							["scribe", "场记与状态兜底"],
 							["compaction", "前情压缩"],
