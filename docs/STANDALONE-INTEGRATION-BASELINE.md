@@ -16,6 +16,10 @@ rp-world-audit       = 世界转移审计留痕
 StageEngine          = 唯一正文所有者 + 独立谢幕格式轮唯一时机
 rp-curtain-override  = 状态栏重 Roll 覆盖工件（只改展示，不改正文/账本/世界）
 rp-ecology-state     = 人物生活、地点活动、日程与可错过事件的分支权威
+rp-outline           = 当前分支动态大纲
+rp-outline-proposal  = 大纲 pending/approved/rejected 提案与审计留痕
+rp-outline-chat      = 导演室讨论记录（非正文、非事实）
+rp-turn-diagnostic   = 场记结算只读留痕（不成为第二套账本权威）
 ```
 
 禁止同时引入第二个正文 Writer、第二套持久 Session 或第二套 canonical state。
@@ -23,6 +27,37 @@ rp-ecology-state     = 人物生活、地点活动、日程与可错过事件的
 鲜活世界另有两个素材层：`.liyuan/ecology/global-pool.json` 是跨卡通用叙事原型池，
 `.liyuan/ecology/cards/<card-key>.json` 是按卡复用的适配池；两者只保存可能性，不是会话事实。
 角色卡级世界画像保存在 `.liyuan/world/cards/<card-key>/profile.json`，是跨会话的长期适配。
+
+## 本拍诊断系统（2026-08-20）
+
+导演室新增独立的「本拍诊断」页面，通过 `GET /api/turn-diagnostics` 从当前分支已有条目动态投影，不新增持久状态。
+
+**诊断节点**：
+- 文学连续性 / Stitches 导演 / 生态抵达
+- 主演分段演出 / 角色账本
+- 拍后事实信封 / 世界转移提案 / 世界转移审计 / 世界原子提交
+- 生态 aftermath / 独立谢幕格式 / 大纲异步校准
+
+**数据来源与归属**：
+- 拍前工件（连续性/导演/生态）来自 assistant `details.rpPrep`
+- 主演工作流指标来自 `details.rpWorkflow`
+- 时间线统计来自 `details.rpTimeline`
+- 账本/世界/生态/大纲条目由入树时携带的来源标识或语义字段（如 `narrativeEntryId`）精确归属各拍
+- 场记结果由引擎在记账完成后追加 `rp-turn-diagnostic` 只读留痕
+- 大纲异步校准运行时状态由 `server/main.ts` 内存 Map 管理
+
+**安全投影**：
+- 拍前工件按字段白名单裁剪（`positions/ongoingActions/scenePressure/characterInitiatives` 等）
+- `rpPatchAudit` 显式安全投影：仅保留 `character/fields/lore.fingerprint/verification`
+- 谢幕格式上限 32,000 字符，超出标记截断
+- 每拍提交记录上限 32 条
+- 不发送完整 prompt、生态秘密/幕后真相、世界书来源路径、隐藏 reasoning
+- `GET /api/turn-diagnostics` 设置 `Cache-Control: no-store`
+
+**旧数据兼容**：
+- 旧 assistant 消息缺少 `rpWorkflow/rpPrep/rpTimeline/rpNarrative/rpCurtain` 中任一细节时自动跳过
+- 手动大纲操作（`kind !== 'reconcile'`）不误归入本拍自动校准
+- 无来源标识的状态/世界/生态条目不默认归属相邻 assistant
 
 ## 文学工作流 Skill 化（当前形态）
 
@@ -96,7 +131,9 @@ Pi 文学工作流的职责以 **标准 Skill** 接入 Liyuan，代码负责阶�
 - `PUT /api/world-profile`：保存稳定状态、后台活跃度、模块状态、长期要求与优化笔记。
 - `GET /api/world-state`：当前 v2 状态、模块视图、v1 投影、Manifest、审计投影。
 - `DELETE /api/world-state/module?moduleId=…`：清空某模块当前分支运行态（拒绝 streaming）。
-- 数据目录：`.liyuan/world/cards/<key>/profile.json`、`.liyuan/ecology/`、`.liyuan-state/` 等均为纯 JSON/文件。
+- `GET /api/turn-diagnostics?limit=N`：最近 N 回合只读诊断投影（1–20，默认 12），无模型调用。
+- 大纲族：`GET/POST /api/outline/*` 覆盖综合编剧、规划、校准、提案确认/拒绝、研究、设置管理。
+- 数据目录：`.liyuan/world/cards/<key>/profile.json`、`.liyuan/ecology/`、`.liyuan-state/`、`.liyuan/outline/research/` 等均为纯 JSON/文件。
 
 ## 暂不整合的阶段
 
@@ -151,3 +188,4 @@ Liyuan 当前 fork 不能直接替换为 Pi 0.84.1，主要阻断是：
 - Liyuan 使用独立 `LIYUAN_CODING_AGENT_DIR`，不与全局 Pi 会话目录共用。
 - 文学画像默认关闭，关闭时不增加任何模型调用和注入；独立谢幕格式轮不受该开关影响。
 - 世界引擎默认关闭（`literaryWorldEnabled: false`），开启后按卡画像/Manifest 运行模块化世界。
+- 诊断接口 `GET /api/turn-diagnostics` 任何时候可用，无模型调用，不受引擎开关影响。

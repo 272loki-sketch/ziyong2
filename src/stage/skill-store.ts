@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-export type WorkflowSkillStage = "continuity" | "character" | "persona" | "director" | "writer" | "curtain" | "world" | "world-profile" | "world-facts" | "world-audit" | "ecology-global" | "ecology-card" | "ecology-runtime";
+export type WorkflowSkillStage = "continuity" | "character" | "persona" | "director" | "writer" | "curtain" | "world" | "world-profile" | "world-facts" | "world-audit" | "ecology-global" | "ecology-card" | "ecology-runtime" | "outline-chat" | "outline-bootstrap" | "outline-reconcile" | "outline-foreshadowing" | "outline-audit" | "outline-research";
 
 export interface SkillFile {
 	dir: string;
@@ -27,7 +27,7 @@ export interface StageSkillInput {
 }
 
 const USER_SKILLS_DIR = ".liyuan-stage-skills";
-const WORKFLOW_STAGES = new Set<WorkflowSkillStage>(["continuity", "character", "persona", "director", "writer", "curtain", "world", "world-profile", "world-facts", "world-audit", "ecology-global", "ecology-card", "ecology-runtime"]);
+const WORKFLOW_STAGES = new Set<WorkflowSkillStage>(["continuity", "character", "persona", "director", "writer", "curtain", "world", "world-profile", "world-facts", "world-audit", "ecology-global", "ecology-card", "ecology-runtime", "outline-chat", "outline-bootstrap", "outline-reconcile", "outline-foreshadowing", "outline-audit", "outline-research"]);
 const oneLine = (value: string): string => value.replace(/\s+/g, " ").trim();
 
 export function sanitizeSkillDir(name: string): string | null {

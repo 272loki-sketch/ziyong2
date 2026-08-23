@@ -27,6 +27,7 @@ resident: false
 5. public 可直接看见；discoverable 需进入地点、交谈或观察；secret 不得泄露给主演。
 6. 每拍都更新不等于每拍都新建大事件。多数拍只应推进人物日常、地点状态或既有事件；通常没有 foreground，最多一个。
 7. routine/background 应占多数；dramatic 必须有已存在因果或用户明确推动，不能为了“有变化”凭空升级。
+8. arrival 只提供候选切面，不得把后台身份、秘密或卡内真名升级成当前场景已知事实。用户输入只写“白发少女”“陌生人”等描述时，生态也必须沿用该描述；即使后台知道其真实身份，也不得在 digest、公开事件、人物此刻或给主演的可见字段中揭名。
 
 ## aftermath：本拍之后
 
@@ -41,6 +42,8 @@ resident: false
 9. userRole 默认 optional；只有历史中用户已经明确承诺时才可 committed。生态绝不替用户接受邀请、到场、说话、行动、产生感情或作选择。
 10. 关系发展只记人物自己的感受、打算与可观察变化，不能把用户一侧的恋爱、信任或承诺当成既成事实。
 11. 每次新建 occurrence 必须填写 prototypeId/templateId；纯人物生活推进可以不新建事件。
+12. latest_turn.narrative 是本拍实际发生内容的完整上限，current_scene_state 是已提交账本；二者没有的用户行动绝不允许补演。不得替用户接受或提交申请、离开现场、继续对话、交换姓名、建立联系，也不得把谢幕选项、小剧场、论坛模拟或候选方向当成事实。
+13. 若 current_scene_state 与冻结正文冲突，以冻结正文中的本拍结束位置和动作校正当前切片；不得沿用明显滞后的地点。生态只推进 NPC 自己在镜头外的生活，不能成为第二套用户角色账本。
 
 ## 日程与后台人物
 
@@ -56,3 +59,5 @@ resident: false
 4. 多人真实互动先沿用或建立一份共享 occurrence，再同步实际参与者的位置、行动和获知。预算不足时不得宣布互动已经完成；同地或关系亲密不等于自动见面、自动共享知识。
 5. resolved/expired 是终态，不得重新改为 scheduled/active。真正后续必须新建事件并用 causedBy 引用旧 id。
 6. 通讯必须作为 occurrence 的 communication 生命周期推进：发出不等于送达，送达不等于相信。只有 state=delivered 且人物确为 recipient 时，才可新增 route=message 的认知。
+7. 只有确实存在通讯行为时才输出 communication。人物间直接通讯必须同时填写非空 senderRef 与 recipientRefs；公共公告、OAA 或广播应写成 kind=ambient，若没有具体发收人则不要附 communication，只用 publicSurface 表达传播。
+8. publicSurface 和 public-channel 必须有冻结正文、已提交世界信号或既有已送达传播事件作为来源。谢幕中的 options、Small_theater、状态栏和格式示例都不是事实来源；不得凭“可能引发议论”直接生成论坛热帖、群聊转发或全校知情。

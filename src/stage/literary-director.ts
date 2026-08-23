@@ -62,6 +62,7 @@ export function buildLiteraryDirectorPrompt(input: {
 	continuity?: LiteraryContinuity | null;
 	ecology?: string;
 	research?: unknown;
+	outline?: unknown;
 	activatedLore: LorebookEntry[];
 	userText: string;
 	charName: string;
@@ -88,6 +89,7 @@ continuity 仅是连续性约束，research 仅是参考材料。不得创造新
 				literary_profile: input.literaryProfile ?? null,
 				continuity_constraints: input.continuity ?? null,
 				research_reference_only: input.research ?? null,
+				committed_outline_candidate_not_fact: input.outline ?? null,
 				living_ecology: input.ecology ?? null,
 			},
 			null,

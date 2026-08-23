@@ -17,6 +17,7 @@ import {
 	IconPreset,
 	IconPuzzle,
 	IconSessions,
+	IconSkills,
 } from "./icons.tsx";
 
 const COLLAPSED = 4;
@@ -50,6 +51,7 @@ export interface WelcomePanelProps {
 	onNew: () => void;
 	onBrowseAll: () => void;
 	onOpenPanel: (id: "connect" | "card" | "powers" | "sessions" | "lorebook" | "preset" | "persona" | "codex") => void;
+	onOpenPlanning: () => void;
 }
 
 export function WelcomePanel({
@@ -64,6 +66,7 @@ export function WelcomePanel({
 	onNew,
 	onBrowseAll,
 	onOpenPanel,
+	onOpenPlanning,
 }: WelcomePanelProps) {
 	const [expanded, setExpanded] = useState(false);
 	const [, setTick] = useState(0);
@@ -258,6 +261,10 @@ export function WelcomePanel({
 
 			{/* ── 快捷入口 ── */}
 			<nav className="welcome-quick" aria-label="快捷入口">
+				<button type="button" className="welcome-quick-btn welcome-quick-planning" onClick={onOpenPlanning}>
+					<IconSkills size={15} />
+					故事规划 / 编剧室
+				</button>
 				<button type="button" className="welcome-quick-btn" onClick={() => onOpenPanel("connect")}>
 					<IconApi size={15} />
 					连接

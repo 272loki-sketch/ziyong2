@@ -1,0 +1,82 @@
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { dirname, join } from "node:path";
+
+import type { WebResearchItem } from "../tools/web-research.ts";
+
+export interface OutlineResearchSource { id: string; title: string; url: string; accessedAt: string }
+export interface OutlineResearchMechanism { id: string; sourceIds: string[]; mechanism: string; appliesWhen: string; failureWarning: string }
+export interface OutlineResearchCard { version: 1; cardKey: string; mechanismIds: string[]; updatedAt: string }
+export interface OutlineResearchView { sources: OutlineResearchSource[]; mechanisms: OutlineResearchMechanism[]; cards: OutlineResearchCard[] }
+export interface OutlineResearchExtraction { mechanism: string; appliesWhen: string; failureWarning: string; sourceIds: string[] }
+
+const arrayFile = <T>(path: string): T[] => {
+	try { const value = JSON.parse(readFileSync(path, "utf8")); return Array.isArray(value) ? value as T[] : []; } catch { return []; }
+};
+
+export class OutlineResearchStore {
+	#root: string;
+	#write = Promise.resolve();
+	constructor(cwd: string) { this.#root = join(cwd, ".liyuan", "outline", "research"); }
+
+	view(cardKey?: string): OutlineResearchView {
+		const cardsDir = join(this.#root, "cards");
+		const cards: OutlineResearchCard[] = [];
+		if (existsSync(cardsDir)) {
+			for (const name of readdirSync(cardsDir)) {
+				if (!name.endsWith(".json")) continue;
+				try { cards.push(JSON.parse(readFileSync(join(cardsDir, name), "utf8")) as OutlineResearchCard); } catch {}
+			}
+		}
+		const allSources = arrayFile<OutlineResearchSource>(join(this.#root, "sources.json"));
+		const allMechanisms = arrayFile<OutlineResearchMechanism>(join(this.#root, "mechanisms.json"));
+		if (!cardKey) return { sources: allSources, mechanisms: allMechanisms, cards };
+		const card = cards.find((row) => row.cardKey === cardKey);
+		const mechanismIds = new Set(card?.mechanismIds ?? []), mechanisms = allMechanisms.filter((row) => mechanismIds.has(row.id));
+		const sourceIds = new Set(mechanisms.flatMap((row) => row.sourceIds));
+		return { sources: allSources.filter((row) => sourceIds.has(row.id)), mechanisms, cards: card ? [card] : [] };
+	}
+
+	merge(cardKey: string, rows: WebResearchItem[], extracted: OutlineResearchExtraction[] = []): Promise<OutlineResearchView> {
+		const task = this.#write.then(() => {
+			const current = this.view();
+			const sources = new Map(current.sources.map((row) => [row.url, row]));
+			const mechanisms = new Map(current.mechanisms.map((row) => [row.id, row]));
+			const ids: string[] = [], fetchedSourceIds = new Set<string>();
+			for (const item of rows) for (const result of item.results ?? []) {
+				let url: string;
+				try { url = new URL(result.url).toString(); } catch { continue; }
+				const sourceId = `src-${createHash("sha256").update(url).digest("hex").slice(0, 16)}`;
+				sources.set(url, { id: sourceId, title: result.title.trim().slice(0, 180), url, accessedAt: new Date().toISOString() });
+				fetchedSourceIds.add(sourceId);
+			}
+			for (const item of extracted.slice(0, 80)) {
+				const sourceIds = [...new Set(item.sourceIds)].filter((id) => fetchedSourceIds.has(id));
+				if (!sourceIds.length || !item.mechanism.trim()) continue;
+				const mechanism = item.mechanism.trim().slice(0, 600), appliesWhen = item.appliesWhen.trim().slice(0, 500), failureWarning = item.failureWarning.trim().slice(0, 500);
+				const mechanismId = `mech-${createHash("sha256").update(`${mechanism}\n${sourceIds.sort().join(",")}`).digest("hex").slice(0, 16)}`;
+				mechanisms.set(mechanismId, { id: mechanismId, sourceIds, mechanism, appliesWhen, failureWarning });
+				ids.push(mechanismId);
+			}
+			const oldCard = current.cards.find((row) => row.cardKey === cardKey);
+			const card: OutlineResearchCard = { version: 1, cardKey, mechanismIds: [...new Set([...(oldCard?.mechanismIds ?? []), ...ids])].slice(-100), updatedAt: new Date().toISOString() };
+			this.#atomic(join(this.#root, "sources.json"), [...sources.values()]);
+			this.#atomic(join(this.#root, "mechanisms.json"), [...mechanisms.values()]);
+			this.#atomic(join(this.#root, "cards", `${safeKey(cardKey)}.json`), card);
+			const scoped = this.view(cardKey);
+			if (scoped.sources.length || scoped.mechanisms.length) return scoped;
+			return { sources: [...sources.values()].filter((row) => fetchedSourceIds.has(row.id)), mechanisms: [], cards: [card] };
+		});
+		this.#write = task.then(() => undefined, () => undefined);
+		return task;
+	}
+
+	#atomic(path: string, value: unknown): void {
+		mkdirSync(dirname(path), { recursive: true });
+		const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+		writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+		renameSync(tmp, path);
+	}
+}
+
+function safeKey(value: string): string { return createHash("sha256").update(value).digest("hex").slice(0, 24); }

@@ -8,7 +8,7 @@ import { SessionManager } from "@liyuan/agent-runtime";
 import { fauxAssistantMessage, fauxText, fauxThinking, fauxToolCall } from "@liyuan/ai/providers/faux";
 import { registerFauxProvider, streamSimple } from "@liyuan/ai/compat";
 
-import { DEFAULT_MAIN_MAX_TOKENS, FIRST_CALL_MAX_TOKENS, StageEngine, mainStageMaxTokens, type StageStreamFn } from "../src/stage/engine.ts";
+import { DEFAULT_MAIN_MAX_TOKENS, FIRST_CALL_MAX_TOKENS, StageEngine, looksLikeCorruptedModelText, mainStageMaxTokens, type StageStreamFn } from "../src/stage/engine.ts";
 import { listReplyVariants } from "../src/swipe.ts";
 
 /** 临时舞台：配置+卡+独立会话目录 */
@@ -56,6 +56,35 @@ const directBeat = (text: string | ((ctx: unknown) => unknown)) => [
 	fauxAssistantMessage(""),
 	fauxScribeEmpty(),
 ];
+
+test("引擎：识别中转 tokenizer 异常文本，不误伤正常 Markdown", () => {
+	assert.equal(looksLikeCorruptedModelText("<｜begin▁of▁sentence｜>##### ####### Compression test #####"), true);
+	assert.equal(looksLikeCorruptedModelText(`${"#".repeat(80)} 2024 ${"#".repeat(80)}`), true);
+	assert.equal(looksLikeCorruptedModelText("## 教室\n\n她关掉 OAA，抬头看向窗外。"), false);
+});
+
+test("引擎：中转异常文本不落树并清除实时稿", async () => {
+	const { cwd, sm } = makeStage();
+	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
+	try {
+		reg.setResponses([fauxAssistantMessage("<｜begin▁of▁sentence｜>##### Compression test ########################")]);
+		let cleared = 0;
+		let ended: { error?: string; entryId?: string } | null = null;
+		const engine = makeEngine(cwd, sm, reg.getModel("faux-rp"), {
+			onStreamClear: () => cleared++,
+			onTurnEnd: (info) => (ended = info),
+		});
+		await engine.performTurn("打开 OAA。看一眼当前状态。");
+		const assistants = (sm.getBranch() as Array<{ type: string; message?: { role?: string } }>).filter((entry) => entry.type === "message" && entry.message?.role === "assistant");
+		assert.equal(assistants.length, 0);
+		assert.ok(cleared > 0);
+		assert.match(ended?.error ?? "", /异常解码文本/);
+		assert.equal(ended?.entryId, undefined);
+	} finally {
+		reg.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
 
 test("引擎：一拍全链路（user 落树 → 流式 → assistant 落树 → 谢幕）", async () => {
 	const { cwd, sm } = makeStage();
@@ -828,6 +857,31 @@ test("引擎循环：格式尾巴（状态栏占位+catsay）走 text 通道 →
 		assert.ok(textSegs[0].draft === true && (textSegs[0].text ?? "").includes("暮色四合"), "稿段在前且带 draft 标记");
 		assert.ok(textSegs[1].draft !== true && (textSegs[1].text ?? "").includes("咪咪点评"), "尾巴独立末段（非稿段）");
 		assert.ok(activities.some((a) => a.includes("交稿")), "过程条照常");
+	} finally {
+		reg.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("引擎记账：场记只读正文，不把谢幕小剧场升级为账本事实", async () => {
+	const { cwd, sm } = makeStage();
+	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
+	try {
+		const scribeCtx: Array<{ messages: unknown[] }> = [];
+		reg.setResponses([
+			fauxAssistantMessage([fauxToolCall("draft_write", { content: "她仍站在体育馆里，没有回答邀请。" })], { stopReason: "toolUse" }),
+			fauxAssistantMessage("<Small_theater>论坛热帖：她已经提交申请并离开体育馆。</Small_theater>"),
+			fauxAssistantMessage(""), // 主演记账席位不落账，随后进入场记兜底
+			(ctx) => {
+				scribeCtx.push(ctx as never);
+				return fauxScribeEmpty();
+			},
+		]);
+		const engine = makeEngine(cwd, sm, reg.getModel("faux-rp"));
+		await engine.performTurn("我暂时不作决定。");
+		const fed = JSON.stringify(scribeCtx[0]?.messages ?? []);
+		assert.match(fed, /仍站在体育馆/);
+		assert.doesNotMatch(fed, /论坛热帖|提交申请|离开体育馆/);
 	} finally {
 		reg.unregister();
 		rmSync(cwd, { recursive: true, force: true });

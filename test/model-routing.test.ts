@@ -41,10 +41,11 @@ test("模型插头：配置规范化只保留已知步骤和完整复合键", ()
 		worldProfile: { provider: " profile ", id: " architect " },
 		literaryWorldFacts: { provider: " facts ", id: " extractor " },
 		literaryWorldAudit: { provider: " audit ", id: " judge " },
+		outlineChat: { provider: " outline ", id: " room " },
 		ecologyGlobal: { provider: " google ", id: " gemini-3.1-pro " },
 		scribe: { provider: "", id: "bad" },
 		unknown: { provider: "x", id: "y" },
-	}), { literaryDirector: { provider: "p", id: "m" }, literaryWorld: { provider: "world", id: "sim" }, worldProfile: { provider: "profile", id: "architect" }, literaryWorldFacts: { provider: "facts", id: "extractor" }, literaryWorldAudit: { provider: "audit", id: "judge" }, ecologyGlobal: { provider: "google", id: "gemini-3.1-pro" } });
+	}), { literaryDirector: { provider: "p", id: "m" }, literaryWorld: { provider: "world", id: "sim" }, worldProfile: { provider: "profile", id: "architect" }, literaryWorldFacts: { provider: "facts", id: "extractor" }, literaryWorldAudit: { provider: "audit", id: "judge" }, ecologyGlobal: { provider: "google", id: "gemini-3.1-pro" }, outlineChat: { provider: "outline", id: "room" } });
 	assert.equal(normalizeStepModels({}), undefined);
 });
 

@@ -94,6 +94,17 @@ export function loadLorebookFile(path: string): LorebookEntry[] {
 	return normalizeEntries(json.entries);
 }
 
+/** 读取独立世界书顶层作者正则；正文 entries 与 extensions 是两个独立来源。 */
+export function loadLorebookRegexScripts(path: string): unknown[] {
+	try {
+		const json = readJsonFile(path) as Record<string, unknown>;
+		const extensions = json.extensions && typeof json.extensions === "object" ? json.extensions as Record<string, unknown> : {};
+		return Array.isArray(extensions.regex_scripts) ? extensions.regex_scripts : [];
+	} catch {
+		return [];
+	}
+}
+
 /**
  * 已挂载世界书路径（多选）。兼容旧字段 `lorebook: string`。
  * 返回去重后的正斜杠相对路径；空数组 = 一本都不挂。

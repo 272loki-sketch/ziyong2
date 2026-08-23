@@ -5,7 +5,7 @@
 import { useRef, useState } from "react";
 import { apiDelete, apiPost } from "../api.ts";
 import type { RpPanel } from "../wire.ts";
-import { IconDownload, IconRoster, IconTrash } from "./icons.tsx";
+import { IconDownload, IconRoster, IconSkills, IconTrash } from "./icons.tsx";
 import { ConfirmButton } from "./kit.tsx";
 
 const KIND_LABEL: Record<string, string> = { markdown: "文档", svg: "图形", html: "网页" };
@@ -21,6 +21,8 @@ export interface PanelDockProps {
 	onOpenRoster?: () => void;
 	/** 名录面板当前是否展开（常驻行高亮用） */
 	rosterActive?: boolean;
+	/** 打开独立故事规划工作台 */
+	onOpenPlanning?: () => void;
 }
 
 export function PanelDock({
@@ -32,6 +34,7 @@ export function PanelDock({
 	activeAgent = null,
 	onOpenRoster,
 	rosterActive = false,
+	onOpenPlanning,
 }: PanelDockProps) {
 	const fileRef = useRef<HTMLInputElement>(null);
 	const [busy, setBusy] = useState(false);
@@ -79,15 +82,22 @@ export function PanelDock({
 	return (
 		<div className={`panel-dock-body panel-dock-${variant}`}>
 			{/* 系统内置面板：常驻，不随会话有无记录出现消失，也不可增删导出 */}
-			{onOpenRoster && (
+			{(onOpenRoster || onOpenPlanning) && (
 				<div className="dock-list dock-list-system">
-					<div className={`dock-row dock-row-system ${rosterActive ? "current" : ""}`}>
+					{onOpenRoster && <div className={`dock-row dock-row-system ${rosterActive ? "current" : ""}`}>
 						<button type="button" className="dock-name" onClick={onOpenRoster}>
 							<IconRoster size={14} />
 							登场名录
 							<span className="dock-kind">系统</span>
 						</button>
-					</div>
+					</div>}
+					{onOpenPlanning && <div className="dock-row dock-row-system">
+						<button type="button" className="dock-name" onClick={onOpenPlanning}>
+							<IconSkills size={14} />
+							故事规划 / 编剧室
+							<span className="dock-kind">系统</span>
+						</button>
+					</div>}
 				</div>
 			)}
 			<div className="field-hint" style={{ marginBottom: 10 }}>

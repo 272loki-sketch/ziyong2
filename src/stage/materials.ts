@@ -17,6 +17,7 @@ import {
 	applyDisabledLore,
 	constantEntries,
 	loadLorebookFile,
+	loadLorebookRegexScripts,
 	mergeEntries,
 	mountedLorebookPaths,
 	overlayPathFor,
@@ -125,9 +126,13 @@ export function loadStageMaterials(cwd: string): StageMaterials {
 	// 剧情知识：卡内 character_book + 已挂载独立书（0..N）+ 补充设定集 overlay。
 	// 下游常驻、被动扫描、索引与主动检索只消费这一个去重后的权威集合。
 	const fileGroups: LorebookEntry[][] = [];
+	const lorebookRegexScripts: unknown[] = [];
 	for (const rel of mountedLorebookPaths(config)) {
 		const abs = resolvePath(cwd, rel);
-		if (existsSync(abs)) fileGroups.push(loadLorebookFile(abs).map((entry) => ({ ...entry, source: `lorebook:${rel}` })));
+		if (existsSync(abs)) {
+			fileGroups.push(loadLorebookFile(abs).map((entry) => ({ ...entry, source: `lorebook:${rel}` })));
+			lorebookRegexScripts.push(...loadLorebookRegexScripts(abs));
+		}
 	}
 	const fileEntries = mergeEntries(...fileGroups);
 	const overlayFile = overlayPathFor(cwd, card.name);
@@ -229,7 +234,7 @@ export function loadStageMaterials(cwd: string): StageMaterials {
 		markerMaterials,
 		presetActive,
 		// 谢幕只需知道作者正则匹配哪些标签；replacement 可能是数十 KB HTML，绝不送料。
-		statusBarFormats: cardRegexScripts.flatMap((script) => {
+		statusBarFormats: [...cardRegexScripts, ...lorebookRegexScripts].flatMap((script) => {
 			if (!script || typeof script !== "object") return [];
 			const source = (script as Record<string, unknown>).findRegex;
 			return typeof source === "string" && source.trim() ? [source] : [];
@@ -237,7 +242,7 @@ export function loadStageMaterials(cwd: string): StageMaterials {
 		macroWarnings: [...unsupported],
 		protocolDrops,
 		// 送模侧作者正则：预设 + 卡（与 cardfront 显示侧同源；promptOnly/破坏性规则）
-		promptRules: promptRules([...(presetDoc?.raw?.extensions?.regex_scripts ?? []), ...cardRegexScripts]),
+		promptRules: promptRules([...(presetDoc?.raw?.extensions?.regex_scripts ?? []), ...cardRegexScripts, ...lorebookRegexScripts]),
 	};
 }
 

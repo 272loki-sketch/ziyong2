@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiGet, apiPost } from "../api.ts";
 
-type WorkflowStage = "continuity" | "character" | "persona" | "director" | "writer" | "curtain" | "world" | "world-profile" | "world-facts" | "world-audit" | "ecology-global" | "ecology-card" | "ecology-runtime";
+type WorkflowStage = "continuity" | "character" | "persona" | "director" | "writer" | "curtain" | "world" | "world-profile" | "world-facts" | "world-audit" | "ecology-global" | "ecology-card" | "ecology-runtime" | "outline-bootstrap" | "outline-chat" | "outline-reconcile" | "outline-foreshadowing" | "outline-research" | "outline-audit";
 type StageSkill = {
 	dir: string;
 	name: string;
@@ -27,6 +27,12 @@ const STAGE_LABELS: Record<WorkflowStage, string> = {
 	"ecology-global": "通用原型池",
 	"ecology-card": "角色卡生态池",
 	"ecology-runtime": "人物场所生态",
+	"outline-bootstrap": "大纲首次规划",
+	"outline-chat": "大纲编剧讨论",
+	"outline-reconcile": "大纲剧情校准",
+	"outline-foreshadowing": "大纲伏笔编织",
+	"outline-research": "大纲研究灵感",
+	"outline-audit": "大纲提案审计",
 };
 
 export function SkillLibrary({ toast }: { toast: (level: "info" | "warning" | "error", text: string) => void }) {

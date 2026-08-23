@@ -4,8 +4,9 @@ import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { generateNovelAiImage, generateNovelAiImageCached, parseNovelAiPrompt, saveNovelAiConfig, updateNovelAiConfig, DEFAULT_NOVELAI_CONFIG } from "../src/novelai.ts";
+import { generateNovelAiImage, generateNovelAiImageCached, getCachedNovelAiImage, parseNovelAiPrompt, saveNovelAiConfig, updateNovelAiConfig, DEFAULT_NOVELAI_CONFIG } from "../src/novelai.ts";
 import { splitRichContentParts } from "../web/src/richContentParts.ts";
+import { prepareDisplayText } from "../src/postprocess.ts";
 
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
 
@@ -44,6 +45,8 @@ test("剧情图片缓存：同一提示词刷新复用旧图，不再次请求 N
 	assert.deepEqual(second, first);
 	assert.equal(requests, 1);
 	assert.equal(existsSync(join(cwd, ".liyuan", "novelai-image-cache.json")), true);
+	assert.deepEqual(getCachedNovelAiImage(cwd, "1girl, classroom"), first);
+	assert.deepEqual(getCachedNovelAiImage(cwd, "  1girl,   classroom  "), first);
 });
 
 test("剧情图片缓存：并发相同槽位只生成一次", async () => {
@@ -77,4 +80,18 @@ test("显示层把真实 image 块转按钮，但跳过 markdown 示例", () => 
 	assert.equal(parts.some((part) => part.kind === "imagePrompt" && part.title === "窗边"), true);
 	const sample = splitRichContentParts("```xml\n<image>image###example###</image>\n```", null);
 	assert.equal(sample.some((part) => part.kind === "imagePrompt"), false);
+});
+
+test("显示层兼容旧卡 imageTag 别名", () => {
+	const parts = splitRichContentParts("正文\n<imageTag>【旧卡图片】\nimage###1girl###</imageTag>", null);
+	assert.equal(parts.some((part) => part.kind === "imagePrompt" && part.title === "旧卡图片"), true);
+});
+
+test("服务端显示清洗保留 image/imageTag，让前端继续建立生图槽位", () => {
+	for (const tag of ["image", "imageTag"]) {
+		const source = `<${tag}>【窗边】image###1girl###</${tag}>`;
+		const cleaned = prepareDisplayText(source);
+		assert.match(cleaned, new RegExp(`<${tag}>`));
+		assert.ok(splitRichContentParts(cleaned, null).some((part) => part.kind === "imagePrompt"));
+	}
 });

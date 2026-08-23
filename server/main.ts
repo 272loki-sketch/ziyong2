@@ -53,6 +53,8 @@ import { ecologyWireView, literaryEcologyFromBranch, normalizeLiteraryEcologySta
 import { loadStageMaterials } from "../src/stage/materials.ts";
 import { webResearchBatch } from "./web-research.ts";
 import { resolveStepModel } from "../src/model-routing.ts";
+import { OutlineEngine } from "../src/outline/engine.ts";
+import { literaryProfileFromBranch } from "../src/stage/literary-profile.ts";
 import {
 	activePanels,
 	closePanel as closePanelInMap,
@@ -102,6 +104,7 @@ import {
 	onNarrativeTurnEnd,
 } from "../src/memory/index.ts";
 import { handleApiRequest, loadCardFrontSnapshot, type CurrentModelInfo, type RestHost } from "./rest.ts";
+import { diagnosticsFromBranch } from "../src/stage/diagnostics.ts";
 
 // 用户级 agent 目录 → ~/.liyuan/agent（须在 getAgentDir / 建会话之前）
 // 并合并 fork 改名后遗留的 ~/.pi/agent（会话/配置，不覆盖更新的新树）
@@ -219,6 +222,8 @@ const runtime = await createAgentSessionRuntime(createRuntime, {
 
 let session: AgentSession = runtime.session;
 let unsubscribe: (() => void) | undefined;
+let outline: OutlineEngine | undefined;
+const turnRuntimeDiagnostics = new Map<string, import("../src/stage/diagnostics.ts").TurnRuntimeDiagnostic>();
 
 // ---------- WS 广播 ----------
 
@@ -633,7 +638,13 @@ const helloFrame = (): ServerFrame => {
 					const legacyCalendar = presentation.calendar ? undefined : parseLegacyCalendarSource(rawCurtain);
 					if (legacyCalendar) presentation.calendar = legacyCalendar;
 					const optionMatch = rawCurtain.match(/<options>\s*([\s\S]*?)\s*<\/options>/i);
-					if (optionMatch) presentation.options = optionMatch[1].split(/\r?\n/).map((line) => line.trim().replace(/^(?:>|[-*]|\d+[.)、])\s*/, "")).filter(Boolean).slice(0, 9);
+					// 当前卡若已有 options 美化正则，HTML 会在正文中展示；不要再叠加
+					// 原生 presentation 卡，避免同一组选项出现一份美化、一份裸卡。
+					const optionsHandledBySkin = cardfront.rules.some((rule) => {
+						if (!/options/i.test(rule.source) && !/options/i.test(rule.replace)) return false;
+						try { return new RegExp(rule.source, rule.flags).test(rawCurtain); } catch { return false; }
+					});
+					if (optionMatch && !optionsHandledBySkin) presentation.options = optionMatch[1].split(/\r?\n/).map((line) => line.trim().replace(/^(?:>|[-*]|\d+[.)、])\s*/, "")).filter(Boolean).slice(0, 9);
 					messages[i] = { ...messages[i], world: projectLiteraryWorldV1(modular), worldModules: modularWorldWireView(modular, manifest), worldAudit: worldAuditFromBranch(branch), ecology: ecologyWireView(ecology), presentation, tavernVariables: projectTavernVariables(state, names.userName) };
 					break;
 				}
@@ -977,6 +988,8 @@ const uiContext = {
 };
 
 const bindSession = async () => {
+	outline?.cancel();
+	turnRuntimeDiagnostics.clear();
 	session = runtime.session;
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any -- headless stub 集合，形状对齐 rpc-mode 的实现
 	await session.bindExtensions({
@@ -1617,7 +1630,12 @@ const restHost: RestHost = {
 			let final: AssistantMsgLike | null = null;
 			for await (const e of s) {
 				if (e.type === "done") final = e.message ?? null;
-				else if (e.type === "error") return { error: e.error?.errorMessage || `stopReason=${e.error?.stopReason ?? "?"}` };
+				else if (e.type === "error") {
+					const msg = e.error?.errorMessage || `stopReason=${e.error?.stopReason ?? "?"}`;
+					opts?.onDelta?.({ kind: "error", text: msg });
+					return { error: msg };
+				}
+				else if (e.type === "delta" && e.kind === "text" && e.delta) opts?.onDelta?.({ kind: "text", delta: e.delta });
 			}
 			if (!final) return { error: "流未产出最终消息" };
 			const text = final.content
@@ -1659,6 +1677,9 @@ const restHost: RestHost = {
 		const modular = modularWorldFromBranch(branch, manifest);
 		return { state: modular, view: modularWorldWireView(modular, manifest), legacy: projectLiteraryWorldV1(modular), audit: worldAuditFromBranch(branch), manifest };
 	},
+	turnDiagnostics(limit) {
+		return diagnosticsFromBranch(session.sessionManager.getBranch() as BranchEntryLike[], limit, Object.fromEntries(turnRuntimeDiagnostics));
+	},
 	clearWorldModule(moduleId) {
 		const branch = session.sessionManager.getBranch() as BranchEntryLike[];
 		const manifest = worldManifestFromBranch(branch);
@@ -1670,7 +1691,58 @@ const restHost: RestHost = {
 		session.sessionManager.flush();
 		resyncAll();
 	},
+	outline: {
+		getView: () => outline!.getView(),
+		history: () => outline!.history(),
+		chat: (message, options) => outline!.chat(message, options),
+		bootstrap: (wish) => outline!.bootstrap(wish),
+		reconcile: (leafId) => outline!.reconcile(leafId),
+		confirm: (id, hash) => outline!.confirm(id, hash),
+		reject: (id, reason) => outline!.reject(id, reason),
+		researchView: () => outline!.researchView(),
+		research: (topic) => outline!.research(topic),
+		settings: (value) => outline!.settings(value),
+	},
 };
+
+outline = new OutlineEngine({
+	cwd,
+	getSessionManager: () => session.sessionManager as never,
+	loadMaterials: () => loadStageMaterials(cwd),
+	runSideModel: (step, systemPrompt, userText, options) => restHost.runSideText(step, systemPrompt, userText, options),
+	webResearch: async (queries, maxResults, signal) => {
+		const { card, config } = loadStageMaterials(cwd);
+		return webResearchBatch(queries, maxResults, { card, userName: config.userName, signal });
+	},
+	getContext: () => {
+		const materials = loadStageMaterials(cwd);
+		const branch = session.sessionManager.getBranch() as BranchEntryLike[];
+		const manifest = worldManifestFromBranch(branch);
+		const narrativeHistory = branch.slice(-80).flatMap((entry) => {
+			const role = entry.message?.role;
+			if (role !== "user" && role !== "assistant") return [];
+			const content = entry.message?.content;
+			const text = typeof content === "string" ? content : Array.isArray(content)
+				? content.flatMap((part) => part && typeof part === "object" && (part as { type?: string }).type === "text" ? [String((part as { text?: string }).text ?? "")] : []).join("\n")
+				: "";
+			return text.trim() ? [{ id: entry.id, role, text: text.slice(0, 6000) }] : [];
+		}).slice(-24);
+		return {
+			cardKey: materials.config.card,
+			card: materials.card,
+			history: narrativeHistory,
+			rpState: stateFromBranch(branch),
+			world: modularWorldFromBranch(branch, manifest),
+			ecology: ecologyWireView(literaryEcologyFromBranch(branch)),
+			literaryProfiles: literaryProfileFromBranch(branch),
+			directorArtifacts: branch.slice(-20).flatMap((entry) => {
+				const details = entry.message?.details;
+				return details && typeof details === "object" && (details as Record<string, unknown>).rpPrep ? [(details as Record<string, unknown>).rpPrep] : [];
+			}),
+		};
+	},
+	onState: () => resyncAll(),
+});
 
 // 启动时：liyuan.agent.json → models.json，重绑模型 + 应用思考档（配置 → 当前生效）
 try {
@@ -2361,8 +2433,9 @@ const stage = new StageEngine({
 	// lorebook_toggle 工具（M-D2）：写 config.disabledLore 并软刷新素材。
 	// 复用 M-C2 协议禁用的同一条指纹通道（PLAN-RP-TOOLING M-D2 明示不得另起一套）。
 	setDisabledLore: (fingerprints, enabled) => {
-		const disk = existsSync(configPath)
-			? (JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>)
+		const path = resolveConfigPath(cwd);
+		const disk = existsSync(path)
+			? (JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>)
 			: {};
 		const prev = Array.isArray(disk.disabledLore)
 			? disk.disabledLore.filter((f): f is string => typeof f === "string")
@@ -2370,8 +2443,7 @@ const stage = new StageEngine({
 		const next = toggleDisabledLore(prev, fingerprints, enabled);
 		if (next.length > 0) disk.disabledLore = next;
 		else delete disk.disabledLore;
-		writeFileSync(configPath, `${JSON.stringify(disk, null, "\t")}\n`, "utf8");
-		cfg = { ...cfg, disabledLore: next };
+		writeFileSync(path, `${JSON.stringify(disk, null, "\t")}\n`, "utf8");
 		// constant 条目影响 system prompt，素材需重装（与 REST /api/lorebook/toggle 同）
 		void restHost.softRefreshConfig();
 		return fingerprints.length;
@@ -2409,6 +2481,25 @@ const stage = new StageEngine({
 			resyncAll();
 			// 向量记忆入库：只在真落了新正文时（中断/错误拍不入）
 			if (!info.entryId || info.error || info.aborted) return;
+			const outlineMode = outline?.getView().settings.mode;
+			if (outlineMode && outlineMode !== "manual") {
+				const sourceSessionId = session.sessionId;
+				turnRuntimeDiagnostics.set(info.entryId, { outline: { status: "pending", summary: "大纲校准正在后台运行" } });
+				while (turnRuntimeDiagnostics.size > 100) turnRuntimeDiagnostics.delete(turnRuntimeDiagnostics.keys().next().value!);
+				const leafId = session.sessionManager.getLeafId();
+				void outline!.reconcile(leafId ?? undefined).then((result) => {
+					if (session.sessionId !== sourceSessionId) return;
+					turnRuntimeDiagnostics.set(info.entryId!, { outline: result.stable
+						? { status: "stable", summary: "校准完成：当前大纲无需调整" }
+						: result.committed ? { status: "committed", summary: "低风险校准已自动写入动态大纲" }
+							: result.proposal ? { status: "pending", summary: "校准提案等待用户确认" }
+								: { status: "stable", summary: "校准完成：没有产生修改" } });
+				}).catch((error) => {
+					if (session.sessionId !== sourceSessionId) return;
+					turnRuntimeDiagnostics.set(info.entryId!, { outline: { status: "failed", summary: `大纲校准失败：${error instanceof Error ? error.message : String(error)}`.slice(0, 240) } });
+					console.warn("[outline] asynchronous reconcile failed", error);
+				});
+			}
 			void (async () => {
 				try {
 					const msgs = branchMessages() as Array<{ role?: string; content?: unknown }>;

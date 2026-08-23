@@ -513,7 +513,15 @@ function protectSkinDivs(text: string): { text: string; stash: string[] } {
  */
 export function prepareDisplayText(text: string, skin?: DisplaySkin | null): string {
 	if (!text) return "";
-	let t = text;
+	const imageStash: string[] = [];
+	const imageToken = (index: number) => `\uE010${index}\uE011`;
+	const restoreImages = (value: string): string => value.replace(/\uE010(\d+)\uE011/g, (_match, index: string) => imageStash[Number(index)] ?? "");
+	// image/imageTag 是前端生图协议，不是普通作者标签。先保护，避免默认
+	// unwrap 把外壳剥掉，RichContent 才能在下一层建立 NovelAI 图片槽位。
+	let t = text.replace(/<image(?:Tag)?>[\s\S]*?<\/image(?:Tag)?>/gi, (block) => {
+		const index = imageStash.push(block) - 1;
+		return imageToken(index);
+	});
 	if (skin?.rules?.length) {
 		const applied = applyCardSkinProtected(
 			t,
@@ -526,13 +534,13 @@ export function prepareDisplayText(text: string, skin?: DisplaySkin | null): str
 			for (let i = 0; i < applied.stash.length; i++) {
 				cleaned = cleaned.split(skinDivToken(i)).join(applied.stash[i]);
 			}
-			return cleaned;
+			return restoreImages(cleaned);
 		}
 		t = applied.text;
 	}
 	// 整段就是界面（前后无叙事）：原样交出，不拆
 	if (isFullPageHtmlPayload(t) && isBareFullPagePayload(t)) {
-		return t;
+		return restoreImages(t);
 	}
 	// 整页 HTML 与叙事混排（卡状态栏占位替换成 ```html 整页 + 正文 + catsay 尾巴）：
 	// 旧逻辑在此整段 return，导致 <catsay> 等标签的 unwrap 从未执行——
@@ -543,7 +551,7 @@ export function prepareDisplayText(text: string, skin?: DisplaySkin | null): str
 		for (let i = 0; i < stash.length; i++) {
 			cleaned = cleaned.split(skinDivToken(i)).join(stash[i]);
 		}
-		return cleaned;
+		return restoreImages(cleaned);
 	}
 	if (hasHtmlAssetFragment(t)) {
 		const outerAsset = /<(?:div|section|article|main|table|figure|details)\b[^>]*>[\s\S]*?<(?:style|script)\b/i.test(t);
@@ -554,7 +562,7 @@ export function prepareDisplayText(text: string, skin?: DisplaySkin | null): str
 		for (let i = 0; i < stash.length; i++) {
 			cleaned = cleaned.split(skinDivToken(i)).join(stash[i]);
 		}
-		return cleaned;
+		return restoreImages(cleaned);
 	}
 	if (/<div\b[^>]*\bstyle\s*=/i.test(t) && /<\/div>/i.test(t)) {
 		const { text: protectedText, stash } = protectSkinDivs(t);
@@ -562,9 +570,9 @@ export function prepareDisplayText(text: string, skin?: DisplaySkin | null): str
 		for (let i = 0; i < stash.length; i++) {
 			cleaned = cleaned.split(skinDivToken(i)).join(stash[i]);
 		}
-		return cleaned;
+		return restoreImages(cleaned);
 	}
-	return displayAssistantText(t);
+	return restoreImages(displayAssistantText(t));
 }
 
 /** 整段（trim 后）恰好就是整页 HTML / 围栏整页，前后无叙事——才允许跳过全部策略 */

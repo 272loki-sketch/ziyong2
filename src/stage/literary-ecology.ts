@@ -377,11 +377,16 @@ export function normalizeLiteraryEcologyState(value: unknown, previous: Literary
 		} satisfies EcologyPublicSurface : Object.hasOwn(item, "publicSurface") ? undefined : old?.publicSurface;
 		const communicationSource = item.communication && typeof item.communication === "object" && !Array.isArray(item.communication) ? item.communication as Record<string, unknown> : null;
 		const communicationState = communicationSource && ["queued", "in-transit", "delivered", "failed", "cancelled"].includes(String(communicationSource.state)) ? communicationSource.state as EcologyCommunication["state"] : null;
-		const communication = communicationState ? {
+		const communicationCandidate = communicationState ? {
 			senderRef: clean(communicationSource?.senderRef, 100), recipientRefs: strings(communicationSource?.recipientRefs, 16, 100), channel: clean(communicationSource?.channel, 100), state: communicationState,
 			deliveryConstraint: clean(communicationSource?.deliveryConstraint), contentClaim: clean(communicationSource?.contentClaim, 500), sentRound: Math.max(0, Number(communicationSource?.sentRound) || previous.round),
 			...(communicationState === "delivered" ? { deliveredRound: Math.max(0, Number(communicationSource?.deliveredRound) || previous.round) } : {}),
 		} satisfies EcologyCommunication : Object.hasOwn(item, "communication") ? undefined : old?.communication;
+		// 新的人物通讯缺任一端点时按普通事件处理，避免一个残缺可选结构拖垮整份生态候选。
+		// 已提交通讯仍由旧值继承，不能借增量缺字段绕过终态与送达门禁。
+		const communication = communicationCandidate && (kind === "ambient" || (communicationCandidate.senderRef && communicationCandidate.recipientRefs.length))
+			? communicationCandidate
+			: old?.communication;
 		return { id: candidateId, name, kind, status, time: oldText("time", 120), location: oldText("location", 120), participants: oldList("participants", 16), cause: oldText("cause"), development: oldText("development", 600), visibility, discovery: oldText("discovery"), expires: oldText("expires", 120), withoutUser: oldText("withoutUser"), userRole, prototypeId: oldText("prototypeId", 80), templateId: oldText("templateId", 80), patternKey, tone, intrusion, createdRound: Math.max(0, Number(item.createdRound) || old?.createdRound || previous.round), lastAdvancedRound: Math.max(0, Number(item.lastAdvancedRound) || old?.lastAdvancedRound || previous.round), cooldownUntilRound: Math.max(0, Number(item.cooldownUntilRound) || old?.cooldownUntilRound || 0), ...(publicSurface ? { publicSurface } : {}), causedBy: oldList("causedBy", 12), ...(communication ? { communication } : {}) };
 	}).filter((item): item is EcologyOccurrence => !!item).slice(0, 80);
 	const locationStates = records(source.locationStates).map((item) => ({ location: clean(item.location, 120), state: clean(item.state), activities: strings(item.activities, 12) })).filter((item) => item.location).slice(0, 30);

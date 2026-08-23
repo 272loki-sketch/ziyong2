@@ -284,9 +284,10 @@ type NovelAiImageCache = Record<string, { src: string; bytes: number }>;
 
 function imageCacheKey(cwd: string, rawPrompt: string, opts?: { negativePrompt?: string; seed?: number }): string {
 	const config = loadNovelAiConfig(cwd);
+	const normalizePrompt = (value: string): string => value.replace(/\r\n?/g, "\n").replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
 	return createHash("sha256").update(JSON.stringify({
-		prompt: rawPrompt.trim(),
-		negativePrompt: opts?.negativePrompt?.trim() ?? "",
+		prompt: normalizePrompt(rawPrompt),
+		negativePrompt: normalizePrompt(opts?.negativePrompt ?? ""),
 		seed: Number.isInteger(opts?.seed) ? opts?.seed : null,
 		model: config.model,
 		sampler: config.sampler,
@@ -314,6 +315,12 @@ function readImageCache(cwd: string): NovelAiImageCache {
 function cachedImageExists(cwd: string, entry: { src: string; bytes: number } | undefined): entry is { src: string; bytes: number } {
 	const match = entry?.src.match(/^\/media\/([A-Za-z0-9._-]+)$/);
 	return !!match && existsSync(join(dir(cwd, "media"), match[1]));
+}
+
+/** 只查询已有图片，不触发生图请求；页面刷新时优先走这条。 */
+export function getCachedNovelAiImage(cwd: string, rawPrompt: string, opts?: { negativePrompt?: string; seed?: number }): { src: string; bytes: number } | null {
+	const cached = readImageCache(cwd)[imageCacheKey(cwd, rawPrompt, opts)];
+	return cachedImageExists(cwd, cached) ? cached : null;
 }
 
 function writeImageCache(cwd: string, value: NovelAiImageCache): void {

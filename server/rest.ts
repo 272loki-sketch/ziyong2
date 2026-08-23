@@ -51,9 +51,10 @@ import {
 } from "../src/card.ts";
 import {
 	buildCardFrontSnapshot,
-	extractLorebookRegexScripts,
+	extractRegexScripts,
 	setSkinEnabled,
 	type CardFrontSnapshot,
+	type RegexScriptSource,
 } from "../src/cardfront.ts";
 import {
 	appendCodexEntry,
@@ -81,7 +82,7 @@ import {
 	updateMemoryConfig,
 	updateStoreConfig,
 } from "../src/memory/index.ts";
-import { generateNovelAiImageCached, loadNovelAiConfig, publicNovelAiConfig, updateNovelAiConfig } from "../src/novelai.ts";
+import { generateNovelAiImageCached, getCachedNovelAiImage, loadNovelAiConfig, publicNovelAiConfig, updateNovelAiConfig } from "../src/novelai.ts";
 import { normalizeStepModels, type SideModelStep } from "../src/model-routing.ts";
 import { resolveConfigPath } from "../src/paths.ts";
 import { loadStageMaterials } from "../src/stage/materials.ts";
@@ -102,6 +103,7 @@ import {
 	deleteLorebookFileEntry,
 	exportStLorebook,
 	loadLorebookFile,
+	loadLorebookRegexScripts,
 	loreFingerprint,
 	mergeEntries,
 	mountedLorebookPaths,
@@ -296,14 +298,28 @@ export interface RestHost {
 		step: SideModelStep,
 		systemPrompt: string,
 		userText: string,
-		opts?: { maxTokens?: number; reasoning?: string; signal?: AbortSignal; forceNonStreaming?: boolean },
+		opts?: { maxTokens?: number; reasoning?: string; signal?: AbortSignal; forceNonStreaming?: boolean; onDelta?: (event: { kind: "text"; delta: string } | { kind: "error"; text: string }) => void },
 	): Promise<string | { error: string }>;
 	/** 将当前角色卡画像钉到当前会话分支。 */
 	appendWorldManifest(data: unknown): void;
 	/** 长旁路分析提交前用于拒绝分支或角色卡漂移。 */
 	worldProfileContext(): { leafId: string | null; card: string };
 	worldStateView(): unknown;
+	/** 当前分支最近回合的只读演出诊断投影，不写入任何权威状态。 */
+	turnDiagnostics(limit?: number): ReturnType<typeof import("../src/stage/diagnostics.ts").diagnosticsFromBranch>;
 	clearWorldModule(moduleId: string): void;
+	outline: {
+		getView(): unknown;
+		history(): unknown;
+		chat(message: string, options?: { research?: boolean; focus?: "open" | "next-beat" | "dialogue" | "character" | "diagnose"; onDelta?: (event: { kind: "text"; delta: string } | { kind: "error"; text: string }) => void }): Promise<unknown>;
+		bootstrap(experienceWish?: string): Promise<unknown>;
+		reconcile(leafId?: string): Promise<unknown>;
+		confirm(id: string, proposalHash: string): Promise<unknown>;
+		reject(id: string, reason?: string): void;
+		researchView(): unknown;
+		research(topic?: string): Promise<unknown>;
+		settings(value?: { mode?: "manual" | "suggest" | "auto"; researchMode?: "off" | "manual" | "auto" }): unknown;
+	};
 }
 
 export interface SessionInfoLite {
@@ -408,7 +424,15 @@ export function loadCardFrontSnapshot(cwd: string): CardFrontSnapshot {
 	} catch {
 		/* ignore */
 	}
-	return buildCardFrontSnapshot(config, raw, charName, presetRaw);
+	const lorebookScripts = mountedLorebookPaths(config).flatMap((relative) => {
+		const path = resolvePath(cwd, relative);
+		return existsSync(path) ? [{ source: relative, scripts: loadLorebookRegexScripts(path) }] : [];
+	});
+	const regexSources: RegexScriptSource[] = [
+		...(presetRaw ? [{ source: "preset", scripts: extractRegexScripts(presetRaw) }] : []),
+		...lorebookScripts,
+	];
+	return buildCardFrontSnapshot(config, raw, charName, regexSources);
 }
 
 /** config PUT 白名单（card 不在内：换卡必须走 /api/card/switch 的完整流程） */
@@ -975,7 +999,67 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 	};
 
 	try {
+		const proposalRoute = /^POST \/api\/outline\/proposals\/([^/]+)\/(confirm|reject)$/.exec(route);
+		if (proposalRoute) {
+			if (refuseWhileStreaming()) return true;
+			const body = JSON.parse((await readBody(req)) || "{}") as { proposalHash?: string; reason?: string };
+			const id = decodeURIComponent(proposalRoute[1]);
+			if (proposalRoute[2] === "confirm") {
+				if (!body.proposalHash) throw new Error("缺少 proposalHash");
+				sendJson(res, 200, await host.outline.confirm(id, body.proposalHash));
+			} else {
+				host.outline.reject(id, body.reason);
+				sendJson(res, 200, { ok: true, view: host.outline.getView() });
+			}
+			return true;
+		}
 		switch (route) {
+			case "GET /api/outline": { sendJson(res, 200, host.outline.getView()); return true; }
+			case "GET /api/turn-diagnostics": {
+				const parsed = Number.parseInt(query.get("limit") ?? "12", 10);
+				const limit = Number.isFinite(parsed) ? Math.max(1, Math.min(20, parsed)) : 12;
+				res.setHeader("cache-control", "no-store");
+				sendJson(res, 200, host.turnDiagnostics(limit)); return true;
+			}
+			case "GET /api/outline/versions": { sendJson(res, 200, host.outline.history()); return true; }
+			case "POST /api/outline/chat": {
+				const body = JSON.parse(await readBody(req)) as { message?: string; researchMode?: string; focus?: "open" | "next-beat" | "dialogue" | "character" | "diagnose" };
+				sendJson(res, 200, await host.outline.chat(body.message ?? "", { research: body.researchMode === "manual" || body.researchMode === "auto" || body.researchMode === "refresh", focus: body.focus })); return true;
+			}
+			case "POST /api/outline/chat/stream": {
+				const body = JSON.parse(await readBody(req)) as { message?: string; researchMode?: string; focus?: "open" | "next-beat" | "dialogue" | "character" | "diagnose" };
+				res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store", "connection": "keep-alive" });
+				const signal = (req as { signal?: AbortSignal }).signal;
+				const sse = (event: string, data: string) => { try { res.write(`event: ${event}\ndata: ${data}\n\n`); } catch { /* client disconnected */ } };
+				try {
+					const result = await host.outline.chat(body.message ?? "", { research: body.researchMode === "manual" || body.researchMode === "auto" || body.researchMode === "refresh", focus: body.focus, onDelta: (event) => { if (event.kind === "text") sse("delta", event.delta); else sse("error", event.text); } });
+					sse("done", JSON.stringify(result));
+				} catch (cause) {
+					const msg = cause instanceof Error ? cause.message : String(cause);
+					sse("error", msg);
+				}
+				try { res.end(); } catch { /* already closed */ }
+				return true;
+			}
+			case "POST /api/outline/bootstrap": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse((await readBody(req)) || "{}") as { experienceWish?: string };
+				sendJson(res, 200, await host.outline.bootstrap(body.experienceWish)); return true;
+			}
+			case "POST /api/outline/reconcile": {
+				if (refuseWhileStreaming()) return true;
+				const body = JSON.parse((await readBody(req)) || "{}") as { leafId?: string };
+				sendJson(res, 200, await host.outline.reconcile(body.leafId)); return true;
+			}
+			case "GET /api/outline/research": { sendJson(res, 200, host.outline.researchView()); return true; }
+			case "POST /api/outline/research/refresh": {
+				const body = JSON.parse((await readBody(req)) || "{}") as { topic?: string };
+				sendJson(res, 200, await host.outline.research(body.topic)); return true;
+			}
+			case "PUT /api/outline/settings": {
+				const body = JSON.parse(await readBody(req)) as { mode?: "manual" | "suggest" | "auto"; researchMode?: "off" | "manual" | "auto" };
+				sendJson(res, 200, { settings: host.outline.settings(body) }); return true;
+			}
 			// ---- 命令清单（输入框补全用；单一来源 src/commands.ts） ----
 			case "GET /api/commands": {
 				sendJson(res, 200, { commands: RP_COMMANDS });
@@ -3137,6 +3221,13 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				sendJson(res, 200, { ...result, caption: String(body.caption ?? "").trim() });
 				return true;
 			}
+			case "GET /api/novelai/cached": {
+				const prompt = (query.get("prompt") ?? "").trim();
+				if (!prompt) throw new Error("生图提示词为空");
+				const result = getCachedNovelAiImage(host.cwd, prompt);
+				sendJson(res, 200, result ?? { src: null });
+				return true;
+			}
 
 			// ---- 角色卡 ----
 			case "GET /api/card": {
@@ -3758,7 +3849,8 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				return true;
 		}
 	} catch (err) {
-		sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+		const status = typeof (err as { statusCode?: unknown })?.statusCode === "number" ? (err as { statusCode: number }).statusCode : 400;
+		sendJson(res, status, { error: err instanceof Error ? err.message : String(err) });
 		return true;
 	}
 }

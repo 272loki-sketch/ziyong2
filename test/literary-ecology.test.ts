@@ -220,6 +220,12 @@ test("ecology：公共事件和通讯可引用当前 actor 工作集外的人物
 	assert.deepEqual(validateEcologyTransition(defaultLiteraryEcologyState(), next), []);
 });
 
+test("ecology：残缺的新人物通讯降级为普通事件，不拖垮整份候选", () => {
+	const next = normalizeLiteraryEcologyState({ occurrences: [{ id: "challenge", name: "棋局挑战", kind: "encounter", patternKey: "chess", communication: { senderRef: "", recipientRefs: [], channel: "当面", state: "queued" } }] }, defaultLiteraryEcologyState())!;
+	assert.equal(next.occurrences[0]?.communication, undefined);
+	assert.deepEqual(validateEcologyTransition(defaultLiteraryEcologyState(), next), []);
+});
+
 test("ecology：未物化到当前信号工作集的世界或 lore 认知引用不误拒", () => {
 	const next = normalizeLiteraryEcologyState({ actors: [{ id: "a", name: "甲", knowledgeLedger: [{ id: "k", subjectRef: "world:public-information/oaa-rules", summary: "OAA 规则已公布", certainty: "confirmed", route: "investigated", evidence: "查看应用", sourceRef: "world:public-information/oaa-rules" }] }] }, defaultLiteraryEcologyState())!;
 	assert.deepEqual(validateEcologyTransition(defaultLiteraryEcologyState(), next, []), []);
@@ -231,4 +237,6 @@ test("ecology：三件工作流 Skill 均可被装载", () => {
 	assert.match(workflowSkill(skills, "ecology-global")?.body ?? "", /叙事发动机/);
 	assert.match(workflowSkill(skills, "ecology-card")?.body ?? "", /人物语法/);
 	assert.match(workflowSkill(skills, "ecology-runtime")?.body ?? "", /用户是世界中的探索者/);
+	assert.match(workflowSkill(skills, "ecology-runtime")?.body ?? "", /Small_theater/);
+	assert.match(workflowSkill(skills, "ecology-runtime")?.body ?? "", /不得替用户接受或提交申请/);
 });

@@ -130,6 +130,8 @@ import { assistantStageTool, runAssistantStageTool } from "./assistant-stage.ts"
 import type { MemoryChunkLike } from "../tools/memory.ts";
 import { wantsManualWebResearch } from "../tools/web-research.ts";
 import { resolveStepModel, type SideModelStep } from "../model-routing.ts";
+import { outlineFromBranch } from "../outline/state.ts";
+import { projectOutline } from "../outline/projection.ts";
 import { workflowSkill } from "./skill-store.ts";
 import { worldModuleSkillPacks } from "./skill-store.ts";
 import {
@@ -398,6 +400,16 @@ const draftBodyCharsOf = (ws: TurnWorkspace): number =>
 	ws.draft.trim() ? extractDraftBody(ws.draft).replace(/\s+/g, "").length : 0;
 /** 初次请求之外的自动重试次数；429、短暂网关错误和网络错误由 provider 按退避处理。 */
 const MODEL_MAX_RETRIES = 9;
+
+/** 中转错用 tokenizer 时会把模型控制 token 和占位符直接作为正文返回。 */
+export function looksLikeCorruptedModelText(text: string): boolean {
+	const source = text.trim();
+	if (!source) return false;
+	if (/<[｜|]?begin[▁_ ]of[▁_ ]sentence[｜|]?>/i.test(source)) return true;
+	const hashes = (source.match(/#/g) ?? []).length;
+	const meaningful = (source.match(/[\p{L}\p{N}]/gu) ?? []).length;
+	return source.length >= 120 && hashes >= 24 && hashes > meaningful * 0.8;
+}
 
 const trimContentBodyRepeat = (body: string, inner: string): string => {
 	const draft = body.trim();
@@ -1165,6 +1177,7 @@ export class StageEngine {
 				userText: lastUserText,
 				charName: card.name,
 				userName: config.userName,
+				outline: projectOutline(outlineFromBranch(branch), "director"),
 			});
 			const result = await this.#sideText(
 				"literaryDirector",
@@ -1355,6 +1368,7 @@ export class StageEngine {
 		let loopTail = "";
 		let curtainText = "";
 		let interruptedDraft = "";
+		let corruptOutput = false;
 		// 首轮 writer 若在中途断流（未落任何稿段），自动重发整个请求，避免一次上游故障毁掉整拍。
 		// 一旦已有稿段（ws.draft）则保留现有行为（交由 abort 收敛，不无脑重发）。
 		for (let writerAttempt = 0; writerAttempt <= MODEL_MAX_RETRIES; writerAttempt++) {
@@ -1377,6 +1391,14 @@ export class StageEngine {
 					fwd.forward(e);
 				}
 			}
+			const receivedText = [text, textOfAssistant(final)].filter(Boolean).join("\n");
+			if (looksLikeCorruptedModelText(receivedText)) {
+				corruptOutput = true;
+				errored = "模型返回了异常解码文本，请切换主演模型或稍后重试";
+				ev.onDraftResync?.([]);
+				ev.onStreamClear?.();
+				break;
+			}
 			// 用户取消：立即停止，不再重发（aborted 半拍仍走既有收敛落树）。
 			if (this.#abort?.signal.aborted) break;
 			if (!eroded || ws.draft.trim() || writerAttempt >= MODEL_MAX_RETRIES) break;
@@ -1391,7 +1413,7 @@ export class StageEngine {
 		// 不算——旁白曾被 mergeFinalText 当尾巴拼到正文尾部（实弹：读题文字跑进正文）。
 		// M-A agent 循环（PLAN-RP-AGENT-EXEC §2.3）：思考→工具→看结果→再思考，直到交稿定稿。
 		// 首轮无论 stopReason 都进循环——模型直出正文不调工具时由循环做宽进严出代收（D2）。
-		if (final && final.stopReason !== "aborted") {
+		if (final && final.stopReason !== "aborted" && !corruptOutput) {
 			// 首次请求即使异常结束，也让开放循环获得一次催稿/恢复机会；后续错误会由 turn 重新写回。
 			errored = undefined;
 			const loopOptions = { ...options, maxTokens: mainCallMaxTokens };
@@ -1447,10 +1469,17 @@ export class StageEngine {
 				curtainText = merged.startsWith(ws.draft.trim()) ? merged.slice(ws.draft.trim().length).trim() : "";
 			}
 		} else curtainText = curtainText.trim();
-		const pendingDraft = aborted ? interruptedDraft || fwd.pendingText() : "";
+		if (looksLikeCorruptedModelText(ws.draft) || looksLikeCorruptedModelText(interruptedDraft) || looksLikeCorruptedModelText(fwd.pendingText())) {
+			corruptOutput = true;
+			errored = "模型返回了异常解码文本，请切换主演模型或稍后重试";
+			curtainText = "";
+			ev.onDraftResync?.([]);
+			ev.onStreamClear?.();
+		}
+		const pendingDraft = aborted && !corruptOutput ? interruptedDraft || fwd.pendingText() : "";
 		const narrativeText = aborted
-			? [ws.draft.trim(), pendingDraft.trim(), ws.draft.trim() ? "" : mergeFinalText("", text)].filter(Boolean).join("\n\n")
-			: ws.draft.trim() || mergeFinalText("", text);
+			? [corruptOutput ? "" : ws.draft.trim(), pendingDraft.trim(), ws.draft.trim() || corruptOutput ? "" : mergeFinalText("", text)].filter(Boolean).join("\n\n")
+			: corruptOutput ? "" : ws.draft.trim() || mergeFinalText("", text);
 		const finalText = [narrativeText, curtainText].filter(Boolean).join("\n\n");
 
 		// 全流程文字留档：beatLog 时序 + merge 四件全部落进 session JSONL
@@ -1460,6 +1489,7 @@ export class StageEngine {
 
 		// 落树：正文以定稿为准（保留思考块，剥离工具调用轨迹）；纯错误/空拍不落
 		let entryId: string | undefined;
+		let generationLeafChanged = false;
 		if (!final && aborted && finalText) final = { role: "assistant", content: [], stopReason: "aborted", errorMessage: "Request was aborted" };
 		if (final && finalText && sm.getLeafId() === expectedTurnLeafId) {
 			const keep = (final.content ?? []).filter((c) => c.type === "thinking");
@@ -1522,14 +1552,17 @@ export class StageEngine {
 				details,
 			});
 			sm.flush();
-		}
+		} else if (final && finalText) generationLeafChanged = true;
 
 		// 留档条目必须落在正文**之后**：append 会把叶移到自己身上（_appendEntry），
 		// 落在正文之前就把正文垫成它的子节点、不再是 user 的直接子节点，而 swipe 变体
 		// （listReplyVariants 只认 user 的直接子节点）随之一个都认不出来——v1.4.1 起
 		// reroll 恒显 1/1、旧变体在树上却不可达。空拍（无 final/finalText）照样留档。
-		sm.appendCustomEntry("rp-text-debug", { beatLog, draft: ws.draft, loopTail, finalText });
-		sm.flush();
+		// 生成期间叶已变化时整拍丢弃，不能先写 debug 再把“叶变化”误认成自己造成的。
+		if (!generationLeafChanged) {
+			sm.appendCustomEntry("rp-text-debug", { beatLog, draft: ws.draft, loopTail, finalText });
+			sm.flush();
+		}
 
 		// 媒体交付落树（8/06 重接）：wire 只认树上的 toolResult 出 image/audio/video/html 帧。
 		// 落在正文**之后**——屏上顺序与演出顺序一致（先看正文，再看图）。
@@ -1552,6 +1585,10 @@ export class StageEngine {
 			ev.onNotify?.("error", `生成失败：${errored}`);
 			return { aborted: false, error: errored, entryId };
 		}
+		if (generationLeafChanged) {
+			ev.onActivity?.("正文结果已丢弃（生成期间切换了分支）");
+			return { aborted: true };
+		}
 
 		// 空手认栽（循环逼稿一次仍无产出）：明说，不再静默丢拍（实弹三拍 0 字正文的教训）
 		if (!errored && !aborted && !finalText) {
@@ -1564,7 +1601,7 @@ export class StageEngine {
 		// 落树刚完成、叶即本拍新条目，无叶漂移窗口；模型是记账主体，harness 只执行。
 		if (entryId && !aborted && ws.patches.length > 0) {
 			const nextState = projectedState(ws, state);
-			sm.appendCustomEntry(STATE_ENTRY_TYPE, nextState);
+				sm.appendCustomEntry(STATE_ENTRY_TYPE, { ...nextState, _diagnosticSourceEntryId: entryId });
 			const stateFile = this.#deps.getStateFile?.(sm.getSessionId());
 			if (stateFile) {
 				try {
@@ -1578,12 +1615,12 @@ export class StageEngine {
 		}
 
 		// 场记兜底（D5）：模型本拍没调 world_state_update 才旁路补账，M-B 视实弹数据决定退役。
-		if (entryId && !aborted && finalText && ws.patches.length === 0) {
+		if (entryId && !aborted && narrativeText && ws.patches.length === 0) {
 			const r = await runScribeTurn(
 				{
 					// 2048：账本+名录随剧情增长，patch 可能很长；1024 实测会截断出半截 JSON（8/03）
 					sideText: (sp, ut) => this.#sideText("scribe", sp, ut, 2048),
-					appendStateEntry: (s) => sm.appendCustomEntry(STATE_ENTRY_TYPE, s),
+					appendStateEntry: (s) => sm.appendCustomEntry(STATE_ENTRY_TYPE, { ...s, _diagnosticSourceEntryId: entryId }),
 					getLeafId: () => sm.getLeafId(),
 					stateFile: this.#deps.getStateFile?.(sm.getSessionId()),
 					onActivity: (d) => ev.onActivity?.(d),
@@ -1591,16 +1628,24 @@ export class StageEngine {
 				{
 					state,
 					userText: lastUserText,
-					assistantText: finalText,
+					// 场记只读正文事实。状态栏、选项和小剧场属于谢幕投影，绝不能升级进 rp-state。
+					assistantText: narrativeText,
 					charName: materials.card.name,
 					userName: materials.config.userName,
 				},
 			);
 			if (r.kind === "failed") console.error(`[stage-scribe] 记账跳过：${r.error}`);
+			// 场记结果发生在 assistant 已落树之后；追加只读诊断工件，区分
+			// “本拍无变化”与“场记失败”，不作为账本权威。
+			sm.appendCustomEntry("rp-turn-diagnostic", {
+				version: 1,
+				sourceEntryId: entryId,
+				stage: "scribe",
+				kind: r.kind,
+				...(r.kind === "skipped" ? { reason: r.reason } : {}),
+				...(r.kind === "failed" ? { error: r.error.slice(0, 240) } : {}),
+			});
 			sm.flush();
-		} else if (final && finalText && sm.getLeafId() !== expectedTurnLeafId) {
-			ev.onActivity?.("正文结果已丢弃（生成期间切换了分支）");
-			return { aborted: true };
 		}
 
 		// 后台世界推演：Skill 即开关、也是规则唯一权威。完整快照落当前分支，
@@ -1679,10 +1724,10 @@ export class StageEngine {
 				} else {
 					// 模型并发、树写入串行：审计先留痕，权威世界仍在生态之前。
 					if (worldResult.audit) sm.appendCustomEntry(WORLD_AUDIT_ENTRY_TYPE, worldResult.audit);
-					if (worldResult.state) { sm.appendCustomEntry(LITERARY_WORLD_ENTRY_TYPE, worldResult.state); ev.onActivity?.(`后台世界推进至第 ${worldResult.state.round} 轮（已审计）`); }
+					if (worldResult.state) { sm.appendCustomEntry(LITERARY_WORLD_ENTRY_TYPE, { ...worldResult.state, _diagnosticSourceEntryId: entryId }); ev.onActivity?.(`后台世界推进至第 ${worldResult.state.round} 轮（已审计）`); }
 					else if (worldResult.error) ev.onActivity?.(`后台世界推演失败（${worldResult.error}），保留上一快照`);
 					if (ecologyResult.state) {
-						sm.appendCustomEntry(LITERARY_ECOLOGY_ENTRY_TYPE, ecologyResult.state);
+						sm.appendCustomEntry(LITERARY_ECOLOGY_ENTRY_TYPE, { ...ecologyResult.state, _diagnosticSourceEntryId: entryId });
 						if (!ecologyResult.degraded) {
 							this.#ecologyPoolWrite = this.#ecologyPoolWrite.then(() => {
 								const latest = loadEcologyPools(cwd, config.card, card.name);

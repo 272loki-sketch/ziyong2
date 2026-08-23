@@ -55,6 +55,7 @@ function invalidateAfterWrite(writePath: string): void {
 		{ test: /^\/api\/config/, prefixes: ["/api/config"] },
 		{ test: /^\/api\/world-profile/, prefixes: ["/api/world-profile"] },
 		{ test: /^\/api\/world-state/, prefixes: ["/api/world-state"] },
+		{ test: /^\/api\/outline/, prefixes: ["/api/outline"] },
 		{ test: /^\/api\/upload/, prefixes: ["/api/uploads"] },
 	];
 	let hit = false;
@@ -214,7 +215,7 @@ export interface ModelsResponse {
 }
 
 export interface ModelRef { provider: string; id: string }
-export type SideModelStep = "writer" | "literaryContinuity" | "literaryDirector" | "literaryCharacter" | "literaryPersona" | "literaryWorld" | "worldProfile" | "literaryWorldFacts" | "literaryWorldAudit" | "ecologySearch" | "ecologyGlobal" | "ecologyCard" | "ecologyRuntime" | "contractDeclare" | "scribe" | "compaction" | "presetSort";
+export type SideModelStep = "writer" | "literaryContinuity" | "literaryDirector" | "literaryCharacter" | "literaryPersona" | "literaryWorld" | "worldProfile" | "literaryWorldFacts" | "literaryWorldAudit" | "ecologySearch" | "ecologyGlobal" | "ecologyCard" | "ecologyRuntime" | "outlineBootstrap" | "outlineChat" | "outlineReconcile" | "outlineResearch" | "outlineAudit" | "contractDeclare" | "scribe" | "compaction" | "presetSort";
 export type StepModelOverrides = Partial<Record<SideModelStep, ModelRef>>;
 
 export interface AuthProviderInfo {

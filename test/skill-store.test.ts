@@ -117,3 +117,14 @@ test("世界适配三阶段 Skill 均被 workflow 注册表识别", () => {
 	assert.equal(workflows.has("world-facts"), true);
 	assert.equal(workflows.has("world-audit"), true);
 });
+
+test("大纲工作流 Skill 均被 workflow 注册表识别且不常驻", () => {
+	const repo = new URL("..", import.meta.url).pathname;
+	const skills = scanSkillFiles(repo);
+	for (const workflow of ["outline-chat", "outline-bootstrap", "outline-reconcile", "outline-foreshadowing", "outline-research", "outline-audit"] as const) {
+		const skill = skills.find((row) => row.workflow === workflow);
+		assert.ok(skill, workflow);
+		assert.equal(skill.resident, false);
+		assert.equal(skill.everyBeat, false);
+	}
+});

@@ -67,7 +67,8 @@ export function splitRichContentParts(text: string, skin?: SkinMacros | null): R
 		if (p.text.trim()) {
 			let last = 0;
 			const fenced = [...p.text.matchAll(/```[\s\S]*?```/g)].map((match) => [match.index ?? 0, (match.index ?? 0) + match[0].length] as const);
-			for (const match of p.text.matchAll(/<image>\s*([\s\S]*?)\s*<\/image>/gi)) {
+			// 旧卡/世界书也使用过 imageTag；它与原生 image 共用 NovelAI 槽位。
+			for (const match of p.text.matchAll(/<image(?:Tag)?>\s*([\s\S]*?)\s*<\/image(?:Tag)?>/gi)) {
 				const index = match.index ?? 0;
 				if (fenced.some(([start, end]) => index >= start && index < end)) continue;
 				if (index > last) out.push({ kind: "text", text: p.text.slice(last, index) });

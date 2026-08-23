@@ -57,6 +57,7 @@ import {
 	IconSend,
 	IconSessions,
 	IconSettings,
+	IconSkills,
 	IconStop,
 	IconUploads,
 	IconWorldline,
@@ -96,6 +97,7 @@ import { SettingsPanel } from "./components/SettingsPanel.tsx";
 import { SessionStatsBar, StatusStrip } from "./components/StatusStrip.tsx";
 import { UploadsPanel } from "./components/UploadsPanel.tsx";
 import { StoreModal, WorldlinePanel } from "./components/WorldlinePanel.tsx";
+import { StoryPlanningWorkbench } from "./planning/StoryPlanningWorkbench.tsx";
 import { useWire, type ConnState } from "./ws.ts";
 import type {
 	AssistantModelInfo,
@@ -327,6 +329,7 @@ export default function App() {
 	 * 久未访问启动显示；点品牌强制打开；开会话/发消息后收起。
 	 */
 	const [welcome, setWelcome] = useState(() => shouldShowHomeOnBoot());
+	const [planningOpen, setPlanningOpen] = useState(false);
 
 	const dismissWelcome = useCallback(() => {
 		setWelcome(false);
@@ -1690,6 +1693,7 @@ export default function App() {
 	return (
 		<PanelRefreshContext.Provider value={agentTick}>
 		<div className="app">
+			{planningOpen && <StoryPlanningWorkbench onClose={() => setPlanningOpen(false)} toast={pushToast} />}
 			<header className="topbar">
 				{/* 中 2：相对整条顶栏绝对居中 = 屏幕水平正中（不受左右留白不对称影响） */}
 				<div className="tb-slot tb-slot-center">
@@ -1855,6 +1859,10 @@ export default function App() {
 											openLeft("roster");
 											setCenterMenu(null);
 										}}
+										onOpenPlanning={() => {
+											setPlanningOpen(true);
+											setCenterMenu(null);
+										}}
 										onOpen={(name) => {
 											openLeft(agentId(name));
 											setCenterMenu(null);
@@ -1911,6 +1919,7 @@ export default function App() {
 										ws.send({ type: "sessions" });
 									}}
 									onOpenPanel={openPanelFromWelcome}
+									onOpenPlanning={() => setPlanningOpen(true)}
 								/>
 							) : (
 								<>
@@ -2360,7 +2369,18 @@ export default function App() {
 									<IconSend size={17} />
 								</button>
 							)}
-							{/* 助手入口（2026-07-14 拆分）：发送箭头右侧，点开右栏助手对话 */}
+							{/* 导演室是剧情规划工作台；独立于右侧系统助手。 */}
+							<button
+								type="button"
+								className={`dock-btn planning-btn ${planningOpen ? "active" : ""}`}
+								onClick={() => setPlanningOpen(true)}
+								title="打开导演室，讨论剧情方向、人物弧线与伏笔"
+								aria-label="打开导演室"
+							>
+								<IconSkills size={17} />
+								<span>导演室</span>
+							</button>
+							{/* 系统助手入口：配置、诊断和外部服务，不代替导演室。 */}
 							<button
 								type="button"
 								className={`dock-btn asst-btn ${rightPanel === "assistant" ? "active" : ""}`}
@@ -2374,8 +2394,8 @@ export default function App() {
 									ws.send({ type: "assistant_sync" });
 									ws.send({ type: "assistant_sessions" });
 								}}
-								title="助手"
-								aria-label="打开助手面板"
+								title="系统助手：诊断、配置与外部服务"
+								aria-label="打开系统助手面板"
 							>
 								<IconAssistant size={18} />
 								{asstUnread && <span className="asst-dot" aria-hidden="true" />}

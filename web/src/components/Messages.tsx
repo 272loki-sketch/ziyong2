@@ -7,7 +7,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { apiPost } from "../api.ts";
+import { apiGet, apiPost } from "../api.ts";
 import { attachmentUrl, splitAttachments } from "../attachments.ts";
 import { applyCardSkin } from "../cardSkin.ts";
 import { isFullInterface } from "../htmlEmbed.ts";
@@ -80,6 +80,9 @@ function NovelAiImageButton({ prompt, title }: { prompt: string; title: string }
 	const [error, setError] = useState("");
 	const [src, setSrc] = useState("");
 	const running = useRef(false);
+	const browserCacheKey = `liyuan:nai:${prompt.replace(/\r\n?/g, "\n").replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim()}`;
+	const readBrowserCache = () => { try { return window.localStorage.getItem(browserCacheKey) || ""; } catch { return ""; } };
+	const writeBrowserCache = (value: string) => { try { window.localStorage.setItem(browserCacheKey, value); } catch { /* storage may be disabled */ } };
 	const generate = async () => {
 		if (running.current) return;
 		running.current = true;
@@ -87,6 +90,7 @@ function NovelAiImageButton({ prompt, title }: { prompt: string; title: string }
 		setError("");
 		try {
 			const result = await enqueueNovelAi(() => apiPost<{ src: string }>("/api/novelai/generate", { prompt, caption: title }));
+			writeBrowserCache(result.src);
 			setSrc(result.src);
 		} catch (err) {
 			setError(err instanceof Error ? err.message : String(err));
@@ -96,10 +100,16 @@ function NovelAiImageButton({ prompt, title }: { prompt: string; title: string }
 		}
 	};
 	useEffect(() => {
-		void generate();
+		let alive = true;
+		const browserSrc = readBrowserCache();
+		if (browserSrc) { setSrc(browserSrc); return () => { alive = false; }; }
+		void apiGet<{ src: string | null }>(`/api/novelai/cached?prompt=${encodeURIComponent(prompt)}`, { bypassCache: true })
+			.then((result) => { if (alive && result.src) { writeBrowserCache(result.src); setSrc(result.src); } else if (alive) void generate(); })
+			.catch(() => { if (alive) void generate(); });
 		// 自动生图只在该图片槽首次挂载时排队一次；generate 内部 running 防重入。
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, []);
+		return () => { alive = false; };
+	}, [prompt]);
 	return (
 		<div className="nai-image-slot">
 			{src ? <ZoomImg src={src} alt={title} title={title} /> : <button type="button" className="nai-generate-btn" disabled={busy} onClick={generate}>{busy ? "NovelAI 生图中…" : `生成图片 · ${title}`}</button>}
@@ -822,6 +832,7 @@ export function Bubble({
 	const displayBody = !isUser && presentation
 		? stripProjectedFormats(body, { options: !!presentation.options?.length })
 		: body;
+	const bodyOwnsOptions = /class=["'][^"']*(?:option|choice|w2g)|<(?:select|button)\b[^>]*(?:option|choice|w2g)|(?:行动选项|选择支|选项卡)/i.test(displayBody);
 	const displayTimeline = timeline && presentation?.options?.length
 		? timeline.map((segment) => segment.kind === "text" ? { ...segment, text: stripProjectedFormats(segment.text, { options: true }) } : segment)
 		: timeline;
@@ -913,7 +924,7 @@ export function Bubble({
 					{!timeline && msg.activities && msg.activities.length > 0 && <ActivityBar activities={msg.activities} />}
 					{workflow && <BeatWorkflowCard workflow={workflow} />}
 					{worldModules && (worldModules.round > 0 || worldAudit) ? <ModularWorldCard world={worldModules} audit={worldAudit} /> : world && (world.round > 0 || worldAudit) && <WorldStateCard world={world} audit={worldAudit} />}
-					{presentation && <PresentationCards view={presentation} skin={skin} onSelectOption={onSelectOption} />}
+					{presentation && <PresentationCards view={presentation} skin={skin} onSelectOption={onSelectOption} hideOptions={bodyOwnsOptions} />}
 					{ecology && (ecology.round > 0 || ecology.public.actors.length > 0 || ecology.public.events.length > 0 || ecology.public.locations.length > 0 || ecology.discovered.actors.length > 0 || ecology.discovered.events.length > 0) && <EcologyStateCard ecology={ecology} />}
 					{(onReroll || onEdit || onRewind || onDelete || onCopy || onStore || onTts || greetingSwitch || swipe) && (
 						<div className="msg-actions">
@@ -1111,7 +1122,7 @@ function ModularWorldCard({ world, audit }: { world: ModularWorldWireView; audit
 	</details>;
 }
 
-function PresentationCards({ view, skin, onSelectOption }: { view: PresentationView; skin?: SkinProp | null; onSelectOption?: (text: string) => void }) {
+function PresentationCards({ view, skin, onSelectOption, hideOptions = false }: { view: PresentationView; skin?: SkinProp | null; onSelectOption?: (text: string) => void; hideOptions?: boolean }) {
 	const hasCardStatusFront = skin?.rules.some((rule) =>
 		/StatusPlaceHolderImpl|StatusBlock|status(?:bar|_block)?|state\\?d/i.test(`${rule.name}\n${rule.source}`),
 	) ?? false;
@@ -1122,7 +1133,7 @@ function PresentationCards({ view, skin, onSelectOption }: { view: PresentationV
 		{view.calendar && skin?.rules.some((rule) => /calendar/i.test(rule.source))
 			? <RichContent text={serializeCalendarSource(view.calendar)} skin={skin} collapsibleHtml htmlTitle="日历" />
 			: view.calendar && <NativeCalendarCard calendar={view.calendar} />}
-		{view.options && view.options.length > 0 && <details className="world-state-card" open><summary><span className="world-state-title">行动选项</span><span className="world-state-round">点击填入输入框</span></summary><div className="world-state-body presentation-options">{view.options.map((option, index) => <button type="button" className="presentation-option" key={`${index}-${option}`} onClick={() => onSelectOption?.(option)}><span>{index + 1}</span>{option}</button>)}</div></details>}
+		{!hideOptions && view.options && view.options.length > 0 && <details className="world-state-card" open><summary><span className="world-state-title">行动选项</span><span className="world-state-round">点击填入输入框</span></summary><div className="world-state-body presentation-options">{view.options.map((option, index) => <button type="button" className="presentation-option" key={`${index}-${option}`} onClick={() => onSelectOption?.(option)}><span>{index + 1}</span>{option}</button>)}</div></details>}
 	</div>;
 }
 
