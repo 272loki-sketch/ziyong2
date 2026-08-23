@@ -563,7 +563,7 @@ export class CorpusEngine {
 			const parsed = typeof raw === "string" ? parseObject(raw) : null;
 			const summary = parsed ? cleanText(parsed.summary, 2000) : "";
 			if (summary) arcs.push({ title, chunkRange: [start, end], summary });
-			else { doc.status = "failed"; doc.error = "弧线摘要生成失败"; this.#persistDocuments(); return; }
+			else { this.#fail(doc, "弧线摘要生成失败"); return; }
 		}
 		digest.arcs = arcs; digest.updatedAt = new Date().toISOString(); this.#writeDigest(docId, digest);
 
@@ -572,7 +572,7 @@ export class CorpusEngine {
 		const finalRaw = await this.#call(skill, JSON.stringify({ task: "digest-reduce-final", doc_title: doc.title, arc_summaries: arcs.map((a) => a.summary) }), 8192);
 		if (this.#abort.signal.aborted || !this.#docs.has(docId)) return;
 		const finalParsed = typeof finalRaw === "string" ? parseObject(finalRaw) : null;
-		if (!finalParsed) { doc.status = "failed"; doc.error = "全书梗概生成失败"; this.#persistDocuments(); return; }
+		if (!finalParsed) { this.#fail(doc, "全书梗概生成失败"); return; }
 		digest.synopsis = cleanText(finalParsed.synopsis, 3000);
 		const s = finalParsed.structure && typeof finalParsed.structure === "object" && !Array.isArray(finalParsed.structure) ? finalParsed.structure as Record<string, unknown> : {};
 		digest.structure = {
