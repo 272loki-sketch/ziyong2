@@ -109,11 +109,13 @@ import {
 	stageTools,
 	writeTools,
 	type MemoryHitLike,
+	type MemoryRecallHitLike,
 	type StageTool,
 	type StageToolDeps,
 	type ToolRunResult,
 } from "./tools.ts";
 import { unifiedStageToolNames } from "../tools/adapters/stage.ts";
+import { canonicalEventId } from "../memory/event-id.ts";
 import {
 	mcpStageTools,
 	mcpStageToolNames,
@@ -280,6 +282,21 @@ export interface StageEngineDeps {
 	/** 剧情库检索（memory_search 工具用）；未注入 = 该工具恒返回无命中 */
 	searchMemory?: (sessionId: string, query: string) => Promise<MemoryHitLike[]>;
 	/**
+	 * PLAN-RP-MEMORY：拍前自动召回（第一阶段：事件/纪要与证据合并检索）。
+	 * 未注入 = 主演无【剧情记忆】注入（退化为旧行为）。调用方承诺内部做 budget/topK。
+	 */
+	recallForTurn?: (sessionId: string, query: string) => Promise<MemoryRecallHitLike[]>;
+	/**
+	 * PLAN-RP-MEMORY：按事件 id 回读原文证据（第二阶段：事件 → sourceRefs → 证据块）。
+	 * 未注入 = 事件召回不附带证据；主演只拿到事件定位。
+	 */
+	recallEvidence?: (sessionId: string, eventId: string) => Promise<MemoryRecallHitLike[]>;
+	/**
+	 * PLAN-RP-MEMORY：拍前召回开关（对齐 config.injectOnTurn）。resolve false 则跳过本拍召回。
+	 * 未注入 = 只要宿主有 recallForTurn 就召。
+	 */
+	shouldRecallForTurn?: (sessionId: string) => Promise<boolean>;
+	/**
 	 * 向量库写侧三件（M-D3）。均由宿主按「当前对话 + 当前卡」绑定 MemoryScope 后注入——
 	 * **作用域不经模型**（PLAN-RP-TOOLING M-D3：scope 全隐藏），引擎只透传 sessionId。
 	 * 未注入 = 台上无对应工具（依赖缺失的工具不上清单）。
@@ -300,7 +317,18 @@ export interface StageEngineDeps {
 	writePanel?: (sessionId: string, input: { name: string; kind: string; content: string }) => { ok: true; created: boolean; reopened: boolean; activeCount: number; overLimit: boolean } | { ok: false; error: string };
 	closePanel?: (sessionId: string, name: string) => { ok: boolean; error?: string };
 	/** 被压缩裁掉的早期正文归档进剧情库（供 memory_search 召回细节）；未注入 = 只落摘要不归档 */
-	archiveCompacted?: (sessionId: string, text: string) => Promise<void>;
+	archiveCompacted?: (
+		sessionId: string,
+		text: string,
+		opts?: { sourceRefs?: Array<{ entryId: string; entryType?: string; turn?: number; charFrom?: number; charTo?: number }> },
+	) => Promise<void>;
+	/**
+	 * PLAN-RP-MEMORY：事件卡入库（旁路产物）。未注入 = 无事件索引（不影响摘要与归档）。
+	 */
+	upsertEventDigest?: (
+		sessionId: string,
+		event: import("../memory/types.ts").RpEventDigest,
+	) => Promise<{ stored: boolean }>;
 	/**
 	 * 世界书条目启停落盘（lorebook_toggle 工具用，M-D2）：写 config.disabledLore 并重装素材。
 	 * 由宿主注入——落盘与热重载归 server/ 侧（引擎不碰 server 的 writeJsonWithBackup）。
@@ -441,9 +469,126 @@ export function progressLine(ws: TurnWorkspace, packNames?: string[], forcedSkil
 	return `【进度】${parts.join("；")}。${packs}${forced}`;
 }
 
+/** 轻量历史回照预判：普通拍不发云端 embedding，明确过去/旧账信号才进入召回。 */
+export function shouldRecallHistory(userText: string): boolean {
+	return /还记得|记得吗|第一次|初次|初遇|当年|以前|过去|那天|那次|之前|曾经|旧事|回想|回忆|再次提到|又提到|那把|那封|那个约定|你说过|我说过/u.test(userText);
+}
+
+export function sideTextTimeoutMs(step: SideModelStep): number {
+	if (step === "writer") return 900_000;
+	if (step === "compaction") return 120_000;
+	if (step === "memoryEvents") return 60_000;
+	return 90_000;
+}
+
+export function sideTextRetryLimit(step: SideModelStep): number {
+	if (step === "writer") return MODEL_MAX_RETRIES;
+	if (step === "memoryEvents") return 1;
+	return Math.min(3, MODEL_MAX_RETRIES);
+}
+
 /** 判定注入：收笔前一次性；不回报篇幅，续写/ask/收笔归模型判断。 */
 export function verdictInjection(userName: string): string {
 	return `【判定】继续写、必要时 \`ask\`，或 \`draft_seal\` 收笔——你判断；一般走向自行决定，只有用户主权未定且此刻不定就无法继续时才询问。`;
+}
+
+/**
+ * PLAN-RP-MEMORY：召回命中 → 注入块。
+ * kind 标注〔事件〕/〔纪要〕/〔早期归档〕，注入块不敦促模型逐字复述。
+ */
+function formatMemoryRecallHit(
+	h: MemoryRecallHitLike,
+	_index: number,
+): { tag: string; kind: "event" | "digest" | "evidence"; text: string } | null {
+	if (!h?.text) return null;
+	const kind = h.meta?.kind;
+	const tag = (kind === "event" && h.meta?.eventId)
+		? `${h.meta.eventId}`
+		: h.meta?.title || (kind === "event" ? "事件" : kind === "evidence" ? "早期归档" : "纪要");
+	let kindLabel: "event" | "digest" | "evidence";
+	if (kind === "event") kindLabel = "event";
+	else if (kind === "evidence") kindLabel = "evidence";
+	else kindLabel = "digest";
+	let readable = h.text;
+	if (kind === "event") {
+		try {
+			const event = JSON.parse(h.text) as { title?: string; summary?: string; tags?: string[]; recallAnchors?: string[] };
+			readable = [event.title, event.summary, event.tags?.length ? `标签：${event.tags.join("、")}` : ""].filter(Boolean).join("\n");
+		} catch {
+			// 旧事件块不是 JSON 时保留原文。
+		}
+	}
+	const text = readable.length > 600 ? `${readable.slice(0, 600)}…` : readable;
+	return { tag, kind: kindLabel, text };
+}
+
+/** 解析事件候选旁路输出：{ events: RpEventDigest[] }，宽容解析（剥围栏/首 { 试切）。 */
+function parseMemoryEventPayload(text: string, allowedRefs: Array<{ entryId: string; entryType?: string; turn?: number }> = []): import("../memory/types.ts").RpEventDigest[] | null {
+	let t = text.trim();
+	const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/);
+	if (fence) t = fence[1].trim();
+	let idx = 0;
+	while (true) {
+		const start = t.indexOf("{", idx);
+		if (start === -1) break;
+		let depth = 0;
+		let inStr = false;
+		let esc = false;
+		let end = -1;
+		for (let i = start; i < t.length; i++) {
+			const ch = t[i];
+			if (inStr) {
+				if (esc) esc = false;
+				else if (ch === "\\") esc = true;
+				else if ( ch === '"') inStr = false;
+				continue;
+			}
+			if ( ch === '"') inStr = true;
+			else if ( ch === "{") depth++;
+			else if ( ch === "}") {
+				depth--;
+				if (depth === 0) { end = i; break; }
+			}
+		}
+		if (end === -1) break;
+		try {
+			const obj = JSON.parse(t.slice(start, end + 1)) as { events?: unknown };
+			if (!obj || typeof obj !== "object" || !Array.isArray(obj.events)) { idx = start + 1; continue; }
+			const out: import("../memory/types.ts").RpEventDigest[] = [];
+			for (const e of obj.events) {
+				if (!e || typeof e !== "object") continue;
+				const o = e as Record<string, unknown>;
+				if (typeof o.id !== "string" || !o.id) continue;
+				if (typeof o.title !== "string" || !o.title.trim()) continue;
+				const importance = o.importance === "core" || o.importance === "major" || o.importance === "normal" ? o.importance : "normal";
+				out.push({
+					kind: "rp-event-digest",
+					id: o.id,
+					...(typeof o.sourceKey === "string" && o.sourceKey ? { sourceKey: o.sourceKey } : {}),
+					title: String(o.title),
+					status: o.status === "active" || o.status === "candidate" || o.status === "resolved" || o.status === "retired" ? o.status : "active",
+					importance,
+					tags: Array.isArray(o.tags) ? o.tags.map(String).filter(Boolean) : [],
+					recallAnchors: Array.isArray(o.recallAnchors) ? o.recallAnchors.map(String).filter(Boolean) : [],
+					summary: typeof o.summary === "string" ? o.summary : "",
+					evidenceLevel: o.evidenceLevel === "source-backed" ? "source-backed" : "summary-only",
+					...(typeof o.time === "string" && o.time ? { time: o.time } : {}),
+					...(typeof o.location === "string" && o.location ? { location: o.location } : {}),
+					...(Array.isArray(o.participants) ? { participants: o.participants.map(String).filter(Boolean) } : {}),
+					sourceRefs: Array.isArray(o.sourceRefs)
+						? o.sourceRefs
+							.filter((ref): ref is Record<string, unknown> => !!ref && typeof ref === "object" && typeof (ref as Record<string, unknown>).entryId === "string")
+							.filter((ref) => allowedRefs.length === 0 || allowedRefs.some((allowed) => allowed.entryId === ref.entryId))
+							.map((ref) => ({ entryId: String(ref.entryId), ...(typeof ref.entryType === "string" ? { entryType: ref.entryType } : {}), ...(typeof ref.turn === "number" ? { turn: ref.turn } : {}), ...(typeof ref.charFrom === "number" ? { charFrom: ref.charFrom } : {}), ...(typeof ref.charTo === "number" ? { charTo: ref.charTo } : {}) }))
+						: [],
+				});
+			}
+			return out;
+		} catch {
+			idx = start + 1;
+		}
+	}
+	return null;
 }
 
 /** 进度行替换语义：移除 convo 里上一条【进度】再推新行（判定/记账/谢幕一次性，不替换） */
@@ -1151,12 +1296,60 @@ export class StageEngine {
 				return parsed;
 			})
 			: Promise.resolve(undefined);
-		const [arrivalCandidate, continuityCandidate] = await Promise.all([arrivalPromise, continuityPromise]);
+		// PLAN-RP-MEMORY：拍前自动召回——受 injectOnTurn 配置与宿主依赖双重门控；不进正文关键路径（缺失即降级）。
+		const memoryRecallRequested =
+			!rerollPrep && !legacyBackstage && !!this.#deps.recallForTurn && shouldRecallHistory(lastUserText);
+		const memoryRecallPromise: Promise<MemoryRecallHitLike[] | undefined> =
+			memoryRecallRequested
+				? Promise.resolve().then(async () => {
+					const shouldRecall = await (this.#deps.shouldRecallForTurn?.(sm.getSessionId()) ?? true);
+					if (!shouldRecall) return undefined;
+					const hits = await Promise.race([
+						this.#deps.recallForTurn!(sm.getSessionId(), lastUserText),
+						new Promise<MemoryRecallHitLike[]>((resolve) => setTimeout(() => resolve([]), 15_000)),
+					]);
+					if (!hits || hits.length === 0) return undefined;
+					// 命中事件的证据再沿 sourceRefs 取回（第二阶段；失败降级为仅有事件定位）
+					const withEvidence: MemoryRecallHitLike[] = [];
+					for (const h of hits) {
+						withEvidence.push(h);
+						if (h.meta?.kind === "event" && h.meta?.eventId && this.#deps.recallEvidence) {
+							const evd = await this.#deps.recallEvidence(sm.getSessionId(), h.meta.eventId).catch(() => []);
+							withEvidence.push(...evd.map((e) => ({ ...e, meta: { ...e.meta, kind: "evidence" as const } })));
+						}
+					}
+					return withEvidence;
+				}).catch(() => undefined)
+				: Promise.resolve(undefined);
+		const [arrivalCandidate, continuityCandidate, memoryHits] = await Promise.all([
+			arrivalPromise,
+			continuityPromise,
+			memoryRecallPromise,
+		]);
 		if (sm.getLeafId() === prepLeafId) {
 			if (arrivalCandidate) literaryEcology = arrivalCandidate;
 			if (continuityCandidate) literaryContinuity = continuityCandidate;
 		} else {
 			ev.onActivity?.("拍前生态/连续性结果已丢弃（期间切换了分支）");
+		}
+		// 记忆回照注入块（叶守卫：只在当前分支仍相同时采用）
+		let memoryRecallBlocks: Array<{ tag: string; kind: "event" | "digest" | "evidence"; text: string }> | undefined;
+		if (memoryHits && sm.getLeafId() === prepLeafId) {
+			const seenRecall = new Set<string>();
+			memoryRecallBlocks = (memoryHits as MemoryRecallHitLike[])
+				.map((h, i) =>
+					formatMemoryRecallHit(h, i),
+				)
+				.filter((b): b is { tag: string; kind: "event" | "digest" | "evidence"; text: string } => {
+					if (!b) return false;
+					const key = `${b.kind}|${b.tag}|${b.text.slice(0, 80)}`;
+					if (seenRecall.has(key)) return false;
+					seenRecall.add(key);
+					return true;
+				})
+				.slice(0, 6);
+		} else if (memoryHits && sm.getLeafId() !== prepLeafId) {
+			ev.onActivity?.("剧情记忆召回已丢弃（期间切换了分支）");
 		}
 		if (!rerollPrep && config.literaryEcologyEnabled === true && !legacyBackstage && ecologyGlobalSkill && ecologyCardSkill) {
 			const poolSignal = new AbortController();
@@ -1276,6 +1469,7 @@ export class StageEngine {
 			literaryDirection,
 			literaryWorld: adaptiveWorldEnabled ? formatModularWorldInjection(modularWorld, worldManifest) : undefined,
 			literaryEcology: config.literaryEcologyEnabled === true ? formatLiteraryEcologyInjection(literaryEcology) : undefined,
+			memoryRecall: memoryRecallBlocks,
 			writerGuidance: [
 				...materials.writerGuidance,
 				...(workflowSkill(materials.skillFiles, "writer")
@@ -1523,7 +1717,15 @@ export class StageEngine {
 						continuity: rerollPrep?.literaryContinuity ? "reused" : continuityRequested ? (literaryContinuity ? "success" : "degraded") : "skipped",
 						director: rerollPrep && (rerollPrep.literaryDirection || rerollPrep.literaryDirectionData) ? "reused" : directorRequested ? (literaryDirection ? "success" : "degraded") : "skipped",
 						ecologyArrival: rerollPrep?.literaryEcology ? "reused" : arrivalRequested ? (arrivalCandidate ? "success" : "degraded") : "skipped",
+						memoryRecall: memoryRecallRequested ? (memoryRecallBlocks?.length ? "success" : "degraded") : "skipped",
 					},
+					...(memoryRecallRequested ? {
+						memoryRecall: {
+							triggered: true,
+							results: memoryRecallBlocks?.length ?? 0,
+							queryChars: lastUserText.length,
+						},
+					} : {}),
 				},
 					rpWorkflow: {
 					planWrites: ws.planWrites,
@@ -1747,7 +1949,7 @@ export class StageEngine {
 		// 放在谢幕前的最后一步——记账已落，摘要能读到最新账本；叶守卫在 runCompaction 内。
 		// 压缩失败/未到期都只是跳过，下一拍会再判一次。
 		if (entryId && !aborted && finalText) {
-			await this.#compact(config.compactEveryNTurns ?? 30);
+			await this.#compact(config.compactEveryNTurns ?? 30, undefined, entryId);
 		}
 		return { aborted, entryId };
 	}
@@ -1778,21 +1980,95 @@ export class StageEngine {
 	async #compact(
 		everyNTurns: number,
 		minChars?: number,
+		sourceEntryId?: string,
 	): Promise<CompactOutcome> {
 		const ev = this.#deps.events ?? {};
 		const sm = this.#deps.getSessionManager();
 		const { config, card } = loadStageMaterials(this.#deps.cwd);
 		try {
 			const branch = sm.getBranch() as BranchEntryLike[];
+			const memoryExpectedLeaf = sm.getLeafId();
 			const c = await runCompaction(
 				{
 					// 4096：摘要要装下前情/人物/伏笔/事实账五节，且要合并上一份摘要
 					sideText: (sp, ut) => this.#sideText("compaction", sp, ut, 4096),
 					appendSummaryEntry: (data: RpSummaryData) => sm.appendCustomEntry(SUMMARY_ENTRY_TYPE, data),
+					normalizeSummary: (summary, events) => {
+						const refs = branch
+							.filter((entry) => typeof entry.id === "string")
+							.map((entry) => ({ entryId: entry.id!, entryType: entry.type }));
+						let normalized = summary;
+						for (const event of events) {
+							const eventRefs = event.sourceRefs.filter((ref) => refs.some((candidate) => candidate.entryId === ref.entryId));
+							const canonical = canonicalEventId(
+								{ sessionId: sm.getSessionId(), card: config.card },
+								{ ...event, sourceRefs: eventRefs.length ? eventRefs : refs },
+							);
+							for (const alias of [event.id, event.sourceKey].filter((value): value is string => !!value)) {
+								const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+								normalized = normalized.replace(new RegExp(escaped, "g"), canonical);
+							}
+						}
+						return normalized;
+					},
 					getLeafId: () => sm.getLeafId(),
 					archive: this.#deps.archiveCompacted
-						? (text) => this.#deps.archiveCompacted!(sm.getSessionId(), text)
+						? (text, opts) =>
+									sm.getLeafId() === memoryExpectedLeaf
+									? this.#deps.archiveCompacted!(sm.getSessionId(), text, opts && { sourceRefs: opts.sourceRefs })
+									: Promise.resolve()
 						: undefined,
+					// PLAN-RP-MEMORY：事件候选提取（memory workflow skill + 旁路模型）
+					extractEvents:
+						this.#deps.upsertEventDigest
+							? async (text, opts) => {
+									if (sm.getLeafId() !== memoryExpectedLeaf) return;
+									const materials = loadStageMaterials(this.#deps.cwd);
+									const skill = workflowSkill(materials.skillFiles, "memory");
+									if (!skill) return;
+									const sys = `你是梨园的记忆整理旁路。遵守工作流 skill 的规则。
+
+# 工作流 skill：剧情记忆摘要
+${skill.body ?? ""}`;
+									const user = `<narrative>\n${text}\n</narrative>` +
+										(opts?.sourceRefs?.length
+											? `\n\n<sourceRefs>\n${JSON.stringify(opts.sourceRefs)}\n</sourceRefs>`
+											: "") +
+										"\n\n请提取事件卡（仅 JSON）。";
+									const resp = await this.#sideText("memoryEvents", sys, user, 4096);
+									if (typeof resp !== "string") { ev.onActivity?.("剧情记忆：事件候选提取失败"); return; }
+									const events = parseMemoryEventPayload(resp, opts?.sourceRefs ?? []);
+									if (!events || events.length === 0) { ev.onActivity?.("剧情记忆：本段无高价值事件"); return; }
+									let branchLeafId: string | undefined;
+									try { branchLeafId = sm.getLeafId() ?? undefined; } catch { /* 无叶即无分支标记 */ }
+									const srcs = (opts?.sourceRefs ?? []).map((s) => ({ entryId: s.entryId, entryType: s.entryType as string | undefined }));
+									for (const e of events) {
+										const withRefs: import("../memory/types.ts").RpEventDigest = {
+											...e,
+											sourceRefs: e.sourceRefs?.length ? e.sourceRefs : srcs,
+											branchLeafId,
+										};
+										await this.#deps.upsertEventDigest!(sm.getSessionId(), withRefs).catch(() => {});
+									}
+									ev.onActivity?.(`剧情记忆：登记 ${events.length} 条事件候选`);
+							  }
+							: undefined,
+					appendEventDigests:
+						this.#deps.upsertEventDigest
+							? async (events, opts) => {
+									if (sm.getLeafId() !== memoryExpectedLeaf) return;
+									const branchLeafId = sm.getLeafId() ?? undefined;
+								const sourceRefs = (opts?.sourceRefs ?? []).map((s) => ({ entryId: s.entryId, entryType: s.entryType }));
+									const allowed = new Set(sourceRefs.map((source) => source.entryId));
+									for (const event of events) {
+										await this.#deps.upsertEventDigest!(sm.getSessionId(), {
+											...event,
+											sourceRefs: event.sourceRefs?.filter((ref) => allowed.has(ref.entryId)).length ? event.sourceRefs.filter((ref) => allowed.has(ref.entryId)) : sourceRefs,
+											branchLeafId,
+										}).catch(() => {});
+									}
+								}
+							: undefined,
 					onActivity: (d) => ev.onActivity?.(d),
 				},
 				{
@@ -1806,6 +2082,16 @@ export class StageEngine {
 				},
 			);
 			if (c.kind === "failed") console.error(`[stage-compact] 压缩跳过：${c.error}`);
+			if (sourceEntryId) {
+				sm.appendCustomEntry("rp-turn-diagnostic", {
+					version: 1,
+					sourceEntryId,
+					stage: "memory",
+					kind: c.kind,
+					...(c.kind === "failed" ? { error: c.error.slice(0, 240) } : {}),
+					...(c.kind === "compacted" ? { turns: c.turns, chars: c.chars } : {}),
+				});
+			}
 			if (c.kind === "compacted") sm.flush();
 			return c;
 		} catch (err) {
@@ -2034,7 +2320,16 @@ export class StageEngine {
 						name === "skill_read" ? (call.arguments as { name?: string } | undefined)?.name : undefined;
 					if (skillReadName && o.forcedSkills.includes(skillReadName)) readThisStep.add(skillReadName);
 					const unreadForced = o.forcedSkills.filter((n) => !readThisStep.has(n));
-					if (name === "draft_append" && unreadForced.length > 0 && !forcedNudgedForStep) {
+					if (name === "draft_append" && appendedThisRound) {
+						o.ws.appendRejects++;
+						r = {
+							text: "本段未受理：一次模型生成只接收一个稿段。先回看刚写下的上文，判断剩余路标是否仍成立；需要时重拟计划，再在下一轮提交下一段。",
+							activity: "同轮第二段被拦下——先回看重评估",
+							ok: false,
+						};
+						// 工具参数已经流式上屏；拒收后用权威工作区重同步，撤掉未受理段。
+						ev.onDraftResync?.(splitDraftSegments(o.ws.draft));
+					} else if (name === "draft_append" && unreadForced.length > 0 && !forcedNudgedForStep) {
 						forcedNudgedForStep = true;
 						r = {
 							text: `本次未受理：先 \`skill_read\`${unreadForced.map((n) => `「${n}」`).join("")}构思这个路标，再重交。`,
@@ -2493,11 +2788,19 @@ export class StageEngine {
 		} catch (error) {
 			return { error: error instanceof Error ? error.message : String(error) };
 		}
+		const requestController = new AbortController();
+		const abortRequest = () => requestController.abort();
+		if (signal) {
+			if (signal.aborted) requestController.abort();
+			else signal.addEventListener("abort", abortRequest, { once: true });
+		}
+		const timeoutMs = sideTextTimeoutMs(step);
+		const maxRetries = sideTextRetryLimit(step);
 		const options: Record<string, unknown> = {
 			apiKey: auth.apiKey,
 			headers: auth.headers,
 			maxTokens,
-			signal,
+			signal: requestController.signal,
 			// 精修/场记/压缩是 harness 的机械窄题，默认强制关思考：zen go 对 low/high 无可靠节流
 			//（8/02 实测），放开推理会把 maxTokens 整个烧在隐形思考里、正文零输出。
 			// 合约声明是判断题（整卡+预设通读），由调用点透传会话思考档（undefined＝随供应商默认）。
@@ -2525,8 +2828,9 @@ export class StageEngine {
 				if (e.type === "done") final = e.message ?? null;
 				else if (e.type === "error") {
 					const error = e.error?.errorMessage || `stopReason=${e.error?.stopReason ?? "?"}`;
+					if (requestController.signal.aborted) return { error: "旁路请求已取消或超时" };
 					// 流式中途失败（如上游 worker 断流）也应退避重试；耗尽后才如实失败。
-					if (attempt < MODEL_MAX_RETRIES) {
+					if (attempt < maxRetries) {
 						await new Promise((r) => setTimeout(r, 600 * Math.min(2 ** attempt, 8)));
 						return call(attempt + 1);
 					}
@@ -2534,7 +2838,8 @@ export class StageEngine {
 				}
 			}
 			if (!final) {
-				if (attempt < MODEL_MAX_RETRIES) {
+				if (requestController.signal.aborted) return { error: "旁路请求已取消或超时" };
+				if (attempt < maxRetries) {
 					await new Promise((r) => setTimeout(r, 500));
 					return call(attempt + 1);
 				}
@@ -2542,14 +2847,29 @@ export class StageEngine {
 			}
 			const text = textOfAssistant(final);
 			if (text) return text;
-			if (attempt < MODEL_MAX_RETRIES) return call(attempt + 1);
+			if (attempt < maxRetries) return call(attempt + 1);
 			// 部分 OpenAI 兼容层在 SSE/compat 非流式均可能只返回空 content；最后使用
 			// 原 model + response-format 倾向的非流式兼容再试一次，仍失败才如实停链。
 			return { error: "最终消息无文本" };
 		} catch (err) {
-			return attempt < MODEL_MAX_RETRIES ? call(attempt + 1) : { error: err instanceof Error ? err.message : String(err) };
+			if (requestController.signal.aborted) return { error: "旁路请求已取消或超时" };
+			return attempt < maxRetries ? call(attempt + 1) : { error: err instanceof Error ? err.message : String(err) };
 		}
 		};
-		return call(0);
+		const request = call(0);
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const timeout = new Promise<{ error: string }>((resolve) => {
+			timer = setTimeout(() => {
+				requestController.abort();
+				resolve({ error: `步骤 ${step} 超时（${timeoutMs}ms）` });
+			}, timeoutMs);
+		});
+		try {
+			return await Promise.race([request, timeout]);
+		} finally {
+			if (timer) clearTimeout(timer);
+			if (signal) signal.removeEventListener("abort", abortRequest);
+			void request.catch(() => undefined);
+		}
 	}
 }

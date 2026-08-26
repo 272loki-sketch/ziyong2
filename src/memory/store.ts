@@ -46,7 +46,7 @@ export function loadChunks(cwd: string, scope: MemoryScope, storeId: string): Me
 	return out;
 }
 
-function persistChunks(
+export function persistChunks(
 	cwd: string,
 	scope: MemoryScope,
 	storeId: string,
@@ -72,7 +72,51 @@ export function deleteStoreFiles(cwd: string, scope: MemoryScope, storeId: strin
 	clearStore(cwd, scope, storeId);
 }
 
-/** 切块：按段落/长度 */
+/**
+ * 分级保活（PLAN-RP-MEMORY §5.2）。
+ * core/major 事件与证据永不自动淘汰；优先淘汰 minor 普通块，再 normal。
+ * 排序键：`importance 权重 desc → createdAt asc`；淘汰从队尾（最该删）开始。
+ */
+export function evictionRank(c: MemoryChunk): number {
+	const imp = c.meta?.importance;
+	const kind = c.meta?.kind;
+	if (kind === "event" && (imp === "core" || imp === "major")) return 4;
+	switch (imp) {
+		case "core":
+			return kind === "evidence" ? 3 : 4;
+		case "major":
+			return 3;
+		case "normal":
+			return 2;
+		default:
+			return 1; // minor / 无标记（legacy）
+	}
+}
+
+/** 超出 maxChunks 时按优先级淘汰最旧条目；core/major 不被自动删除。 */
+export function evictByPriority(chunks: MemoryChunk[], maxChunks: number): MemoryChunk[] {
+	if (chunks.length <= maxChunks) return chunks;
+	// 删除顺序：重要性权重低的在前，同权重更旧的在前。
+	const deletionOrder = [...chunks].sort((a, b) => {
+		const ra = evictionRank(a);
+		const rb = evictionRank(b);
+		if (ra !== rb) return ra - rb;
+		return (a.createdAt ?? "").localeCompare(b.createdAt ?? "");
+	});
+	let n = chunks.length;
+	const dropped = new Set<string>();
+	for (const c of deletionOrder) {
+		if (n <= maxChunks) break;
+		if (evictionRank(c) === 4) continue; // core 永不自动删
+		dropped.add(c.id);
+		n--;
+	}
+	return chunks.filter((c) => !dropped.has(c.id));;
+}
+
+/**
+ * 切块：按段落/长度。
+ */
 export function splitTextChunks(text: string, maxLen = 480): string[] {
 	const t = text.replace(/\r\n/g, "\n").trim();
 	if (!t) return [];
@@ -140,9 +184,9 @@ export async function upsertTexts(
 			createdAt: now,
 		});
 	}
-	while (chunks.length > maxChunks) chunks.shift();
-	persistChunks(cwd, scope, storeId, chunks);
-	return { added: toAdd.length, total: chunks.length };
+	const evicted = chunks.length > maxChunks ? evictByPriority(chunks, maxChunks) : chunks;
+	persistChunks(cwd, scope, storeId, evicted);
+	return { added: toAdd.length, total: evicted.length };
 }
 
 /** 列表条目（不含 embedding） */
@@ -256,9 +300,9 @@ export async function mergeNarrativeText(
 		},
 		createdAt: now,
 	});
-	while (chunks.length > maxChunks) chunks.shift();
-	persistChunks(cwd, scope, "narrative", chunks);
-	return { merged: false, added: 1, total: chunks.length, id };
+	const kept = chunks.length > maxChunks ? evictByPriority(chunks, maxChunks) : chunks;
+	persistChunks(cwd, scope, "narrative", kept);
+	return { merged: false, added: 1, total: kept.length, id };
 }
 
 /**
@@ -308,12 +352,13 @@ export async function searchStore(
 	query: string,
 	topK: number,
 	embedCtx: EmbedContext,
+	predicate?: (chunk: MemoryChunk) => boolean,
 ): Promise<MemorySearchHit[]> {
 	const q = query.trim();
 	if (!q) return [];
 	const [qe] = await embedMany([q], embedCtx);
 	if (!qe) return [];
-	const chunks = loadChunks(cwd, scope, storeId);
+	const chunks = loadChunks(cwd, scope, storeId).filter((chunk) => !predicate || predicate(chunk));
 	// 过滤与当前模式维度明显不兼容的旧块（长度差太大）
 	const dim = qe.length;
 	const scored = chunks

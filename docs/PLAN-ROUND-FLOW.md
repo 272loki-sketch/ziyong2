@@ -39,6 +39,9 @@
 >   模型完成后按 `rp-world-audit → rp-world-state → rp-ecology-state` 固定顺序落树，
 >   绝不从模型回调直接写分支。世界引擎现已升级为**角色卡自适应模块化 v2**（卡级画像/
 >   Manifest/模块 Skill），权威设计在 `docs/PLAN-WORLD-ENGINE.md`。
+> - **记忆后台**：压缩摘要采用数据库式 `version=2` envelope（`summaryMarkdown + events`），
+>   事件 canonical id 由代码按 sourceRef 生成；归档证据与事件卡写入采用 fire-and-forget，
+>   不得阻塞 `agent end`。拍前只有命中历史回照预判才触发云端召回，超时降级为摘要+状态。
 > - **失败降级**：aftermath 失败仍落一轮 `degraded` 生态快照（轮次+1、事实保留），
 >   世界失败保留旧快照；旁路流式异常自动做一次非流式降级再失败。
 > - **搜索熔断**：DuckDuckGo 人机验证命中后熔断 30 分钟，直接走 Bing。
@@ -355,5 +358,20 @@ draft_append——模型进入「执行流水线」模式，与「每段后重�
 1. 【思考的用法】退回纯纪律（思考与正文分界 + 机械纪律归验收器），分轮职责全部移除
 2. **同轮连发门禁（engine.ts）**：一轮生成里只允许演一段——本轮已 append 过后再来的
    draft_append 拒收，回喂四问，强制模型停下思考、下一次生成再落笔。回看→评估→再演
-   必须在两次生成之间发生，不能靠工具连发绕过
+   必须在两次生成之间发生，不能靠工具连发绕过。拒收段若已流式上屏，同步触发 `onDraftResync`
+   以工作区权威稿件撤掉未受理段；拒收次数计入 `appendRejects` 供演出回放诊断。
 3. 新增测试：同轮两个 append → 第二个被拒收（564 绿）
+
+## 13. 8/26 记忆系统落地（PLAN-RP-MEMORY）
+
+长局记忆从「摘要 + 向量库」升级为**数据库式两级纪要 + 证据召回**，流程骨架不变：
+
+- **拍前**：新增旁路自动召回（与生态 arrival / 连续性同批并行）——按用户输入
+  `recallForTurn` 命中事件 → `recallEvidence` 取原文证据 → 注入【剧情记忆】；
+  断裂/超时/叶切换整块丢弃，不阻塞正文首字。
+- **压缩时（拍后，关键路径外）**：被裁区间走 `workflow: memory` Skill 提取事件卡
+  （`skills/剧情记忆摘要`）+ 归档带 sourceRefs + 两段式增量摘要。
+- **主演仍只写正文**：记忆的写侧全部是旁路（场记/事件提取/压缩摘要），主演只读
+  【剧情记忆】【前情提要】与 `memory_search`；搜索无命中仍有「不得臆造、可模糊化」纪律。
+- 权威排序：已提交分支事实 > rp-state/world/ecology/outline > rp-summary v2（第二套事实权威）>
+  事件纪要 > 归档证据（细节）。事件卡不推翻 rp-state / rp-outline。

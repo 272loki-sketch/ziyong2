@@ -132,6 +132,7 @@ function diagnosticFor(branch: BranchEntryLike[], index: number, entry: BranchEn
 	const prep = recordOf(details.rpPrep);
 	const workflow = recordOf(details.rpWorkflow);
 	const prepStatus = recordOf(prep?.workflowStatus) ?? {};
+	const memoryRecall = recordOf(prep?.memoryRecall);
 	const timeline = Array.isArray(details.rpTimeline) ? details.rpTimeline : [];
 	const counts = timeline.reduce((result, item) => {
 		const row = recordOf(item);
@@ -147,12 +148,14 @@ function diagnosticFor(branch: BranchEntryLike[], index: number, entry: BranchEn
 	const commits: TurnDiagnosticView["artifacts"]["commits"] = [];
 	let outlineReconcileSeen = false;
 	let scribeDiagnostic: Record<string, unknown> | undefined;
+	let memoryDiagnostic: Record<string, unknown> | undefined;
 	for (let i = index + 1; i < branch.length; i++) {
 		const next = branch[i];
 		if (next.type === "user" || next.message?.role === "user" || next.message?.role === "assistant") break;
 		if (next.type === "custom" && next.customType === "rp-turn-diagnostic") {
 			const data = customData(next);
 			if (text(data?.sourceEntryId) === entry.id && text(data?.stage) === "scribe") scribeDiagnostic = data;
+			if (text(data?.sourceEntryId) === entry.id && text(data?.stage) === "memory") memoryDiagnostic = data;
 			continue;
 		}
 		if (next.type !== "custom" || !next.customType || !["rp-state", "rp-world-audit", "rp-world-state", "rp-ecology-state", "rp-outline-proposal", "rp-outline"].includes(next.customType)) continue;
@@ -210,6 +213,7 @@ function diagnosticFor(branch: BranchEntryLike[], index: number, entry: BranchEn
 		stage("continuity", "文学连续性", prepStatus.continuity, prep?.literaryContinuity ? "success" : "skipped", prep?.literaryContinuity ? "连续性工件已生成" : "本拍未触发", safeFields(recordOf(prep?.literaryContinuity), ["positions", "ongoingActions", "promisesAndDeadlines", "unresolvedPlayerChoices", "uncertainties"])),
 		stage("director", "Stitches 导演", prepStatus.director, prep?.literaryDirectionData ? "success" : typeof prep?.literaryDirection === "string" ? "reused" : "skipped", prep?.literaryDirectionData ? "导演工件已生成" : typeof prep?.literaryDirection === "string" ? "沿用旧导演工件" : "本拍未运行", safeFields(recordOf(prep?.literaryDirectionData), ["scenePressure", "characterInitiatives", "personalThreads", "candidateBeats", "relationshipLimit", "playerStop"])),
 		stage("ecology-arrival", "生态抵达", prepStatus.ecologyArrival, prep?.literaryEcology ? "success" : "skipped", prepStatus.ecologyArrival === "degraded" ? "候选失败或门禁拒绝，沿用上一快照" : prep?.literaryEcology ? "生态候选已交给导演" : "生态未运行", safeFields(recordOf(prep?.literaryEcology), ["round", "digest"])),
+		stage("memory-recall", "剧情记忆召回", prepStatus.memoryRecall, memoryRecall?.results ? "success" : prepStatus.memoryRecall === "degraded" ? "degraded" : "skipped", prepStatus.memoryRecall === "degraded" ? "召回失败或超时，按摘要与状态继续" : memoryRecall?.results ? `命中 ${number(memoryRecall.results)} 条历史记忆` : "本拍未触发历史回照", safeFields(memoryRecall, ["triggered", "results", "queryChars"])),
 		stage("writer", "主演分段演出", undefined, workflowStats ? "success" : "failed", workflowStats ? `${workflowStats.appends || workflowStats.writes} 个稿段 · ${workflowStats.rounds} 轮` : "缺少主演工作流工件", workflowStats),
 		stage("ledger", "角色账本", undefined, ledgerStatus, ledgerSummary, safeFields(scribeDiagnostic, ["kind", "reason", "error"])),
 		stage("world-facts", "拍后事实信封", undefined, factStatus, factStatus === "success" ? "已提取带证据事实" : factStatus === "failed" ? worldAuditSummary : "世界链未运行", worldAudit?.data),
@@ -219,6 +223,7 @@ function diagnosticFor(branch: BranchEntryLike[], index: number, entry: BranchEn
 		stage("ecology-aftermath", "生态 aftermath", undefined, ecologyCommit?.status === "degraded" ? "degraded" : ecologyCommit ? "committed" : "skipped", ecologyCommit ? ecologyCommit.summary : "拍后生态未产生新快照", ecologyCommit?.data),
 		stage("curtain", "独立谢幕格式", undefined, curtain ? "success" : "skipped", curtain ? "格式工件已生成" : "本拍没有额外格式", curtain ? { chars: curtain.length } : undefined),
 		stage("outline-reconcile", "大纲自动校准", undefined, runtime?.outline?.status ?? (outlineCommit ? "committed" : outlineProposal?.status === "rejected" ? "rejected" : outlineProposal ? "pending" : "skipped"), runtime?.outline?.summary ?? (outlineCommit ? "校准结果已写入动态大纲" : outlineProposal?.status === "rejected" ? outlineProposal.summary : outlineProposal ? "校准提案等待确认" : "本拍未触发"), outlineProposal?.data),
+		stage("memory-settlement", "记忆压缩与事件索引", undefined, memoryDiagnostic?.kind === "compacted" ? "success" : memoryDiagnostic?.kind === "failed" ? "failed" : memoryDiagnostic?.kind === "skipped" ? "skipped" : "pending", memoryDiagnostic?.kind === "compacted" ? `已压缩 ${number(memoryDiagnostic.turns)} 拍` : memoryDiagnostic?.kind === "failed" ? `记忆压缩失败：${text(memoryDiagnostic.error)}` : memoryDiagnostic?.kind === "skipped" ? "本拍未到压缩条件" : "记忆结算尚无留痕", safeFields(memoryDiagnostic, ["kind", "turns", "chars", "error"])),
 	];
 	return {
 		version: 1,

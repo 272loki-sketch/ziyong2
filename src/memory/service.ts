@@ -5,28 +5,37 @@
  * 读写一律带 MemoryScope（角色卡 + 会话）
  */
 
+import { randomBytes } from "node:crypto";
+import { embedOne } from "./embed.ts";
 import { memoryScopeId, loadMemoryConfig, patchMemoryConfig, publicMemoryConfig, saveMemoryConfig } from "./config.ts";
 import type { EmbedContext } from "./embed.ts";
+import { canonicalEventId } from "./event-id.ts";
 import {
 	clearStore,
 	countChunks,
 	deleteChunkById,
 	deleteStoreFiles,
+	evictByPriority,
 	listChunks,
+	loadChunks,
 	mergeNarrativeText,
+	persistChunks,
 	reembedStore,
 	searchStore,
 	splitTextChunks,
 	upsertTexts,
 } from "./store.ts";
 import type {
+	MemoryChunk,
 	MemoryChunkListItem,
 	MemoryChunkMeta,
 	MemoryConfig,
 	MemoryScope,
 	MemorySearchHit,
+	MemorySourceRef,
 	MemoryStoreConfig,
 	MemoryStoreStats,
+	RpEventDigest,
 } from "./types.ts";
 import { DEFAULT_MEMORY_CONFIG } from "./types.ts";
 
@@ -228,6 +237,91 @@ export function memoryRemoveStore(
 }
 
 /**
+ * 一级事件卡入剧情库（PLAN-RP-MEMORY §2.1）。
+ * 事件卡是检索投影 + 原文锚定：kind=event，按 importance 分级保活（core/major 不淘汰）。
+ * 每个事件一条块；同 id 重复写入时更新（不再追加）。
+ */
+export async function memoryUpsertEventDigest(
+	cwd: string,
+	scope: MemoryScope,
+	event: RpEventDigest,
+): Promise<{ stored: boolean; error?: string }> {
+	const cfg = loadMemoryConfig(cwd);
+	if (!cfg.enabled) return { stored: false, error: "memory disabled" };
+	const store = cfg.stores.find((s) => s.id === "narrative" && s.enabled);
+	if (!store) return { stored: false, error: "narrative store disabled" };
+	const sc = normalizeScope(scope);
+
+	const canonical = { ...event, id: canonicalEventId(sc, event) };
+	const chunks = loadChunks(cwd, sc, "narrative");
+	const prev = chunks.filter((c) => c.meta?.eventId === canonical.id);
+	const body = JSON.stringify(canonical);
+	const now = new Date().toISOString();
+	const mode = cfg.embedMode;
+	const model = mode === "cloud" ? cfg.cloudEmbed.model : "local-hash-v1";
+	const emb = await embedOne(body, embedCtxFrom(cfg));
+	const meta: MemoryChunkMeta = {
+		source: "event",
+		kind: "event",
+		importance: canonical.importance,
+		eventId: canonical.id,
+		title: canonical.title,
+		recallAnchors: canonical.recallAnchors,
+		evidenceLevel: canonical.evidenceLevel,
+		sourceRefs: canonical.sourceRefs,
+		branchLeafId: canonical.branchLeafId,
+		sessionId: sc.sessionId,
+		card: sc.card,
+		embedMode: mode,
+		embedModel: model,
+		updatedAt: now,
+	};
+	if (prev.length > 0) {
+		const nextChunks = chunks.map((c) =>
+			c.meta?.eventId === canonical.id
+				? { ...c, text: body, embedding: emb, meta }
+				: c,
+		);
+		persistChunks(cwd, sc, "narrative", nextChunks);
+		return { stored: true };
+	}
+	nextChunksSafe(cwd, sc, "narrative", store.maxChunks, [...chunks, { id: randomBytes(8).toString("hex"), text: body, embedding: emb, meta, createdAt: now }]);
+	return { stored: true };
+}
+
+/** 列出当前作用域的全部事件卡（不含向量），供管理/导演室/旁路。 */
+export function memoryListEventDigests(cwd: string, scope: MemoryScope): RpEventDigest[] {
+	const cfg = loadMemoryConfig(cwd);
+	if (!cfg.enabled) return [];
+	const sc = normalizeScope(scope);
+	const chunks = loadChunks(cwd, sc, "narrative");
+	const out: RpEventDigest[] = [];
+	for (const c of chunks) {
+		if (c.meta?.kind !== "event") continue;
+		try {
+			const e = JSON.parse(c.text) as RpEventDigest;
+			if (e && e.kind === "rp-event-digest" && typeof e.id === "string") out.push(e);
+		} catch {
+			// 丢弃损坏事件卡
+		}
+	}
+	return out;
+}
+
+/** 事件卡写入时也走分级保活（core/major 永不淘汰）。 */
+function nextChunksSafe(
+	cwd: string,
+	scope: MemoryScope,
+	storeId: string,
+	maxChunks: number,
+	chunks: MemoryChunk[],
+): void {
+	let next = chunks;
+	if (next.length > maxChunks) next = evictByPriority(next, maxChunks);
+	persistChunks(cwd, scope, storeId, next);
+}
+
+/**
  * 叙事轮结束：按 everyNTurns **合并**写入剧情库（仅 agent 路径）。
  */
 export async function onNarrativeTurnEnd(
@@ -315,11 +409,15 @@ export function defaultMemoryConfig(): MemoryConfig {
  * 与 onNarrativeTurnEnd 的滚动摘要互补——接力摘要管剧情连续性，归档管细节召回：
  * 正文被压掉后，具体对白/细节仍可被 memoryRecallForTurn 按相关性捞回。
  * 由压缩接线层 fire-and-forget 调用；失败只丢召回能力，不影响压缩本身。
+ *
+ * PLAN-RP-MEMORY：archive 块标注 kind=evidence；可按 entryRefs 携带原文锚点，
+ * 供两阶段召回沿 sourceRefs 定位。
  */
 export async function memoryArchiveCompacted(
 	cwd: string,
 	scope: MemoryScope,
 	text: string,
+	opts?: { sourceRefs?: MemorySourceRef[] | null },
 ): Promise<{ archived: boolean; added?: number; chunks?: number; reason?: string }> {
 	const cfg = loadMemoryConfig(cwd);
 	if (!cfg.enabled) return { archived: false, reason: "memory disabled" };
@@ -335,7 +433,14 @@ export async function memoryArchiveCompacted(
 		sc,
 		"narrative",
 		parts,
-		{ source: "archive", title: "早期剧情归档", sessionId: sc.sessionId, card: sc.card },
+		{
+			source: "archive",
+			kind: "evidence",
+			title: "早期剧情归档",
+			...(opts?.sourceRefs?.length ? { sourceRefs: opts.sourceRefs } : {}),
+			sessionId: sc.sessionId,
+			card: sc.card,
+		},
 		store.maxChunks,
 		embedCtxFrom(cfg),
 	);
@@ -349,6 +454,7 @@ export async function memoryRecallForTurn(
 	cwd: string,
 	scope: MemoryScope,
 	query: string,
+	visibleEntryIds?: ReadonlySet<string>,
 ): Promise<MemorySearchHit[]> {
 	const cfg = loadMemoryConfig(cwd);
 	if (!cfg.enabled || !cfg.injectOnTurn) return [];
@@ -362,6 +468,7 @@ export async function memoryRecallForTurn(
 		try {
 			const hits = await searchStore(cwd, sc, s.id, q, cfg.searchTopK, ctx);
 			for (const h of hits) {
+				if (!memoryHitVisibleOnBranch(h, visibleEntryIds)) continue;
 				merged.push({
 					...h,
 					meta: { ...h.meta, title: h.meta.title || s.name },
@@ -381,6 +488,13 @@ export async function memoryRecallForTurn(
 	return out;
 }
 
+function memoryHitVisibleOnBranch(hit: MemorySearchHit, visibleEntryIds?: ReadonlySet<string>): boolean {
+	if (!visibleEntryIds) return true;
+	const refs = hit.meta?.sourceRefs ?? [];
+	if (refs.length === 0) return hit.meta?.evidenceLevel !== "source-backed";
+	return refs.some((ref) => visibleEntryIds.has(ref.entryId));
+}
+
 /** 探测云端 embedding 是否可用 */
 export async function probeCloudEmbed(cwd: string): Promise<{ ok: boolean; dim?: number; error?: string }> {
 	const cfg = loadMemoryConfig(cwd);
@@ -391,6 +505,62 @@ export async function probeCloudEmbed(cwd: string): Promise<{ ok: boolean; dim?:
 	} catch (e) {
 		return { ok: false, error: e instanceof Error ? e.message : String(e) };
 	}
+}
+
+/**
+ * PLAN-RP-MEMORY 第二阶段：事件卡 → 原文证据。
+ * 给定事件 id，先取事件卡（含 title/tags/recallAnchors/summary），再用其措辞检索
+ * narrative 库中 kind=evidence 的原文块。返回 evidence 块（MemorySearchHit）。
+ */
+export async function memoryEvidenceForEvent(
+	cwd: string,
+	scope: MemoryScope,
+	eventId: string,
+	topK = 2,
+	visibleEntryIds?: ReadonlySet<string>,
+): Promise<MemorySearchHit[]> {
+	const cfg = loadMemoryConfig(cwd);
+	if (!cfg.enabled || !cfg.injectOnTurn) return [];
+	const sc = normalizeScope(scope);
+	const chunks = loadChunks(cwd, sc, "narrative");
+	const card = chunks.find((c) => c.meta?.kind === "event" && c.meta?.eventId === eventId && memoryHitVisibleOnBranch({ id: c.id, text: c.text, score: 1, meta: c.meta, createdAt: c.createdAt }, visibleEntryIds));
+	if (!card) return [];
+	const cardRefs = card.meta?.sourceRefs ?? [];
+	if (cardRefs.length > 0) {
+		const refIds = new Set(cardRefs.map((ref) => ref.entryId));
+		const exact = chunks
+			.filter((chunk) => (chunk.meta?.kind === "evidence" || chunk.meta?.source === "archive") && (chunk.meta?.sourceRefs ?? []).some((ref) => refIds.has(ref.entryId)))
+			.filter((chunk) => memoryHitVisibleOnBranch({ id: chunk.id, text: chunk.text, score: 1, meta: chunk.meta, createdAt: chunk.createdAt }, visibleEntryIds))
+			.slice(0, Math.max(1, topK))
+			.map((chunk, index) => ({ id: chunk.id, text: chunk.text, score: 1 - index * 0.001, meta: { ...chunk.meta, title: "早期剧情归档" }, createdAt: chunk.createdAt }));
+		if (exact.length > 0) return exact;
+	}
+	let q = "";
+	try {
+		const e = JSON.parse(card.text) as RpEventDigest;
+		q = [e.title, ...(e.tags ?? []), ...(e.recallAnchors ?? []), e.summary].filter(Boolean).join(" ");
+	} catch {
+		q = card.text.slice(0, 200);
+	}
+	if (q.trim().length < 2) return [];
+	const hits = await searchStore(
+		cwd,
+		sc,
+		"narrative",
+		q,
+		Math.max(1, topK),
+		embedCtxFrom(cfg),
+		(chunk) => (chunk.meta?.kind === "evidence" || chunk.meta?.source === "archive") && memoryHitVisibleOnBranch({ id: chunk.id, text: chunk.text, score: 1, meta: chunk.meta, createdAt: chunk.createdAt }, visibleEntryIds),
+	);
+	return hits.map((h) => ({ ...h, meta: { ...h.meta, title: "早期剧情归档" } }));
+}
+
+/** 当前作用域是否存在某事件卡（供旁路判断是否已登记） */
+export function memoryHasEvent(cwd: string, scope: MemoryScope, eventId: string): boolean {
+	const cfg = loadMemoryConfig(cwd);
+	if (!cfg.enabled) return false;
+	const sc = normalizeScope(scope);
+	return loadChunks(cwd, sc, "narrative").some((c) => c.meta?.kind === "event" && c.meta?.eventId === eventId);
 }
 
 export type MemoryReembedResult = {

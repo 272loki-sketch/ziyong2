@@ -25,8 +25,9 @@ import {
 	type BranchEntryLike,
 	type RpSummaryData,
 } from "./assemble.ts";
-import { buildRpSummaryPrompt } from "../scribe.ts";
+import { buildRpSummaryPrompt, validateRpSummaryMarkdown } from "../scribe.ts";
 import { formatState } from "../state.ts";
+import type { RpEventDigest } from "../memory/types.ts";
 import type { WorldState } from "../types.ts";
 
 export { SUMMARY_ENTRY_TYPE };
@@ -150,8 +151,71 @@ export interface CompactRunDeps {
 	/** 叶守卫读数：调用前后各取一次，不等则丢弃 */
 	getLeafId: () => string | null;
 	/** 被裁正文归档进剧情库（供 memory_search 召回细节）；失败只丢召回能力 */
-	archive?: (text: string) => Promise<void>;
+	archive?: (text: string, opts?: { sourceRefs?: MemorySourceRefLike[] }) => Promise<void>;
+	/**
+	 * PLAN-RP-MEMORY：事件候选提取旁路。给定被裁正文/区间，产出事件卡并入库。
+	 * 失败/未注入 = 只有摘要与归档，无事件索引（不阻塞压缩）。
+	 */
+	extractEvents?: (text: string, opts?: { sourceRefs?: MemorySourceRefLike[] }) => Promise<void>;
+	/** 统一摘要 envelope 中已经生成的事件卡；避免摘要与事件二次生成出两套 id。 */
+	appendEventDigests?: (events: RpEventDigest[], opts?: { sourceRefs?: MemorySourceRefLike[] }) => Promise<void>;
+	/** 将模型使用的 sourceKey 重写成代码生成的 canonical event id。 */
+	normalizeSummary?: (summary: string, events: RpEventDigest[]) => string;
 	onActivity?: (detail: string) => void;
+}
+
+export interface RpSummaryEnvelope {
+	version: 2;
+	summaryMarkdown: string;
+	events: RpEventDigest[];
+}
+
+/** 宽容解析数据库式摘要 envelope；旧会话/旧模型仍可返回纯 Markdown。 */
+export function parseRpSummaryEnvelope(text: string): { summary: string; events: RpEventDigest[] } {
+	let raw = text.trim();
+	const fence = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+	if (fence) raw = fence[1]!.trim();
+	try {
+		const value = JSON.parse(raw) as Partial<RpSummaryEnvelope>;
+		if (value && value.version === 2 && typeof value.summaryMarkdown === "string") {
+			const events: RpEventDigest[] = [];
+			if (Array.isArray(value.events)) {
+				for (const rawEvent of value.events) {
+					if (!rawEvent || typeof rawEvent !== "object") continue;
+					const event = rawEvent as Partial<RpEventDigest>;
+					const sourceKey = typeof event.sourceKey === "string" && event.sourceKey ? event.sourceKey : event.id;
+					if (typeof sourceKey !== "string" || !sourceKey || typeof event.title !== "string" || !event.title.trim()) continue;
+					events.push({
+						...event,
+						kind: "rp-event-digest",
+						id: sourceKey,
+						sourceKey,
+						title: event.title,
+						status: event.status ?? "active",
+						importance: event.importance ?? "normal",
+						tags: Array.isArray(event.tags) ? event.tags.filter((x): x is string => typeof x === "string") : [],
+						recallAnchors: Array.isArray(event.recallAnchors) ? event.recallAnchors.filter((x): x is string => typeof x === "string") : [],
+						summary: typeof event.summary === "string" ? event.summary : event.title,
+						evidenceLevel: event.evidenceLevel ?? "source-backed",
+						sourceRefs: Array.isArray(event.sourceRefs) ? event.sourceRefs : [],
+					});
+				}
+			}
+			return { summary: value.summaryMarkdown.trim(), events };
+		}
+	} catch {
+		// 旧摘要是 Markdown，继续走兼容路径。
+	}
+	return { summary: text.trim(), events: [] };
+}
+
+/** 记忆 sourceRef 的最小形状（避免 service 层强耦合进 stage） */
+export interface MemorySourceRefLike {
+	entryId: string;
+	entryType?: string;
+	turn?: number;
+	charFrom?: number;
+	charTo?: number;
 }
 
 export interface CompactRunInput {
@@ -194,11 +258,18 @@ export async function runCompaction(deps: CompactRunDeps, input: CompactRunInput
 		previousSummary: plan.previousSummary,
 		language: input.language,
 		userName: input.userName,
+		charName: input.charName,
 	});
 	const resp = await deps.sideText(prompt.systemPrompt, prompt.userText);
 	if (typeof resp !== "string") return { kind: "failed", error: resp.error };
-	const summary = resp.trim();
+	const envelope = parseRpSummaryEnvelope(resp);
+	const summary = deps.normalizeSummary ? deps.normalizeSummary(envelope.summary, envelope.events) : envelope.summary;
 	if (!summary) return { kind: "failed", error: "摘要为空" };
+	const validation = validateRpSummaryMarkdown(summary);
+	if (!validation.ok) {
+		deps.onActivity?.(`前情摘要拒绝提交：${validation.errors.join("；")}`);
+		return { kind: "failed", error: validation.errors.join("；") };
+	}
 
 	// R9 叶守卫：调用期间树动过（swipe/rewind/切线）→ 整体丢弃
 	if (deps.getLeafId() !== leafBefore) {
@@ -206,13 +277,44 @@ export async function runCompaction(deps: CompactRunDeps, input: CompactRunInput
 		return { kind: "stale" };
 	}
 
-	// 归档先于落摘要：正文一旦被摘要覆盖就不再进上下文，细节只能靠剧情库召回
-	if (deps.archive) {
-		try {
-			await deps.archive(plan.conversationText);
-		} catch {
-			// 归档失败不挡压缩（只丢细节召回能力，连续性仍由摘要保底）
+	// 被裁区间的原文锚点：覆盖到 coversThroughId 为止的全部树条目 id，
+	// 供记忆库 sourceRefs 定位（后续事件→证据两阶段召回用）。
+	const sourceRefs: MemorySourceRefLike[] = [];
+	let beatTurn = 0;
+	for (const e of plan.covered) {
+		if (e.type === "message" && e.message?.role === "user") beatTurn++;
+		if (e.id) {
+			sourceRefs.push({
+				entryId: e.id,
+				entryType: e.type,
+				turn: beatTurn || undefined,
+			});
 		}
+	}
+
+	// 归档先于落摘要：正文一旦被摘要覆盖就不再进上下文，细节只能靠剧情库召回。
+	// fire-and-forget：不阻塞 agent end（旁路慢/卡不拖住正文收尾）。
+	if (deps.archive) {
+		void Promise.resolve()
+			.then(() => deps.archive!(plan.conversationText, { sourceRefs }))
+			.catch(() => {
+				// 归档失败不挡压缩（只丢细节召回能力，连续性仍由摘要保底）
+			});
+	}
+	// PLAN-RP-MEMORY：事件候选提取（与被裁区间同源，fire-and-forget 语义）。
+	if (envelope.events.length === 0 && deps.extractEvents) {
+		void Promise.resolve()
+			.then(() => deps.extractEvents!(plan.conversationText, { sourceRefs }))
+			.catch(() => {
+				// 事件提取失败不挡压缩（只丢事件索引能力）
+			});
+	}
+	if (envelope.events.length > 0 && deps.appendEventDigests) {
+		void Promise.resolve()
+			.then(() => deps.appendEventDigests!(envelope.events, { sourceRefs }))
+			.catch(() => {
+				// 事件卡是检索增强，不阻塞摘要提交。
+			});
 	}
 	if (deps.getLeafId() !== leafBefore) {
 		deps.onActivity?.("压缩已丢弃（归档期间切换了分支）");

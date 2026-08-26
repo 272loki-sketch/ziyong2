@@ -35,7 +35,24 @@ import { errText, intArg, strArg, type ToolResult, type ToolSpec } from "./regis
 export interface MemoryHitLike {
 	text: string;
 	score?: number;
-	meta?: { title?: string; fileName?: string; source?: string };
+	meta?: { title?: string; fileName?: string; source?: string; kind?: "event" | "digest" | "evidence" | "legacy"; eventId?: string; evidenceLevel?: "source-backed" | "summary-only" };
+}
+
+/**
+ * PLAN-RP-MEMORY：拍前自动召回的命中条目（在第一阶段 recallForTurn / 第二阶段 recallEvidence 返回）。
+ * meta 补 kind/eventId/evidenceLevel，供注入块标注〔事件〕〔纪要〕〔早期归档〕。
+ */
+export interface MemoryRecallHitLike {
+	text: string;
+	score?: number;
+	meta?: {
+		title?: string;
+		fileName?: string;
+		source?: string;
+		kind?: "event" | "digest" | "evidence" | "legacy";
+		eventId?: string;
+		evidenceLevel?: "source-backed" | "summary-only";
+	};
 }
 
 /** 列表条目的结构子集 */
@@ -140,7 +157,16 @@ export const memorySearch: ToolSpec<MemoryDeps> = {
 		const text = hits
 			.map((h, i) => {
 				const tag = h.meta?.title || h.meta?.fileName || h.meta?.source || "记忆";
-				return `${i + 1}. 〔${tag}〕${h.text}`;
+				let body = h.text;
+				if (h.meta?.kind === "event") {
+					try {
+						const event = JSON.parse(h.text) as { title?: string; summary?: string; tags?: string[] };
+						body = [event.title, event.summary, event.tags?.length ? `标签：${event.tags.join("、")}` : ""].filter(Boolean).join("\n");
+					} catch {
+						// 旧事件数据保持原文。
+					}
+				}
+				return `${i + 1}. 〔${tag}〕${body}`;
 			})
 			.join("\n\n");
 		return {

@@ -14,7 +14,7 @@
 
 import { runUnifiedStageTool, unifiedStageTools } from "../tools/adapters/stage.ts";
 import type { LoreDeps, LoreHitLike } from "../tools/lore.ts";
-import type { MemoryDeps, MemoryHitLike } from "../tools/memory.ts";
+import type { MemoryDeps, MemoryHitLike, MemoryRecallHitLike } from "../tools/memory.ts";
 import type { CardDeps } from "../tools/card.ts";
 import type { WorldlineDeps } from "../tools/worldline.ts";
 import type { PanelDeps } from "../tools/panels.ts";
@@ -36,7 +36,7 @@ export interface StageTool {
 }
 
 /** 命中形（M-D1/M-D3 起由统一工具层定义，此处再导出保持既有引用不变） */
-export type { LoreHitLike, MemoryHitLike };
+export type { LoreHitLike, MemoryHitLike, MemoryRecallHitLike };
 
 /**
  * 台上工具执行依赖。五族（世界书 / 向量库 / 角色库 / 世界线 / 面板）由统一工具层

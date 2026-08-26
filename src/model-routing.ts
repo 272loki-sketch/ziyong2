@@ -18,10 +18,12 @@ export const SIDE_MODEL_STEPS = [
 	"outlineForeshadowing",
 	"outlineAudit",
 	"outlineResearch",
+	"outlineCorpusResearch",
 	"novelDigest",
 	"contractDeclare",
 	"scribe",
 	"compaction",
+	"memoryEvents",
 	"presetSort",
 ] as const;
 

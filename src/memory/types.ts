@@ -67,8 +67,23 @@ export interface MemoryConfig {
 export interface MemoryChunkMeta {
 	sessionId?: string;
 	card?: string;
-	source?: "narrative" | "import" | "manual" | "archive";
+	source?: "narrative" | "import" | "manual" | "archive" | "event" | "digest";
+	/** 语义类型（PLAN-RP-MEMORY）：事件卡 / 纪要 / 原文证据 / 旧数据 */
+	kind?: MemoryChunkKind;
+	/** 重要性（core/major 不参与自动淘汰） */
+	importance?: MemoryImportance;
+	/** 事件卡稳定 id（event_first_meeting_001） */
+	eventId?: string;
+	/** 条目标题（手动录入/导入用） */
 	title?: string;
+	/** 原文锚点（压缩归档/事件卡必备） */
+	sourceRefs?: MemorySourceRef[];
+	/** 历史回照措辞（「那把伞」「第一次见面」「当年」） */
+	recallAnchors?: string[];
+	/** 证据锚定级别：source-backed=可回忆细节；summary-only=只能概括 */
+	evidenceLevel?: MemoryEvidenceLevel;
+	/** 生成时分支叶（后代分支可继承；兄弟分支不可见） */
+	branchLeafId?: string;
 	/** 导入文件名 */
 	fileName?: string;
 	/** 写入时的嵌入模式，检索时混用会质量差 */
@@ -124,6 +139,56 @@ export const DEFAULT_CLOUD_EMBED: MemoryCloudEmbed = {
 
 /** 剧情合并条目的软上限（字），超则新开一条 */
 export const NARRATIVE_MERGE_MAX_CHARS = 1800;
+
+/** 记忆对象语义类型（PLAN-RP-MEMORY §2/§5.2） */
+export type MemoryChunkKind =
+	| "digest" // 滚动剧情纪要 / 长期故事纪要（语义概括）
+	| "event" // 事件卡（检索投影 + 原文锚定）
+	| "evidence" // 原文证据（被压缩归档的早期正文）
+	| "legacy"; // 旧数据，无 kind 标记
+
+/** 事件/证据重要性（分级保活，core/major 不自动淘汰） */
+export type MemoryImportance = "core" | "major" | "normal" | "minor";
+
+/** 证据锚定级别：source-backed=有原文可用；summary-only=只有纪要 */
+export type MemoryEvidenceLevel = "source-backed" | "summary-only";
+
+/** 原文锚点的可定位坐标（PLAN-RP-MEMORY §2.1） */
+export interface MemorySourceRef {
+	/** 分支条目 id（message/custom 等树条目） */
+	entryId: string;
+	/** 条目类型（message/custom/custom_message…）；未知时省略 */
+	entryType?: string;
+	/** 叙事拍序号（用户消息计数，1 起）；未知时省略 */
+	turn?: number;
+	/** 在该 entry 文本中的可选字符范围（精确证据回源） */
+	charFrom?: number;
+	charTo?: number;
+}
+
+/**
+ * 一级事件卡（PLAN-RP-MEMORY §2.1）。
+ * 检索投影 + 原文锚定，不成为第二套事实权威——事实以 rp-state/outline/当前分支为准。
+ */
+export interface RpEventDigest {
+	kind: "rp-event-digest";
+	id: string;
+	/** 模型输出的稳定来源键；最终 id 由代码按 sourceRef 生成。 */
+	sourceKey?: string;
+	status: "candidate" | "active" | "resolved" | "retired";
+	importance: MemoryImportance;
+	title: string;
+	turnRange?: { from: number; to: number };
+	sourceRefs: MemorySourceRef[];
+	participants?: string[];
+	time?: string;
+	location?: string;
+	tags: string[];
+	recallAnchors: string[];
+	summary: string;
+	evidenceLevel: MemoryEvidenceLevel;
+	branchLeafId?: string;
+}
 
 export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
 	version: 1,

@@ -385,7 +385,7 @@ ${index}`,
 - 标注【活跃面板】的消息是各面板的当前内容（用户可能手改过），其中事实为准。
 - 标注【相关设定】的消息是自动附上的世界书参考，按需取用。
 - 标注【设定集索引】的消息是设定条目的标题索引${tools !== false ? "，内容未出现在【相关设定】时可用 `lorebook_search` 取原文" : ""}。
-- 标注【剧情记忆】的消息是历史正文检索片段，按需取用，勿整段照抄。`,
+- 标注【剧情记忆】的消息是历史纪要与原文证据的检索片段：〔事件〕是历史定位、可概括回忆；〔早期归档〕是原文证据、可准确回忆动作/物品/关键对白，但勿整段照抄并按角色当拍能合理知道的范围表达。与当前分支事实冲突以当前为准。`,
 	);
 
 	if (card.systemPrompt) {
@@ -450,6 +450,11 @@ export interface StageInjectionOptions {
 	literaryEcology?: string;
 	/** 预设拆出的 D/E 方法论，直接作为本拍写作指导，不触发工具轮。 */
 	writerGuidance?: Array<{ topic: string; text: string }>;
+	/**
+	 * PLAN-RP-MEMORY：拍前自动召回的历史纪要与证据（两阶段召回产物）。
+	 * 由装配侧确定性注入；未命中/超时 = 缺省（主演按摘要+状态照常演）。
+	 */
+	memoryRecall?: Array<{ tag: string; kind: "event" | "digest" | "evidence"; text: string }>;
 }
 
 /**
@@ -476,6 +481,7 @@ export function buildStageInjection({
 	literaryWorld,
 	literaryEcology,
 	writerGuidance,
+	memoryRecall,
 }: StageInjectionOptions): string {
 	const macro: MacroContext = { charName: card.name, userName: config.userName };
 	const blocks: string[] = [];
@@ -534,6 +540,14 @@ export function buildStageInjection({
 	if (writerGuidance?.length) {
 		blocks.push(
 			`【预设写作指导】\n以下是用户预设署名的写作方法与场景指导，只约束本拍写法，不是剧情事实、系统流程或待输出内容。按当前场景取用。\n${writerGuidance.map((item) => `## ${item.topic}\n${item.text}`).join("\n\n")}`,
+		);
+	}
+
+	if (memoryRecall?.length) {
+		blocks.push(
+			`【剧情记忆】\n本拍可能触及以下历史（按需自然融入，勿逐字照抄；与当前已提交事实冲突时以当前事实为准）：\n${memoryRecall
+				.map((r) => `- 〔${r.tag}〕${r.text}`)
+				.join("\n")}`,
 		);
 	}
 

@@ -170,6 +170,8 @@ export function parseLoreAliases(text: string): Map<number, string[]> | null {
 }
 
 // ---------- 前情接力摘要（原 src/compaction.ts，2026-08-02 随 harness 重做移入） ----------
+// PLAN-RP-MEMORY：升级为数据库（pi harness）式两段范式——初建 / 增量各一套固定结构提示词，
+// 增量显式「PRESERVE 旧有效信息 / ADD 新事件 / UPDATE 状态 / MOVE 已兑现 → 结果」。
 
 export interface RpSummaryPromptInput {
 	/** 被裁早期剧情的对话原文（序列化后） */
@@ -178,6 +180,8 @@ export interface RpSummaryPromptInput {
 	stateSnapshot: string;
 	/** 更早剧情的既有摘要（二次压缩时传入，合并进本次摘要） */
 	previousSummary?: string;
+	/** 主演角色名（规范名提示） */
+	charName?: string;
 	language: string;
 	userName: string;
 }
@@ -187,38 +191,103 @@ export interface RpSummaryPrompt {
 	userText: string;
 }
 
-export function buildRpSummaryPrompt(input: RpSummaryPromptInput): RpSummaryPrompt {
-	const { conversationText, stateSnapshot, previousSummary, language, userName } = input;
+export function validateRpSummaryMarkdown(summary: string): { ok: boolean; errors: string[] } {
+	const text = summary.trim();
+	if (!text.includes("## Story Phase")) return { ok: true, errors: [] }; // 旧摘要兼容
+	const required = ["## Story Phase", "## Story Progress", "## Characters", "## Core Events", "## Promises & Threads", "## Canon Facts", "## Knowledge Boundaries", "## Compression Boundary", "## Current Continuity", "## Recall Index"];
+	const errors = required.filter((section) => !text.includes(section)).map((section) => `缺少 ${section}`);
+	return { ok: errors.length === 0, errors };
+}
 
-	const systemPrompt = `你是一场长篇角色扮演的场记。你的任务是为即将从上下文中裁掉的早期剧情写一份接力摘要——它将成为主演模型唯一能看到的「前情」，后续剧情将基于「本摘要 + 保留的最近对话」继续演出。
+/** 长期故事纪要 v2 的固定输出结构（两部分共用） */
+export const RP_SUMMARY_SECTIONS = [
+	"## Story Phase",
+	"当前故事阶段 / 阶段目标 / 阶段起点",
+	"## Story Progress",
+	"时间序重大推进：谁做了什么 → 结果 → 改变哪条剧情/关系线",
+	"## Characters",
+	"核心人物：当前状态 / 对主要人物关系 / 关系演变轨迹 / 称呼习惯",
+	"## Core Events",
+	"核心事件稳定 id 列表（event_first_meeting_001 等，不重复写全文）",
+	"## Promises & Threads",
+	"未兑现承诺 / 未解决误会 / 未揭露真相 / 活跃伏笔",
+	"## Canon Facts",
+	"已确认时间线 / 物品归属 / 伤势与身体状态 / 身份 / 重要数值",
+	"## Knowledge Boundaries",
+	"谁知道什么 / 谁不知道什么 / 不得泄露的后台秘密",
+	"## Compression Boundary",
+	"被压缩区间结束时的时间/时段/地点/在场人物/正在进行的动作；这是早期摘要的边界，不要把它误写成保留区的当前续演点",
+	"## Current Continuity",
+	"当前续演点只在有明确最新分支状态时填写；否则写‘由最近保留正文与 rp-state 提供’，不得用压缩区间旧场景冒充当前现场",
+	"## Recall Index",
+	"历史回照措辞 → 对应事件 id（如「那把伞」「第一次见面」「当年」→ event_first_meeting_001）",
+].join("\n");
 
-用${language}输出，按以下结构：
+/** 初建：从零生成固定结构长期纪要 */
+export function buildRpSummaryInitialPrompt(
+	input: Omit<RpSummaryPromptInput, "previousSummary">,
+): RpSummaryPrompt {
+	const { conversationText, stateSnapshot, language, userName } = input;
+const systemPrompt = `你是一场长篇角色扮演的场记。你的任务是为即将从上下文中裁掉的早期剧情写一份**接力摘要 v2**——它是主演模型唯一能看到的「前情」，后续剧情基于「本摘要 + 保留的最近对话」继续演出。
 
-## 前情提要
-按时间顺序概述关键事件（谁做了什么、结果如何）。保留剧内时间刻度（如「第一天黄昏」「第三天清晨」）。
+用${language}输出，**严格按以下固定结构**：
 
-## 人物
-每位出场人物：性格要点、说话习惯、对${userName}的称呼、与${userName}的关系温度及演变轨迹。
+${RP_SUMMARY_SECTIONS}
 
-## 承诺与伏笔
-逐条列出所有未兑现的约定、只被提过一次的线索、悬而未决的问题。这一节宁多勿漏——漏掉一条，后续剧情就永远丢失它。
+规则：
+- 只记录对话中实际发生的事；不虚构、不评论、不续写剧情；
+- 人名地名保持剧中写法；${userName} 是用户角色名；${input.charName ?? ""}
+- 不确定的细节不补写；归入 Canon Facts 的必须是已确认事实；
+- Core Events 只列本次 events 中的 sourceKey；Recall Index 也使用同一 sourceKey；最终 canonical event id 由代码生成。
+- 输出必须是一个 JSON 对象：{"version":2,"summaryMarkdown":"完整 Markdown 摘要","events":[]}。
+- summaryMarkdown 的值必须是完整 Markdown 摘要；events 是从本次正文提取的高价值事件卡。不要输出 JSON 之外的文字。`;
 
-## 事实账
-物品归属（谁持有什么）、伤势与身体状态、重要数值、时间线（现在是剧内第几天）。
+	const userText = `<conversation>\n${conversationText}\n</conversation>\n\n【工具账本快照】（辅助参考；记账可能滞后于正文，与对话记录冲突时以对话记录为准）\n${stateSnapshot}\n\n请按系统指令输出接力摘要 v2。`;
+	return { systemPrompt, userText };
+}
 
-## 当前场景
-剧内此刻：第几天、什么时段、什么地点、谁在场、正在进行什么动作。必须以对话记录中**最新**的场景为准——这是续演点，写成更早的场景会导致剧情倒退。
+/** 增量：把新剧情并入旧纪要（对齐数据库 UPDATE_SUMMARIZATION_PROMPT） */
+export function buildRpSummaryUpdatePrompt(
+	input: RpSummaryPromptInput & { newEvents?: string },
+): RpSummaryPrompt {
+	const { conversationText, stateSnapshot, previousSummary, language, userName, newEvents } = input;
+const systemPrompt = `你是一场长篇角色扮演的场记。你负责把**新剧情**并入**已有的接力摘要 v2**，供后续剧情依旧基于「更新后的摘要 + 保留的最近对话」继续演出。
 
-规则：只记录对话中实际发生的事；不虚构、不评论、不续写剧情；人名地名保持剧中写法。`;
+用${language}输出，**严格沿用已有摘要的固定结构**（缺节则按结构补齐）：
+${RP_SUMMARY_SECTIONS}
 
-	const parts: string[] = [`<conversation>\n${conversationText}\n</conversation>`];
+更新规则：
+- PRESERVE 旧摘要中仍有效的信息（已确立的人物、关系、事件 id、承诺、事实账）；
+- ADD 新剧情里发生的事件、关系变化、新事实（重大推进记入 Story Progress；值得长期回照的进 Core Events；回照措辞进 Recall Index）；
+	- UPDATE Story Phase / Characters / Compression Boundary——Compression Boundary 必须对应被压缩区间的末端；真正当前续演点由保留的最近正文与当前 rp-state 提供；
+- MOVE 已兑现的承诺 / 已解决的误会从 Promises & Threads 移到历史结果说明，不丢事件 id；
+- REMOVE 已不再相关且低价值的细节；
+- PRESERVE 人物姓名写法、物品名、事件 id、Recall Index、后台秘密边界；
+- 不确定候选不得升级为事实；无足够证据的细节不补写；
+- 只记录对话中实际发生的事；不虚构、不评论、不续写剧情。
+- 输出必须是一个 JSON 对象：{"version":2,"summaryMarkdown":"完整 Markdown 摘要","events":[]}，不要输出其他文字。
+- events 中已有事件使用原有 sourceKey；新事件必须使用稳定的 sourceKey，不要自行生成会与其他数据源冲突的随机 id。`;
+
+	const parts = [`<new-conversation>\n${conversationText}\n</new-conversation>`];
 	if (previousSummary) {
-		parts.push(
-			`<previous-summary>\n${previousSummary}\n</previous-summary>\n\n（上面是更早剧情的既有摘要：把它的内容合并进本次摘要，不要丢弃其中的承诺、伏笔与事实。）`,
-		);
+		parts.push(`<previous-summary>\n${previousSummary}\n</previous-summary>`);
+	}
+	if (newEvents) {
+		parts.push(`<new-events>\n${newEvents}\n</new-events>`);
 	}
 	parts.push(`【工具账本快照】（辅助参考；记账可能滞后于正文，与对话记录冲突时以对话记录为准）\n${stateSnapshot}`);
-	parts.push("请按系统指令输出接力摘要。");
+	parts.push("请按系统指令输出**更新后**的接力摘要 v2（合并旧内容 + 新剧情）。");
 
 	return { systemPrompt, userText: parts.join("\n\n") };
+}
+
+/**
+ * 装配提示词（兼容旧调用）：有 previousSummary 走增量，否则走初建。
+ * 被裁剧情原文一律丢给归档 side（不在此合并），这里专注纪要权威。
+ */
+export function buildRpSummaryPrompt(input: RpSummaryPromptInput): RpSummaryPrompt {
+	if (input.previousSummary) {
+		return buildRpSummaryUpdatePrompt(input);
+	}
+	return buildRpSummaryInitialPrompt(input);
 }
