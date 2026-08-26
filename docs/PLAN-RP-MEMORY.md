@@ -311,6 +311,10 @@ while (chunks.length > maxChunks) chunks.shift();
 - ✅ 世界链 / 生态 / 记账 / 诊断逐拍落树；旁路 90s 超时按降级路径处理，不断正文。
 - 摘要 v2 + 事件卡需压缩线（活拍≥7）实弹触达，当前由单测覆盖；继续实弹见 §12。
 
+**归档**：本实现以本地 git 提交落盘（见 `docs/LOCAL-UPSTREAM-UPDATES.md` §6.1）——
+`4b2680e` 仅提交到 `local` 分支，**不推向 GitHub**；恢复点
+`/root/backups/liyuan-update-20260826-200338/repository.bundle`。
+
 ### P0 约束补充
 
 - 摘要旁路优先输出统一 envelope：`{"version":2,"summaryMarkdown":"...","events":[]}`；

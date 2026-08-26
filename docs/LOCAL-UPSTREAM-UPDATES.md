@@ -134,6 +134,22 @@ git status
 
 不要提交 `liyuan.agent.json`、`liyuan.config.json`、`.liyuan/` 或会话文件。根级诊断脚本和导入的 `regex-*.json` 也默认忽略。
 
+## 6.1 本地 git = 提交在本机 local 分支，不推向公网
+
+VPS 的 git 就是**本机仓库**（`/root/Liyuan/.git`），不是 GitHub 公网备份：
+
+- 所有本地增强（文学工作流、世界/生态、记忆系统等）只提交到 `local` 分支，
+  `origin` 仅作只读上游（`git fetch origin` 拉官方更新），**从不 `git push` 回公网**。
+- 本机可能没有任何 GitHub 凭据；不要以为能推送 origin。若要共享代码，走
+  `repository.bundle` 备份（见 §3）或用户另行拷贝。
+- 无法凭 `git remote` 判断「是否已备份」——备份是 bundle 产物，不是远程分支。
+
+**最近一次本地提交**（2026-08-26）：
+
+- `4b2680e feat: 数据库式两级纪要 + 证据召回记忆系统 + zhuzhan 渠道`
+  （记忆系统 + zhuzhan 渠道的完整落地，含文档与测试）
+- 恢复点与之对齐：`/root/backups/liyuan-update-20260826-200338/repository.bundle`
+
 ## 7. 回滚与恢复
 
 ### 回退最近一次本地代码提交
