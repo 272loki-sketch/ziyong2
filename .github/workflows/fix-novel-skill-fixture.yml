@@ -1,0 +1,29 @@
+name: Fix novel skill fixture
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/novel-play-foundation
+      - name: Repair fixture and remove workflow
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('test/novel-play-api.test.ts')
+          text = path.read_text()
+          old = '小说开场边界'
+          assert text.count(old) == 2, text.count(old)
+          path.write_text(text.replace(old, '小说开演边界'))
+          PY
+          git rm .github/workflows/fix-novel-skill-fixture.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add test/novel-play-api.test.ts
+          git commit -m "Fix novel boundary skill fixtures"
+          git push origin HEAD:feat/novel-play-foundation
