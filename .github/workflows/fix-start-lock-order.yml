@@ -1,10 +1,13 @@
 name: Fix start lock ordering
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - feat/novel-play-foundation
 permissions:
   contents: write
 jobs:
   fix:
+    if: github.event.head_commit.message == 'Execute start lock repair'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
