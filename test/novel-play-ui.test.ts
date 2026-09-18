@@ -57,7 +57,8 @@ test("novel play client sends the exact route methods and DTO bodies", async () 
 });
 
 test("server start options expose only public node ids and titles", () => {
-	assert.match(application, /nodes: value\.package\.nodes\.filter\(\(node\) => node\.visibility === "public"\)\.map\(\(node\) => \(\{ nodeId: node\.id, title: node\.title \}\)\)/);
+	assert.match(application, /title: `阶段 \${stages\.get\(node\.stageId\) \?\? 0} · 节点 \${node\.order \+ 1}`/);
+	assert.doesNotMatch(application, /title: node\.title/);
 	assert.doesNotMatch(client.match(/interface NovelPlayStartOptions[^\n]+/)?.[0] ?? "", /summary|visibility|sourceRefs|dependsOn/);
 	assert.match(server, /send\(res, 200, \{ package: startOptions/);
 	assert.match(server, /const output: PreviewPublicDto = \{ token, expiresAt:/);

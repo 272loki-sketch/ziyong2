@@ -88,7 +88,7 @@ test("GET start returns public node titles and preview token is immutable and si
 	const options = await request(h, "GET", `/api/novel-play/start?docId=${input.docId}&revision=${revision}`);
 	assert.deepEqual(options.body.package.nodes, [{ nodeId: options.body.package.nodes[0].nodeId, title: "阶段 1 · 节点 1" }]);
 	const preview = await request(h, "POST", "/api/novel-play/preview", { docId: input.docId, revision, nodeId: options.body.package.nodes[0].nodeId, position: "before", player: { name: "阿岚", identity: "异乡旅人" } });
-	assert.equal(preview.status, 200); assert.equal(JSON.stringify(preview.body).includes("quote"), false);
+	assert.equal(preview.status, 200, JSON.stringify(preview.body)); assert.equal(JSON.stringify(preview.body).includes("quote"), false);
 	const started = await request(h, "POST", "/api/novel-play/start", { previewToken: preview.body.preview.token, draft: { user: { name: "篡改" } } });
 	assert.equal(started.status, 201);
 	const card = JSON.parse(readFileSync(join(root, started.body.started.card), "utf8"));
@@ -98,7 +98,7 @@ test("GET start returns public node titles and preview token is immutable and si
 	assert.equal(replay.status, 409);
 });
 
-test("failed card switch rolls config back and removes generated card", async () => {
+test("uncertain card switch preserves generated recovery state", async () => {
 	const root = cwd(); const input = corpus(root); const revision = stored(root, input.docId, input.text);
 	skill(root, "小说开演提取", "opening extraction"); skill(root, "小说开演边界", "boundary");
 	mkdirSync(join(root, "assets", "cards"), { recursive: true });
@@ -109,6 +109,8 @@ test("failed card switch rolls config back and removes generated card", async ()
 	(h as unknown as { switchToCard(): Promise<string> }).switchToCard = async () => { throw new Error("switch failed"); };
 	const preview = await request(h, "POST", "/api/novel-play/preview", { docId: input.docId, revision, nodeId: (await request(h, "GET", `/api/novel-play/start?docId=${input.docId}&revision=${revision}`)).body.package.nodes[0].nodeId, position: "before", player: { name: "阿岚", identity: "异乡旅人" } });
 	const failed = await request(h, "POST", "/api/novel-play/start", { previewToken: preview.body.preview.token });
-	assert.equal(failed.status, 400);
-	assert.equal(readFileSync(join(root, "liyuan.config.json"), "utf8"), original);
+	assert.equal(failed.status, 202, JSON.stringify(failed.body));
+	assert.equal(failed.body.started.session, "recovery-required");
+	assert.notEqual(readFileSync(join(root, "liyuan.config.json"), "utf8"), original);
+	assert.ok(readFileSync(join(root, failed.body.started.card), "utf8").includes("liyuanNovelPlay"));
 });
