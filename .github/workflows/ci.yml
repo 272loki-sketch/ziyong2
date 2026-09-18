@@ -12,6 +12,7 @@ on:
       - "web/**"
       - "packages/**"
       - "test/**"
+      - "scripts/_privacy_scan.py"
       - "scripts/smoke-web.mjs"
       - "start.sh"
       - "start.command"
@@ -25,6 +26,7 @@ on:
       - "web/**"
       - "packages/**"
       - "test/**"
+      - "scripts/_privacy_scan.py"
       - "scripts/smoke-web.mjs"
       - "start.sh"
       - "start.command"
@@ -32,6 +34,28 @@ on:
   workflow_dispatch:
 
 jobs:
+  privacy-scan:
+    name: privacy scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # git ls-files reads the checked-out index/worktree. History depth does not change the scan set.
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Verify git ls-files in CI checkout
+        run: git ls-files -z >/dev/null
+
+      - name: Scanner self-test
+        run: python scripts/_privacy_scan.py --self-test
+
+      - name: Privacy scan
+        run: python scripts/_privacy_scan.py
+
   unit:
     name: unit (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
