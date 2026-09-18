@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
 
-import { prepareNovelSource } from "../src/novel-play/source.ts";
+import { novelNodeId, prepareNovelSource } from "../src/novel-play/source.ts";
 import { buildNovelPackage } from "../src/novel-play/canon.ts";
 import { saveNovelPackage } from "../src/novel-play/store.ts";
 import { handleNovelPlayApiRequest } from "../server/novel-play-api.ts";
@@ -32,7 +32,7 @@ function stored(root: string, docId: string, text: string): string {
 	const source = prepareNovelSource({ id: docId, title: "测试小说", status: "ready", chars: text.length, chunkCount: 1 }, text);
 	const quote = "晨钟响起。旅人推开城门。";
 	const ref = { chunkIndex: 0, start: text.indexOf(quote), end: text.indexOf(quote) + quote.length, quote };
-	const pkg = buildNovelPackage(source, [{ id: "chunk-0", order: 0, title: "第一章" }], [{ id: "canon-node", key: "bell", stageId: "chunk-0", order: 0, title: "晨钟", summary: "晨钟响起", visibility: "public", dependsOn: [], sourceRefs: [ref] }]);
+	const pkg = buildNovelPackage(source, [{ id: "chunk-0", order: 0, title: "第一章" }], [{ id: novelNodeId(source, ref, "bell"), key: "bell", stageId: "chunk-0", order: 0, title: "晨钟", summary: "晨钟响起", visibility: "public", dependsOn: [], sourceRefs: [ref] }]);
 	saveNovelPackage(root, source, pkg);
 	return pkg.revision;
 }
@@ -85,8 +85,8 @@ test("GET start returns public node titles and preview token is immutable and si
 	writeFileSync(join(root, "liyuan.config.json"), JSON.stringify({ card: "assets/cards/default_Qingwu.json", userName: "old", userPersona: "", language: "zh-CN", scanDepth: 6, maxLoreInjections: 5 }));
 	const h = host(root, () => JSON.stringify({ time: { text: "清晨", quote: "晨钟响起" }, place: { text: "城门", quote: "旅人推开城门" }, sceneText: { text: "晨钟响起", quote: "晨钟响起" }, openingNarration: { text: "旅人推开城门", quote: "旅人推开城门" }, publicCharacterProfiles: [], publicWorldFacts: [] }));
 	const options = await request(h, "GET", `/api/novel-play/start?docId=${input.docId}&revision=${revision}`);
-	assert.deepEqual(options.body.package.nodes, [{ nodeId: "canon-node", title: "晨钟" }]);
-	const preview = await request(h, "POST", "/api/novel-play/preview", { docId: input.docId, revision, nodeId: "canon-node", position: "after", player: { name: "阿岚", identity: "异乡旅人" } });
+	assert.deepEqual(options.body.package.nodes, [{ nodeId: options.body.package.nodes[0].nodeId, title: "晨钟" }]);
+	const preview = await request(h, "POST", "/api/novel-play/preview", { docId: input.docId, revision, nodeId: options.body.package.nodes[0].nodeId, position: "after", player: { name: "阿岚", identity: "异乡旅人" } });
 	assert.equal(preview.status, 200); assert.equal(JSON.stringify(preview.body).includes("quote"), false);
 	const started = await request(h, "POST", "/api/novel-play/start", { previewToken: preview.body.preview.token, draft: { user: { name: "篡改" } } });
 	assert.equal(started.status, 201);
@@ -106,7 +106,7 @@ test("failed card switch rolls config back and removes generated card", async ()
 	writeFileSync(join(root, "liyuan.config.json"), original);
 	const h = host(root, () => JSON.stringify({ time: { text: "清晨", quote: "晨钟响起" }, place: { text: "城门", quote: "旅人推开城门" }, sceneText: { text: "晨钟响起", quote: "晨钟响起" }, openingNarration: { text: "旅人推开城门", quote: "旅人推开城门" }, publicCharacterProfiles: [], publicWorldFacts: [] }));
 	(h as unknown as { switchToCard(): Promise<string> }).switchToCard = async () => { throw new Error("switch failed"); };
-	const preview = await request(h, "POST", "/api/novel-play/preview", { docId: input.docId, revision, nodeId: "canon-node", position: "after", player: { name: "阿岚", identity: "异乡旅人" } });
+	const preview = await request(h, "POST", "/api/novel-play/preview", { docId: input.docId, revision, nodeId: options.body.package.nodes[0].nodeId, position: "after", player: { name: "阿岚", identity: "异乡旅人" } });
 	const failed = await request(h, "POST", "/api/novel-play/start", { previewToken: preview.body.preview.token });
 	assert.equal(failed.status, 400);
 	assert.equal(readFileSync(join(root, "liyuan.config.json"), "utf8"), original);
