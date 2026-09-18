@@ -153,12 +153,29 @@ function activeNovelCard(host: NovelPlayModelHost, card: string): boolean {
 	} catch { return false; }
 }
 
-function restoreOwnedPreSwitch(before: ReturnType<typeof loadRawConfig>, ownedBytes: string, cardFile: string, host: NovelPlayModelHost, binding: NovelPlayBinding): void {
-	let current = "";
+function configCard(bytes: string): string | undefined {
+	try {
+		const value = JSON.parse(bytes) as { card?: unknown };
+		return typeof value.card === "string" ? value.card : undefined;
+	} catch { return undefined; }
+}
+
+function restoreOwnedPreSwitch(before: ReturnType<typeof loadRawConfig>, ownedBytes: string, relativeCard: string, cardFile: string, host: NovelPlayModelHost, binding: NovelPlayBinding): void {
+	let current: string;
 	try { current = readFileSync(before.path, "utf8"); } catch { return; }
-	if (current !== ownedBytes || !sameNovelPlayBinding(novelPlayBinding(host), { ...binding, card: JSON.parse(ownedBytes).card })) return;
-	if (before.existed) atomicWrite(before.path, before.bytes); else rmSync(before.path, { force: true });
-	rmSync(cardFile, { force: true });
+	let scope: ReturnType<NovelPlayModelHost["memoryScope"]>;
+	try { scope = host.memoryScope(); } catch { return; }
+	if (scope.sessionId !== binding.sessionId || String(scope.card ?? "") !== binding.card) return;
+	if (ownedBytes && current === ownedBytes) {
+		try {
+			if (before.existed) atomicWrite(before.path, before.bytes); else rmSync(before.path, { force: true });
+		} catch { return; }
+		try { rmSync(cardFile, { force: true }); } catch { /* Preserve the original start error. */ }
+		return;
+	}
+	const currentCard = configCard(current);
+	if (currentCard === undefined || currentCard === relativeCard) return;
+	try { rmSync(cardFile, { force: true }); } catch { /* Preserve the original start error. */ }
 }
 
 export async function startFromConfirmedProposal(host: NovelPlayModelHost, input: { stored: StoredNovelPackage; anchor: NovelAnchor; proposal: NovelOpeningProposal }, expected: NovelPlayBinding, onSwitchPrepared?: (card: string) => void): Promise<StartResult> {
@@ -175,19 +192,21 @@ export async function startFromConfirmedProposal(host: NovelPlayModelHost, input
 	let ownedBytes = "";
 	try {
 		writeFileSync(absoluteCard, `${JSON.stringify(raw, null, "\t")}\n`, { encoding: "utf8", flag: "wx" });
-		const next = { ...before.config, userName: confirmed.user.name, card: relativeCard };
+		const next = { ...before.config, userName: confirmed.user.name, userPersona: confirmed.user.identity, card: relativeCard };
 		ownedBytes = `${JSON.stringify(next, null, "\t")}\n`;
 		atomicWrite(before.path, ownedBytes);
 		const afterScope = host.memoryScope();
 		if (afterScope.sessionId !== expected.sessionId || String(afterScope.card ?? "") !== expected.card || readFileSync(before.path, "utf8") !== ownedBytes) throw new Error("配置写入期间会话发生变化");
 		onSwitchPrepared?.(relativeCard);
 	} catch (error) {
-		restoreOwnedPreSwitch(before, ownedBytes, absoluteCard, host, expected);
+		restoreOwnedPreSwitch(before, ownedBytes, relativeCard, absoluteCard, host, expected);
 		throw error;
 	}
 	try {
 		const switched = await host.switchToCard();
 		if (switched !== "created") return { card: relativeCard, session: "recovery-required", recovery: "角色切换结果不确定。已保留新角色卡和配置，请检查当前会话。" };
+		const actual = novelPlayBinding(host);
+		if (actual.card !== relativeCard || actual.sessionId === expected.sessionId) return { card: relativeCard, session: "recovery-required", recovery: "角色切换结果不确定。已保留新角色卡和配置，请检查当前会话。" };
 		return { card: relativeCard, session: "created" };
 	} catch {
 		return { card: relativeCard, session: "recovery-required", recovery: "角色切换可能已部分成功。已保留新角色卡和配置，请检查当前会话后手动恢复。" };

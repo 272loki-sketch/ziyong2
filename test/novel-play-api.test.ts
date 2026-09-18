@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -9,6 +9,7 @@ import { novelNodeId, prepareNovelSource } from "../src/novel-play/source.ts";
 import { buildNovelPackage } from "../src/novel-play/canon.ts";
 import { saveNovelPackage } from "../src/novel-play/store.ts";
 import { saveStageSkill } from "../src/stage/skill-store.ts";
+import { createOpeningProposal, startFromConfirmedProposal } from "../src/novel-play/application.ts";
 import { handleNovelPlayApiRequest } from "../server/novel-play-api.ts";
 import type { RestHost } from "../server/rest.ts";
 
@@ -54,7 +55,8 @@ async function request(host: RestHost, method: string, url: string, payload?: un
 
 function host(root: string, model: (system: string, user: string) => string): RestHost {
 	let runtimeCard = "assets/cards/default_Qingwu.json";
-	return { cwd: root, isStreaming: () => false, runSideText: async (_step, system, user) => model(system, user), memoryScope: () => ({ sessionId: "test", card: runtimeCard }), switchToCard: async () => { runtimeCard = JSON.parse(readFileSync(join(root, "liyuan.config.json"), "utf8")).card; return "created"; } } as unknown as RestHost;
+	let runtimeSession = "test";
+	return { cwd: root, isStreaming: () => false, runSideText: async (_step, system, user) => model(system, user), memoryScope: () => ({ sessionId: runtimeSession, card: runtimeCard }), switchToCard: async () => { runtimeCard = JSON.parse(readFileSync(join(root, "liyuan.config.json"), "utf8")).card; runtimeSession = "created-session"; return "created"; } } as unknown as RestHost;
 }
 
 test("build is an in-process bounded job and status never exposes source text", async () => {
@@ -84,7 +86,9 @@ test("GET start returns public node titles and preview token is immutable and si
 	assert.equal(started.status, 201);
 	const card = JSON.parse(readFileSync(join(root, started.body.started.card), "utf8"));
 	assert.ok(card.data.description.includes("阿岚"));
-	assert.equal(JSON.parse(readFileSync(join(root, "liyuan.config.json"), "utf8")).userName, "阿岚");
+	const updatedConfig = JSON.parse(readFileSync(join(root, "liyuan.config.json"), "utf8"));
+	assert.equal(updatedConfig.userName, "阿岚");
+	assert.equal(updatedConfig.userPersona, "异乡旅人");
 	const replay = await request(h, "POST", "/api/novel-play/start", { previewToken: preview.body.preview.token });
 	assert.equal(replay.status, 409);
 });
@@ -104,4 +108,40 @@ test("uncertain card switch preserves generated recovery state", async () => {
 	assert.equal(failed.body.started.session, "recovery-required");
 	assert.notEqual(readFileSync(join(root, "liyuan.config.json"), "utf8"), original);
 	assert.ok(readFileSync(join(root, failed.body.started.card), "utf8").includes("liyuanNovelPlay"));
+});
+
+
+async function directStartFixture() {
+	const root = cwd(); const input = corpus(root); const revision = stored(root, input.docId, input.text);
+	skill(root, "小说开场提取", "opening extraction"); skill(root, "小说开演边界", "boundary");
+	mkdirSync(join(root, "assets", "cards"), { recursive: true });
+	writeFileSync(join(root, "assets", "cards", "default_Qingwu.json"), "{}");
+	const original = JSON.stringify({ card: "assets/cards/default_Qingwu.json", userName: "old", userPersona: "old persona", language: "zh-CN", scanDepth: 6, maxLoreInjections: 5 });
+	writeFileSync(join(root, "liyuan.config.json"), original);
+	const h = host(root, () => JSON.stringify({ time: { text: "晨钟响起", quote: "晨钟响起" }, place: { text: "城门", quote: "城门" }, sceneText: { text: "晨钟响起", quote: "晨钟响起" }, openingNarration: { text: "旅人推开城门", quote: "旅人推开城门" }, publicCharacterProfiles: [], publicWorldFacts: [] }));
+	const options = await request(h, "GET", `/api/novel-play/start?docId=${input.docId}&revision=${revision}`);
+	const generated = await createOpeningProposal(h as never, { docId: input.docId, revision, nodeId: options.body.package.nodes[0].nodeId, position: "before", player: { name: "阿岚", identity: "异乡旅人" } });
+	return { root, h, generated, original, expected: { sessionId: "test", card: "assets/cards/default_Qingwu.json" } };
+}
+
+test("pre-switch callback failure restores owned config and removes generated card without masking the error", async () => {
+	const fixture = await directStartFixture(); let generatedCard = "";
+	await assert.rejects(startFromConfirmedProposal(fixture.h as never, fixture.generated, fixture.expected, card => { generatedCard = card; throw new Error("prepared callback failed"); }), /prepared callback failed/);
+	assert.equal(readFileSync(join(fixture.root, "liyuan.config.json"), "utf8"), fixture.original);
+	assert.equal(existsSync(join(fixture.root, generatedCard)), false);
+});
+
+test("pre-switch callback failure preserves external config edits and safely removes an unreferenced generated card", async () => {
+	const fixture = await directStartFixture(); let generatedCard = "";
+	const external = JSON.stringify({ card: "assets/cards/external.json", userName: "external", userPersona: "external persona" });
+	await assert.rejects(startFromConfirmedProposal(fixture.h as never, fixture.generated, fixture.expected, card => { generatedCard = card; writeFileSync(join(fixture.root, "liyuan.config.json"), external); throw new Error("external edit"); }), /external edit/);
+	assert.equal(readFileSync(join(fixture.root, "liyuan.config.json"), "utf8"), external);
+	assert.equal(existsSync(join(fixture.root, generatedCard)), false);
+});
+
+test("created switch with stale runtime binding requires recovery", async () => {
+	const fixture = await directStartFixture();
+	(fixture.h as unknown as { switchToCard(): Promise<string> }).switchToCard = async () => "created";
+	const result = await startFromConfirmedProposal(fixture.h as never, fixture.generated, fixture.expected);
+	assert.equal(result.session, "recovery-required");
 });
