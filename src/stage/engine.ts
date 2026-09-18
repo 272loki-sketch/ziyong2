@@ -152,7 +152,7 @@ import { outlineFromBranch } from "../outline/state.ts";
 import { projectOutline } from "../outline/projection.ts";
 import { workflowSkill } from "./skill-store.ts";
 import { worldModuleSkillPacks } from "./skill-store.ts";
-import { commitNovelPlayState, prepareNovelPlayTurn, type NovelPlayProjection, type PreparedNovelPlayTurn } from "../novel-play/runtime.ts"; // novel-play-runtime-integration-v1
+import { commitNovelPlayState, prepareNovelPlayTurn, type NovelPlayProjection, type PreparedNovelPlayTurn } from "../novel-play/runtime.ts"; // novel-play-runtime-integration-v2
 import {
 	WORLD_MANIFEST_ENTRY_TYPE,
 	buildWorldProfilePrompt,
@@ -455,7 +455,6 @@ export interface StageRerollPrep {
 	plotAdaptation?: PlotAdaptation;
 	planFact?: PlanFactComparison;
 	sceneConductor?: SceneConductor;
-	novelProjection?: NovelPlayProjection;
 }
 
 /** 主演格式收尾的独立容量：触顶收场同样必须使用，不能退回正文轮的 8k。 */
@@ -1319,7 +1318,7 @@ export class StageEngine {
 		let literaryDirection = rerollPrep?.literaryDirection;
 		let plotAdaptation = rerollPrep?.plotAdaptation;
 		let sceneConductor = rerollPrep?.sceneConductor;
-		let novelProjection = rerollPrep?.novelProjection;
+		let novelProjection: NovelPlayProjection | undefined;
 		let preparedNovelPlay: PreparedNovelPlayTurn | undefined;
 		let planFact: PlanFactComparison | undefined;
 		const directorRequested = !rerollPrep && config.literaryQuality === "guided" && !isBackstageText(lastUserText);
@@ -2051,7 +2050,6 @@ export class StageEngine {
 					...(plotAdaptation ? { plotAdaptation } : {}),
 					...(planFact ? { planFact } : {}),
 					...(sceneConductor ? { sceneConductor } : {}),
-					...(novelProjection ? { novelProjection } : {}),
 					...(config.literaryEcologyEnabled === true ? { literaryEcology } : {}),
 					workflowStatus: {
 						continuity: rerollPrep?.literaryContinuity ? "reused" : continuityRequested ? (literaryContinuity ? "success" : "degraded") : "skipped",
@@ -2103,7 +2101,7 @@ export class StageEngine {
 			});
 			sm.flush();
 			// A reroll reuses rpPrep and must not create new novel metadata.
-			if (userText !== null) {
+			if (!aborted && userText !== null) {
 				commitNovelPlayState({ prepared: preparedNovelPlay, expectedLeafId: entryId, getLeafId: () => sm.getLeafId(), appendCustomEntry: (type, data) => sm.appendCustomEntry(type, data) });
 				sm.flush();
 			}
