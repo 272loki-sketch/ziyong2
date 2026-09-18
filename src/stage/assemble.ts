@@ -25,6 +25,7 @@ import type { CharacterCard, LorebookEntry, MacroContext, RpConfig, WorldState }
 // ---------------- 分支 → 历史 ----------------
 
 /** 会话树条目的结构子集（不引 @liyuan/agent-runtime 类型，保持 src/ 独立） */
+
 export interface BranchEntryLike {
 	/** 树上条目 id（前情摘要用它锚定「覆盖到哪」） */
 	id?: string;
@@ -72,6 +73,7 @@ export interface RebuiltHistory {
 export const SUMMARY_ENTRY_TYPE = "rp-summary";
 
 /** rp-summary 条目的 data 形状 */
+
 export interface RpSummaryData {
 	/** 接力摘要正文（已合并更早的摘要） */
 	summary: string;
@@ -96,25 +98,27 @@ const summaryDataOf = (e: BranchEntryLike): RpSummaryData | null => {
  * 分支上生效的前情摘要 = **最后一条**摘要条目（每次压缩都把上一份合并进来，故后者全覆盖前者）。
  * 兼容旧会话里 pi 写的 `compaction` 条目：覆盖边界取 firstKeptEntryId 的前一条。
  * 返回 cut = 需要从历史里去掉的条目数（分支前缀长度）。
+ *
+ * 锚点缺失的摘要/compaction 视为坏条目：忽略并继续向前找更早的有效摘要，绝不按条目位置退守裁正文。
  */
+
 export function activeSummary(branch: BranchEntryLike[]): { summary: string; cut: number } | null {
 	for (let i = branch.length - 1; i >= 0; i--) {
 		const e = branch[i];
 		const data = summaryDataOf(e);
 		if (data) {
 			const at = branch.findIndex((x) => x.id === data.coversThroughId);
-			// 覆盖锚点找不到（异常树）时退守到摘要条目自身之前
-			return { summary: data.summary, cut: at >= 0 ? at + 1 : i };
+			if (at < 0) continue;
+			return { summary: data.summary, cut: at + 1 };
 		}
 		// 旧会话：pi 的 compaction 条目（summary + firstKeptEntryId）
 		if (e.type === "compaction") {
 			const legacy = e as unknown as { summary?: unknown; firstKeptEntryId?: unknown };
 			if (typeof legacy.summary !== "string" || !legacy.summary.trim()) continue;
-			const keptAt =
-				typeof legacy.firstKeptEntryId === "string"
-					? branch.findIndex((x) => x.id === legacy.firstKeptEntryId)
-					: -1;
-			return { summary: legacy.summary, cut: keptAt >= 0 ? keptAt : i };
+			if (typeof legacy.firstKeptEntryId !== "string") continue;
+			const keptAt = branch.findIndex((x) => x.id === legacy.firstKeptEntryId);
+			if (keptAt < 0) continue;
+			return { summary: legacy.summary, cut: keptAt };
 		}
 	}
 	return null;
@@ -138,7 +142,9 @@ export function activeSummary(branch: BranchEntryLike[]): { summary: string; cut
  *
  * M4：有 rp-summary 时，被覆盖的早期条目整段不进历史，改由 summary 字段回读为【前情提要】。
  */
-export function rebuildHistory(branch: BranchEntryLike[], promptRules: DisplayRule[] = []): RebuiltHistory {
+
+export function rebuildHistory(branch: BranchEntryLike[], promptRules: DisplayRule[] = []): RebuiltHistory 
+{
 	const active = activeSummary(branch);
 	const live = active ? branch.slice(active.cut) : branch;
 
@@ -268,6 +274,7 @@ export function codexNamesFromBranch(branch: BranchEntryLike[]): string[] {
 
 // ---------------- system prompt（字节稳定） ----------------
 
+
 export interface StageSystemOptions {
 	card: CharacterCard;
 	config: RpConfig;
@@ -294,6 +301,7 @@ export interface StageSystemOptions {
 	 */
 	mcpTools?: Array<{ name: string; description: string }>;
 }
+
 
 export function buildStageSystemPrompt({
 	card,
@@ -390,7 +398,8 @@ ${index}`,
 - 标注【开场】的消息是 ${card.name} 的既定开场白，剧情从那一刻继续。
 - 标注【前情提要】的消息是更早剧情的接力摘要，是既定事实。
 - 标注【世界状态】的消息是当前事实基准：剧情记忆与它冲突时，以状态为准并在叙事内自然圆回，绝不跳出剧情解释。
-- 标注【登场名录】的消息是登场过但已不在当前状态的条目索引（离场/失去/了结）${tools !== false ? "，细节可用 `memory_search` 查" : ""}；名录之外的名字才是新登场。
+- 标注【登场名录】的消息是登场过但已不在当前状态的条目索引（离场/失去/了结）${tools !== false ? "，细节可用 `memory_search` 查" : ""}
+；名录之外的名字才是新登场。
 - 标注【活跃面板】的消息是各面板的当前内容（用户可能手改过），其中事实为准。
 - 标注【相关设定】的消息是自动附上的世界书参考，按需取用。
 - 标注【设定集索引】的消息是设定条目的标题索引${tools !== false ? "，内容未出现在【相关设定】时可用 `lorebook_search` 取原文" : ""}。
@@ -403,6 +412,7 @@ ${index}`,
 
 	return sections.join("\n\n");
 }
+
 
 // ---------------- 末端注入（每拍动态） ----------------
 
@@ -429,6 +439,7 @@ export function formatLoreIndex(entries: Array<Pick<LorebookEntry, "comment" | "
 	const rest = titles.length - shown.length;
 	return `共 ${titles.length} 条：${shown.join("、")}${rest > 0 ? `……等（另 ${rest} 条未列出）` : ""}`;
 }
+
 
 export interface StageInjectionOptions {
 	state: WorldState;
@@ -477,6 +488,7 @@ export interface StageInjectionOptions {
  * 「消息流约定」里一次说清，不逐拍复述。【导演备注】容器解散：卡末端指令独立成块，
  * 主权兜底迁默认预设，「演完即停」由判定/谢幕的日程表达；【状态栏】【思考的用法】退场。
  */
+
 export function buildStageInjection({
 	state,
 	activatedLore,
