@@ -6,16 +6,17 @@ permissions:
   contents: write
 jobs:
   fix:
-    if: github.event.head_commit.message == 'Trigger novel API blocker repair'
+    if: github.event.head_commit.message == 'Retry novel API blocker repair with history'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: feat/novel-play-foundation
+          fetch-depth: 3
       - name: Apply blocker fixes
         shell: bash
         run: |
-          git show HEAD^:.github/workflows/fix-novel-api-blockers.yml > /tmp/original.yml
+          git show e28b0ffc1f6e29ff5148db9f14ca70aace24ec07:.github/workflows/fix-novel-api-blockers.yml > /tmp/original.yml
           sed -n '/cat > \/tmp\/fix.py/,/python \/tmp\/fix.py/p' /tmp/original.yml | sed '$d' > /tmp/run-fix.sh
           bash /tmp/run-fix.sh
           node --test --test-reporter=./scripts/test-summary.mjs test/novel-play*.test.ts
