@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { buildNovelPackage } from "../src/novel-play/canon.ts";
 import { novelNodeId, type NovelSource } from "../src/novel-play/source.ts";
 import { commitNovelPlayState, novelPlayStateFromBranch, prepareNovelPlayTurn } from "../src/novel-play/runtime.ts";
+import { apply as applyEnginePatch } from "../scripts/novel-integration/engine-patch.mjs";
 
 const source: NovelSource = { version: 1, docId: "book", title: "Book", fingerprint: "fp", chunkChars: 100, chunks: [{ index: 0, chars: 16, chapters: ["c"], text: "Alpha Beta Gamma" }] };
 const ref = (start: number, end: number) => ({ chunkIndex: 0, start, end, quote: source.chunks[0]!.text.slice(start, end) });
@@ -63,4 +65,12 @@ test("reroll reuses prepared projection without a second model call or state wri
 	let writes = 0;
 	commitNovelPlayState({ prepared: undefined, expectedLeafId: "assistant-reroll", getLeafId: () => "assistant-reroll", appendCustomEntry: () => { writes++; return "x"; } });
 	assert.equal(writes, 0);
+});
+
+test("engine integration patch matches the branch exactly and is idempotent", () => {
+	const engine = readFileSync(new URL("../src/stage/engine.ts", import.meta.url), "utf8");
+	const patched = applyEnginePatch(engine);
+	assert.match(patched, /novel-play-runtime-integration-v1/);
+	assert.equal(applyEnginePatch(patched), patched);
+	assert.throws(() => applyEnginePatch(engine.replace('import { worldModuleSkillPacks } from "\.\/skill-store\.ts";', "")), /snippet missing/);
 });
