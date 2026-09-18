@@ -1,0 +1,35 @@
+name: apply novel REST patch once
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/novel-play-foundation
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply deterministic patch
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs';
+          import { apply } from './scripts/novel-integration/server-patch.mjs';
+          const path = 'server/rest.ts';
+          const source = readFileSync(path, 'utf8');
+          const patched = apply(source);
+          if (patched === source) throw new Error('rest.ts already contains the integration marker');
+          writeFileSync(path, patched, 'utf8');
+          if (apply(patched) !== patched) throw new Error('patch is not idempotent');
+          NODE
+      - name: Commit patched REST delegate
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add server/rest.ts
+          git diff --cached --quiet && { echo 'No patch produced'; exit 1; }
+          git commit -m 'Integrate novel play API delegate'
+          git push origin HEAD:feat/novel-play-foundation
