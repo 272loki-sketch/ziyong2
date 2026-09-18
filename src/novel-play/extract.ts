@@ -85,10 +85,11 @@ function parseChunkResult(text: string, chunkText: string): RawNode[] {
 		throw new Error("model result has an invalid root shape");
 	}
 	const rawNodes = (value as Record<string, unknown>).nodes;
-	if (!Array.isArray(rawNodes) || rawNodes.length < 1 || rawNodes.length > MAX_NODES_PER_CHUNK) {
-		throw new Error("chunk must contain between 1 and 100 evidenced events");
+	if (!Array.isArray(rawNodes) || rawNodes.length > MAX_NODES_PER_CHUNK) {
+		throw new Error("chunk must contain between 0 and 100 evidenced events");
 	}
 	const earlierKeys = new Set<string>();
+	let previousQuoteStart = -1;
 	return rawNodes.map((raw, index): RawNode => {
 		if (!raw || typeof raw !== "object" || Array.isArray(raw) || !ownKeysAre(raw as Record<string, unknown>, NODE_KEYS)) {
 			throw new Error(`event ${index} has an invalid shape`);
@@ -110,6 +111,8 @@ function parseChunkResult(text: string, chunkText: string): RawNode[] {
 		const quote = boundedString(item.quote, `event ${key} quote`, MAX_QUOTE);
 		const first = chunkText.indexOf(quote);
 		if (first < 0 || chunkText.indexOf(quote, first + 1) >= 0) throw new Error(`event ${key} quote must occur exactly once in its chunk`);
+		if (first < previousQuoteStart) throw new Error(`event ${key} quote occurs before the preceding event in source order`);
+		previousQuoteStart = first;
 		earlierKeys.add(key);
 		return {
 			key,
@@ -149,8 +152,6 @@ export async function extractNovelEvents(source: NovelSource, options: ExtractNo
 
 	for (const chunk of source.chunks) {
 		throwIfAborted(options.signal);
-		const stageId = `chunk-${chunk.index}`;
-		stages.push({ id: stageId, order: stages.length, title: chunk.chapters.length ? chunk.chapters.join(" / ") : `分块 ${chunk.index + 1}` });
 		let parsed: RawNode[] | undefined;
 		const cached = completed[String(chunk.index)];
 		if (cached !== undefined) {
@@ -182,6 +183,10 @@ export async function extractNovelEvents(source: NovelSource, options: ExtractNo
 		throwIfAborted(options.signal);
 		await options.onCheckpoint?.(copyCheckpoint(key, completed));
 		throwIfAborted(options.signal);
+		if (!parsed.length) continue;
+
+		const stageId = `chunk-${chunk.index}`;
+		stages.push({ id: stageId, order: stages.length, title: chunk.chapters.length ? chunk.chapters.join(" / ") : `分块 ${chunk.index + 1}` });
 		const localIds = new Map<string, string>();
 		for (const raw of parsed) {
 			const start = chunk.text.indexOf(raw.quote);
@@ -197,6 +202,10 @@ export async function extractNovelEvents(source: NovelSource, options: ExtractNo
 				dependsOn: raw.dependsOn.map(dependency => localIds.get(dependency)!), sourceRefs: [ref],
 			});
 		}
+	}
+	if (!nodes.length) throw new Error("novel event extraction found no playable events in the complete source");
+	if (!nodes.some(node => node.visibility === "public")) {
+		throw new Error("novel event extraction found no public starting point; all evidenced events are secret");
 	}
 	return { package: buildNovelPackage(source, stages, nodes), checkpoint: copyCheckpoint(key, completed) };
 }
