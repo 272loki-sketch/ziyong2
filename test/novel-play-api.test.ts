@@ -8,14 +8,14 @@ import test from "node:test";
 import { novelNodeId, prepareNovelSource } from "../src/novel-play/source.ts";
 import { buildNovelPackage } from "../src/novel-play/canon.ts";
 import { saveNovelPackage } from "../src/novel-play/store.ts";
+import { saveStageSkill } from "../src/stage/skill-store.ts";
 import { handleNovelPlayApiRequest } from "../server/novel-play-api.ts";
 import type { RestHost } from "../server/rest.ts";
 
 const cwd = () => join(tmpdir(), `liyuan-novel-api-${Date.now()}-${Math.random().toString(16).slice(2)}`);
 
 function skill(root: string, dir: string, body: string): void {
-	const folder = join(root, "skills", dir); mkdirSync(folder, { recursive: true });
-	writeFileSync(join(folder, "SKILL.md"), `---\nname: ${dir}\ndescription: test\n---\n${body}\n`);
+	saveStageSkill(root, { dir, name: dir, description: "test", resident: false, everyBeat: false, body });
 }
 
 function corpus(root: string): { docId: string; text: string } {
@@ -23,7 +23,7 @@ function corpus(root: string): { docId: string; text: string } {
 	const text = "第一章\n晨钟响起。旅人推开城门。";
 	const dir = join(root, ".liyuan", "outline", "research", "corpus");
 	mkdirSync(join(dir, "texts"), { recursive: true });
-	writeFileSync(join(dir, "documents.json"), JSON.stringify([{ id: docId, title: "测试小说", sourceKind: "upload", originName: "x.txt", chars: text.length, encoding: "utf-8", chapterCount: 1, chunkCount: 1, status: "ready", cardKey: "card", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }]));
+	writeFileSync(join(dir, "documents.json"), JSON.stringify([{ id: docId, title: "测试小说", sourceKind: "upload", originalName: "x.txt", chars: text.length, encoding: "utf-8", chapterCount: 1, chunkCount: 1, status: "ready", cardKey: "card", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }]));
 	writeFileSync(join(dir, "texts", `${docId}.txt`), text);
 	return { docId, text };
 }
@@ -53,22 +53,12 @@ async function request(host: RestHost, method: string, url: string, payload?: un
 }
 
 function host(root: string, model: (system: string, user: string) => string): RestHost {
-	return {
-		cwd: root,
-		isStreaming: () => false,
-		runSideText: async (_step, system, user) => model(system, user),
-		memoryScope: () => ({ sessionId: "test", card: "assets/cards/default_Qingwu.json" }),
-		switchToCard: async () => "created",
-	} as unknown as RestHost;
+	return { cwd: root, isStreaming: () => false, runSideText: async (_step, system, user) => model(system, user), memoryScope: () => ({ sessionId: "test", card: "assets/cards/default_Qingwu.json" }), switchToCard: async () => "created" } as unknown as RestHost;
 }
 
 test("build is an in-process bounded job and status never exposes source text", async () => {
 	const root = cwd(); const input = corpus(root); skill(root, "小说作品构建", "extract exact events");
-	const h = host(root, (_system, user) => {
-		const parsed = JSON.parse(user); const quote = "晨钟响起";
-		assert.ok(parsed.chunk.text.includes(quote));
-		return JSON.stringify({ nodes: [{ key: "bell", title: "晨钟", summary: "晨钟响起", visibility: "public", dependsOn: [], quote }] });
-	});
+	const h = host(root, (_system, user) => { const parsed = JSON.parse(user); const quote = "晨钟响起"; assert.ok(parsed.chunk.text.includes(quote)); return JSON.stringify({ nodes: [{ key: "bell", title: "晨钟", summary: "晨钟响起", visibility: "public", dependsOn: [], quote }] }); });
 	const created = await request(h, "POST", "/api/novel-play/build", { docId: input.docId });
 	assert.equal(created.status, 202);
 	await new Promise((resolve) => setTimeout(resolve, 30));
@@ -80,7 +70,7 @@ test("build is an in-process bounded job and status never exposes source text", 
 
 test("GET start returns public node titles and preview token is immutable and single-use", async () => {
 	const root = cwd(); const input = corpus(root); const revision = stored(root, input.docId, input.text);
-	skill(root, "小说开演提取", "opening extraction"); skill(root, "小说开演边界", "never reveal future canon");
+	skill(root, "小说开场提取", "opening extraction"); skill(root, "小说开场边界", "never reveal future canon");
 	mkdirSync(join(root, "assets", "cards"), { recursive: true });
 	writeFileSync(join(root, "assets", "cards", "default_Qingwu.json"), JSON.stringify({ spec: "chara_card_v2", spec_version: "2.0", data: { name: "normal", description: "", personality: "", scenario: "", first_mes: "", mes_example: "", system_prompt: "", post_history_instructions: "", creator_notes: "", alternate_greetings: [], tags: [] } }));
 	writeFileSync(join(root, "liyuan.config.json"), JSON.stringify({ card: "assets/cards/default_Qingwu.json", userName: "old", userPersona: "", language: "zh-CN", scanDepth: 6, maxLoreInjections: 5 }));
@@ -100,7 +90,7 @@ test("GET start returns public node titles and preview token is immutable and si
 
 test("uncertain card switch preserves generated recovery state", async () => {
 	const root = cwd(); const input = corpus(root); const revision = stored(root, input.docId, input.text);
-	skill(root, "小说开演提取", "opening extraction"); skill(root, "小说开演边界", "boundary");
+	skill(root, "小说开场提取", "opening extraction"); skill(root, "小说开场边界", "boundary");
 	mkdirSync(join(root, "assets", "cards"), { recursive: true });
 	writeFileSync(join(root, "assets", "cards", "default_Qingwu.json"), "{}");
 	const original = JSON.stringify({ card: "assets/cards/default_Qingwu.json", userName: "old", userPersona: "", language: "zh-CN", scanDepth: 6, maxLoreInjections: 5 });
