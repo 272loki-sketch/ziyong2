@@ -2,11 +2,11 @@ name: Fix novel API blockers
 on:
   push:
     branches: [feat/novel-play-foundation]
-    paths: ['.github/workflows/fix-novel-api-blockers.yml']
 permissions:
   contents: write
 jobs:
   fix:
+    if: github.event.head_commit.message == 'Trigger novel API blocker repair'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,97 +15,9 @@ jobs:
       - name: Apply blocker fixes
         shell: bash
         run: |
-          cat > /tmp/fix.py <<'PY'
-          from pathlib import Path
-          p=Path('src/novel-play/application.ts'); s=p.read_text()
-          s=s.replace('readFileSync, realpathSync, rmSync, writeFileSync', 'readFileSync, realpathSync, renameSync, rmSync, writeFileSync')
-          old='''export function novelPlayBinding(host: NovelPlayModelHost): NovelPlayBinding {
-\tconst sessionId = host.memoryScope().sessionId;
-\tif (!sessionId) throw new Error("当前会话不可用");
-\treturn { sessionId, card: String(loadRawConfig(host.cwd).config.card ?? "") };
-}'''
-          new='''export function novelPlayBinding(host: NovelPlayModelHost): NovelPlayBinding {
-\tconst scope = host.memoryScope();
-\tconst sessionId = scope.sessionId;
-\tconst runtimeCard = String(scope.card ?? "");
-\tconst configCard = String(loadRawConfig(host.cwd).config.card ?? "");
-\tif (!sessionId) throw new Error("当前会话不可用");
-\tif (!runtimeCard) throw new Error("当前运行时角色卡不可用");
-\tif (!configCard || runtimeCard !== configCard) throw new Error("运行时角色卡与配置不一致，请刷新或重启服务后重试");
-\treturn { sessionId, card: runtimeCard };
-}'''
-          assert old in s; s=s.replace(old,new)
-          anchor='''const sha256 = (value: string): string => createHash("sha256").update(value, "utf8").digest("hex");'''
-          repl=anchor+'''\n\nfunction atomicWrite(path: string, bytes: string): void {
-\tconst temporary = `${path}.${randomUUID()}.tmp`;
-\ttry { writeFileSync(temporary, bytes, { encoding: "utf8", flag: "wx" }); renameSync(temporary, path); }
-\tcatch (error) { rmSync(temporary, { force: true }); throw error; }
-}'''
-          assert anchor in s; s=s.replace(anchor,repl)
-          old='''\tconst root = corpusTextsDir(cwd);
-\tconst textFile = join(root, `${document.id}.txt`);
-\tif (!resolve(textFile).startsWith(`${resolve(root)}${sep}`)) throw new Error("非法文档标识");
-\tconst text = readFileSync(textFile, "utf8");'''
-          new='''\tconst root = corpusTextsDir(cwd);
-\tconst textFile = join(root, `${document.id}.txt`);
-\tif (!resolve(textFile).startsWith(`${resolve(root)}${sep}`)) throw new Error("非法文档标识");
-\tlet realRoot: string; let realTextFile: string;
-\ttry { realRoot = realpathSync(root); realTextFile = realpathSync(textFile); }
-\tcatch { throw new Error("小说原文文件不可用"); }
-\tconst rel = relative(realRoot, realTextFile);
-\tif (!rel || rel.startsWith("..") || rel.startsWith(sep)) throw new Error("小说原文文件越界");
-\tif (realTextFile !== join(realRoot, `${document.id}.txt`)) throw new Error("小说原文归属无效");
-\tconst text = readFileSync(realTextFile, "utf8");'''
-          assert old in s; s=s.replace(old,new)
-          s=s.replace('if (before.existed) writeFileSync(before.path, before.bytes, "utf8"); else rmSync(before.path, { force: true });','if (before.existed) atomicWrite(before.path, before.bytes); else rmSync(before.path, { force: true });')
-          s=s.replace('export async function startFromConfirmedProposal(host: NovelPlayModelHost, input: { stored: StoredNovelPackage; anchor: NovelAnchor; proposal: NovelOpeningProposal }, expected: NovelPlayBinding): Promise<StartResult> {','export async function startFromConfirmedProposal(host: NovelPlayModelHost, input: { stored: StoredNovelPackage; anchor: NovelAnchor; proposal: NovelOpeningProposal }, expected: NovelPlayBinding, onSwitchPrepared?: (card: string) => void): Promise<StartResult> {')
-          old='''\t\twriteFileSync(before.path, ownedBytes, "utf8");
-\t\tconst afterWrite = novelPlayBinding(host);
-\t\tif (afterWrite.sessionId !== expected.sessionId || afterWrite.card !== relativeCard) throw new Error("配置写入期间会话发生变化");'''
-          new='''\t\tatomicWrite(before.path, ownedBytes);
-\t\tconst afterScope = host.memoryScope();
-\t\tif (afterScope.sessionId !== expected.sessionId || String(afterScope.card ?? "") !== expected.card || readFileSync(before.path, "utf8") !== ownedBytes) throw new Error("配置写入期间会话发生变化");
-\t\tonSwitchPrepared?.(relativeCard);'''
-          assert old in s; s=s.replace(old,new)
-          p.write_text(s)
-
-          p=Path('server/novel-play-api.ts'); s=p.read_text()
-          s=s.replace('buildPackage, createOpeningProposal, novelPlayBinding, sameNovelPlayBinding, startFromConfirmedProposal, startOptions,','buildPackage, createOpeningProposal, novelPlayBinding, readyCorpusSource, sameNovelPlayBinding, startFromConfirmedProposal, startOptions,')
-          s=s.replace('buildDeadlineMs: 120_000,','buildDeadlineMs: 30 * 60_000,\n\tmodelCallDeadlineMs: 120_000,\n\tstartSwitchDeadlineMs: 30_000,')
-          s=s.replace('interface InstanceState { jobs: Map<string, Job>; previews: Map<string, Preview>; starting: boolean; buildOperations: number; previewOperations: number; previewStarts: Map<string, number[]> }','interface InstanceState { jobs: Map<string, Job>; previews: Map<string, Preview>; starting: boolean; recovery?: { card?: string; session: "recovery-required"; recovery: string }; buildOperations: number; previewOperations: number; previewStarts: Map<string, number[]> }')
-          s=s.replace('previews: state.previews.size, starting: state.starting','previews: state.previews.size, starting: state.starting, recovery: state.recovery')
-          old='''\t\t\tconst input = await body(req); const binding = novelPlayBinding(host as NovelPlayModelHost); const docId = text(input.docId, "docId", 200);
-\t\t\tconst active ='''
-          new='''\t\t\tconst input = await body(req); const binding = novelPlayBinding(host as NovelPlayModelHost); const docId = text(input.docId, "docId", 200);
-\t\t\treadyCorpusSource(host.cwd, docId);
-\t\t\tconst active ='''
-          assert old in s; s=s.replace(old,new)
-          old='''\t\t\tpreview.used = true; instance.starting = true;
-\t\t\ttry { bindingChecked(host as NovelPlayModelHost, preview.binding); const result = await startFromConfirmedProposal(host as NovelPlayModelHost, preview, preview.binding); send(res, result.session === "created" ? 201 : 202, { started: result }); return true; }
-\t\t\tfinally { instance.starting = false; }'''
-          new='''\t\t\tpreview.used = true; instance.starting = true; instance.recovery = undefined;
-\t\t\tbindingChecked(host as NovelPlayModelHost, preview.binding);
-\t\t\tlet preparedCard: string | undefined;
-\t\t\tconst operation = startFromConfirmedProposal(host as NovelPlayModelHost, preview, preview.binding, card => { preparedCard = card; });
-\t\t\tlet timer: ReturnType<typeof setTimeout> | undefined;
-\t\t\tconst tracked = operation.then(result => ({ kind: "result" as const, result }), error => ({ kind: "error" as const, error })).finally(() => {
-\t\t\t\ttry { novelPlayBinding(host as NovelPlayModelHost); instance.starting = false; instance.recovery = undefined; }
-\t\t\t\tcatch { instance.recovery = { ...(preparedCard ? { card: preparedCard } : {}), session: "recovery-required", recovery: "角色切换结果不确定。为避免迟到的切换与新操作竞争，服务已保持锁定。请检查当前会话；若切换仍卡住，请重启服务后恢复。" }; }
-\t\t\t});
-\t\t\tconst outcome = await Promise.race([tracked, new Promise<{ kind: "timeout" }>(resolve => { timer = setTimeout(() => resolve({ kind: "timeout" }), NOVEL_PLAY_LIMITS.startSwitchDeadlineMs); })]);
-\t\t\tif (timer) clearTimeout(timer);
-\t\t\tif (outcome.kind === "timeout") { instance.recovery = { ...(preparedCard ? { card: preparedCard } : {}), session: "recovery-required", recovery: "角色切换未在期限内完成，结果仍不确定。配置和生成角色卡已保留，危险操作继续锁定。请检查当前会话；若切换仍卡住，请重启服务后恢复。" }; send(res, 202, { started: instance.recovery }); return true; }
-\t\t\tif (outcome.kind === "error") throw outcome.error;
-\t\t\tsend(res, outcome.result.session === "created" ? 201 : 202, { started: outcome.result }); return true;'''
-          assert old in s; s=s.replace(old,new)
-          p.write_text(s)
-
-          p=Path('test/novel-play-api-audit.test.ts'); s=p.read_text()
-          s=s.replace('assert.equal(NOVEL_PLAY_LIMITS.buildDeadlineMs, 120_000);','assert.equal(NOVEL_PLAY_LIMITS.buildDeadlineMs, 30 * 60_000);\n\tassert.equal(NOVEL_PLAY_LIMITS.modelCallDeadlineMs, 120_000);\n\tassert.equal(NOVEL_PLAY_LIMITS.startSwitchDeadlineMs, 30_000);')
-          s=s.replace('assert.match(application, /loadRawConfig\\(host\\.cwd\\)\\.config\\.card/);','assert.match(application, /runtimeCard = String\\(scope\\.card/);\n\tassert.match(application, /runtimeCard !== configCard/);')
-          p.write_text(s)
-          PY
-          python /tmp/fix.py
+          git show HEAD^:.github/workflows/fix-novel-api-blockers.yml > /tmp/original.yml
+          sed -n '/cat > \/tmp\/fix.py/,/python \/tmp\/fix.py/p' /tmp/original.yml | sed '$d' > /tmp/run-fix.sh
+          bash /tmp/run-fix.sh
           node --test --test-reporter=./scripts/test-summary.mjs test/novel-play*.test.ts
           node -e "import('./scripts/novel-integration/server-patch.mjs').then(({apply})=>{const fs=require('fs');const s=fs.readFileSync('server/rest.ts','utf8');if(apply(s)!==s||apply(apply(s))!==s)process.exit(1)})"
           git rm .github/workflows/fix-novel-api-blockers.yml
