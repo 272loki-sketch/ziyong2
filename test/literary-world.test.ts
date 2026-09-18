@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
@@ -26,7 +29,7 @@ test("literary world：解析完整快照并限制数量和等级", () => {
 	const parsed = normalizeLiteraryWorldState(JSON.stringify({
 		digest: "远方开始流传消息",
 		events: [{ id: "event_a", name: "暗中调查", type: "progress", level: 9, stage: "筹备", description: "探子开始查访" }],
-		winds: [{ id: "wind_a", topic: "失窃", type: "rumor", level: 2, content: "仓库失窃", scope: "码头", source: "守夜人→脚夫" }],
+		winds: [{ id: "wind_a", topic: "失窃", type: "rumor", level: 2, content: "仓库失窃", scope: "码头", source: "宴客人→脚夫" }],
 		blackbox: { secretActions: [{ action: "密室会面", witnesses: "无", trace: "门锁有新划痕" }], secretAssets: [] },
 	}), defaultLiteraryWorldState());
 	assert.ok(parsed);
@@ -48,13 +51,31 @@ test("literary world：主演注入不泄露黑盒具体内容", () => {
 });
 
 test("literary world：用户 Skill 是规则权威且位于 Git 忽略目录", () => {
-	const repo = new URL("..", import.meta.url).pathname;
-	const skill = workflowSkill(scanSkillFiles(repo), "world");
-	assert.equal(skill?.source, "user");
-	assert.match(skill?.body ?? "", /因果与信息边界/);
+	const repo = mkdtempSync(join(tmpdir(), "liyuan-literary-world-skill-"));
+	try {
+		const skillDir = join(repo, ".liyuan-stage-skills", "world-rules");
+		mkdirSync(skillDir, { recursive: true });
+		writeFileSync(join(skillDir, "SKILL.md"), [
+			"---",
+			"name: 世界规则覆盖",
+			"description: 测试世界规则边界",
+			"workflow: world",
+			"resident: false",
+			"每轮: false",
+			"---",
+			"",
+			"因果与信息边界由本规则定义。",
+		].join("\n"));
+		const skill = workflowSkill(scanSkillFiles(repo), "world");
+		assert.equal(skill?.source, "user");
+		assert.match(skill?.body ?? "", /因果与信息边界/);
+		assert.match(skill?.dir ?? "", /world-rules/);
+	} finally {
+		rmSync(repo, { recursive: true, force: true });
+	}
 });
 
-test("literary world：快照可直接作为 wire 展示数据且黑盒只需计数", () => {
+test("literary world：快照可直接作为 wire 展示数据且黑箱只需计数", () => {
 	const world = normalizeLiteraryWorldState({
 		digest: "局势正在变化",
 		events: [{ id: "event_1", name: "考试筹备", type: "progress", level: 2, stage: "筹备", description: "各班开始行动" }],
@@ -72,5 +93,5 @@ test("literary world：推演 prompt 收到角色卡独立适配，但仍由世�
 	assert.ok(profile);
 	const prompt = buildLiteraryWorldPrompt({ skillBody: "规则", world: defaultLiteraryWorldState(), rpState: { time: "", location: "", characters: {}, inventory: [], flags: {}, plot_threads: [] }, history: [], userText: "你好", narrativeText: "她点头。", charName: "她", userName: "我", manifest: manifestFromProfile(profile) });
 	assert.match(prompt.userText, /relationship-dynamics/);
-	assert.match(prompt.systemPrompt, /Skill 是本任务规则的唯一权威/);
+	assert.match(prompt.systemPrompt, /Skill 是本任务演化规则的唯一权威/);
 });
