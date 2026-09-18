@@ -4,6 +4,13 @@
  */
 
 import { useEffect, useRef } from "react";
+import {
+	buildWireUrl,
+	nextRetryMs,
+	shouldWakeFromOnline,
+	shouldWakeFromVisibility,
+	WS_RETRY_INITIAL_MS,
+} from "./ws-lifecycle.ts";
 import type { ClientFrame, ServerFrame } from "./wire.ts";
 
 export type ConnState = "connecting" | "open" | "closed";
@@ -11,6 +18,7 @@ export type ConnState = "connecting" | "open" | "closed";
 export interface WsHandle {
 	send: (frame: ClientFrame) => void;
 }
+
 
 export function useWire(onFrame: (frame: ServerFrame) => void, onState: (s: ConnState) => void): WsHandle {
 	const wsRef = useRef<WebSocket | null>(null);
@@ -21,21 +29,31 @@ export function useWire(onFrame: (frame: ServerFrame) => void, onState: (s: Conn
 
 	useEffect(() => {
 		let closed = false;
-		let retryMs = 1500;
+		let retryMs = WS_RETRY_INITIAL_MS;
 		let timer: ReturnType<typeof setTimeout> | undefined;
 
+		const clearRetryTimer = () => {
+			if (!timer) return;
+			clearTimeout(timer);
+			timer = undefined;
+		};
+
 		const connect = () => {
+			clearRetryTimer();
+			const current = wsRef.current;
 			if (closed) return;
+			if (current && current.readyState !== WebSocket.CLOSED) return;
 			onStateRef.current("connecting");
-			const proto = location.protocol === "https:" ? "wss:" : "ws:";
-			const ws = new WebSocket(`${proto}//${location.host}/ws`);
+			const ws = new WebSocket(buildWireUrl(location.protocol, location.host));
 			wsRef.current = ws;
 
 			ws.onopen = () => {
-				retryMs = 1500;
+				if (closed || wsRef.current !== ws) return;
+				retryMs = WS_RETRY_INITIAL_MS;
 				onStateRef.current("open");
 			};
 			ws.onmessage = (ev) => {
+				if (wsRef.current !== ws) return;
 				try {
 					onFrameRef.current(JSON.parse(String(ev.data)) as ServerFrame);
 				} catch {
@@ -43,7 +61,9 @@ export function useWire(onFrame: (frame: ServerFrame) => void, onState: (s: Conn
 				}
 			};
 			ws.onclose = (ev) => {
-				if (closed) return;
+				const isCurrent = wsRef.current === ws;
+				if (isCurrent) wsRef.current = null;
+				if (closed || !isCurrent) return;
 				// 4401 = 服务端鉴权失败（密码在别处被改）：刷新回登录门，别在这无谓重连
 				if (ev.code === 4401) {
 					location.reload();
@@ -51,16 +71,40 @@ export function useWire(onFrame: (frame: ServerFrame) => void, onState: (s: Conn
 				}
 				onStateRef.current("closed");
 				timer = setTimeout(connect, retryMs);
-				retryMs = Math.min(retryMs * 2, 10_000);
+				retryMs = nextRetryMs(retryMs);
 			};
-			ws.onerror = () => ws.close();
+			ws.onerror = () => {
+				if (wsRef.current !== ws) return;
+				ws.close();
+			};
+		};
+
+		const wakeReconnect = () => {
+			clearRetryTimer();
+			connect();
+		};
+
+		const onVisibilityChange = () => {
+			if (!shouldWakeFromVisibility(document.visibilityState, closed, wsRef.current?.readyState)) return;
+			wakeReconnect();
+		};
+
+		const onOnline = () => {
+			if (!shouldWakeFromOnline(closed, wsRef.current?.readyState)) return;
+			wakeReconnect();
 		};
 
 		connect();
+		window.addEventListener("online", onOnline);
+		document.addEventListener("visibilitychange", onVisibilityChange);
 		return () => {
 			closed = true;
-			if (timer) clearTimeout(timer);
-			wsRef.current?.close();
+			clearRetryTimer();
+			window.removeEventListener("online", onOnline);
+			document.removeEventListener("visibilitychange", onVisibilityChange);
+			const ws = wsRef.current;
+			wsRef.current = null;
+			ws?.close();
 		};
 	}, []);
 
