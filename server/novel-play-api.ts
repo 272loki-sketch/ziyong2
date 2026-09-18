@@ -56,6 +56,7 @@ function bindingChecked(host: NovelPlayModelHost, expected: NovelPlayBinding): v
 export async function handleNovelPlayApiRequest(req: IncomingMessage, res: ServerResponse, host: RestHost): Promise<boolean> {
 	const pathname = (req.url ?? "/").split("?")[0]; if (!pathname.startsWith("/api/novel-play/")) return false;
 	const route = `${req.method} ${pathname}`; const query = new URLSearchParams((req.url ?? "").split("?")[1] ?? ""); const instance = stateFor(host); prune(instance);
+	if (route === "POST /api/novel-play/start" && (instance.starting || instance.recovery)) { send(res, 409, { error: "小说开演正在启动或等待恢复" }); return true; }
 	try {
 		const current = novelPlayBinding(host as NovelPlayModelHost);
 		if (route === "POST /api/novel-play/build") {
