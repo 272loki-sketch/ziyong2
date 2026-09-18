@@ -2,42 +2,16 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildNovelPackage } from "../src/novel-play/canon.ts";
 import { extractNovelOpening } from "../src/novel-play/opening.ts";
+import { novelNodeId } from "../src/novel-play/source.ts";
 import type { NovelSource } from "../src/novel-play/source.ts";
 import type { StoredNovelPackage } from "../src/novel-play/store.ts";
-
-function fixture() {
-	const text = "旧钟楼。清晨。门厅。雨停。锚点事件。未来凶手揭晓。";
-	const source: NovelSource = {
-		version: 1, docId: "doc-1", title: "测试小说", fingerprint: "fp-1", chunkChars: 100,
-		chunks: [{ index: 0, chars: text.length, chapters: [], text }],
-	};
-	const anchorQuote = "锚点事件。";
-	const start = text.indexOf(anchorQuote);
-	const nodeBase = { key: "anchor", stageId: "stage-1", order: 0, title: "锚点", summary: "锚点摘要", visibility: "public" as const, dependsOn: [], sourceRefs: [{ chunkIndex: 0, start, end: start + anchorQuote.length, quote: anchorQuote }] };
-	const pkg = buildNovelPackage(source, [{ id: "stage-1", order: 0, title: "开篇" }], [{ ...nodeBase, id: "placeholder" }]);
-	// buildNovelPackage requires the content-derived id.
-	const { novelNodeId } = requireSourceHelpers();
-	const built = buildNovelPackage(source, [{ id: "stage-1", order: 0, title: "开篇" }], [{ ...nodeBase, id: novelNodeId(source, nodeBase.sourceRefs[0], nodeBase.key) }]);
-	const stored: StoredNovelPackage = { version: 1, source, package: built };
-	return { text, source, stored, anchor: { packageRevision: built.revision, nodeId: built.nodes[0].id, position: "before" as const } };
-}
-
-// Keep fixture construction synchronous without hiding source identity rules in test constants.
-function requireSourceHelpers() {
-	return { novelNodeId: (source: NovelSource, ref: { chunkIndex: number; start: number; end: number; quote: string }, key: string) => {
-		// This import-free duplicate is intentionally not used. Replaced below by the static import alias.
-		return source && ref && key ? "" : "";
-	} };
-}
-
-import { novelNodeId } from "../src/novel-play/source.ts";
 
 function validOutput(quote = "旧钟楼。") {
 	const fact = { text: quote, quote };
 	return { time: fact, place: fact, sceneText: fact, openingNarration: fact, publicCharacterProfiles: [], publicWorldFacts: [fact] };
 }
 
-function properFixture() {
+function fixture() {
 	const text = "旧钟楼。清晨。门厅。雨停。锚点事件。未来凶手揭晓。";
 	const source: NovelSource = { version: 1, docId: "doc-1", title: "测试小说", fingerprint: "fp-1", chunkChars: 100, chunks: [{ index: 0, chars: text.length, chapters: [], text }] };
 	const quote = "锚点事件。";
@@ -49,7 +23,7 @@ function properFixture() {
 }
 
 const base = (overrides: Partial<Parameters<typeof extractNovelOpening>[0]> = {}) => {
-	const { stored, anchor } = properFixture();
+	const { stored, anchor } = fixture();
 	return { stored, anchor, player: { name: "林岚", identity: "新来的管理员" }, skillBody: "只提取给定原文范围。", modelCall: async () => validOutput(), ...overrides };
 };
 
@@ -57,7 +31,7 @@ test("小说开场提取：before/after 使用精确锚点截止，且绝不发�
 	for (const position of ["before", "after"] as const) {
 		let sent = "";
 		const proposal = await extractNovelOpening(base({
-			anchor: { ...properFixture().anchor, position },
+			anchor: { ...fixture().anchor, position },
 			modelCall: async request => { sent = request.userText; return validOutput(); },
 		}));
 		const parsed = JSON.parse(sent);
@@ -83,9 +57,9 @@ test("小说开场提取：预算只保留合格前缀的连续尾部", async ()
 });
 
 test("小说开场提取：缺失锚点、版本不匹配和多段锚点均闭门拒绝", async () => {
-	await assert.rejects(extractNovelOpening(base({ anchor: { ...properFixture().anchor, nodeId: "missing" } })), /节点不存在/);
-	await assert.rejects(extractNovelOpening(base({ anchor: { ...properFixture().anchor, packageRevision: "old" } })), /版本不匹配/);
-	const { stored, anchor } = properFixture();
+	await assert.rejects(extractNovelOpening(base({ anchor: { ...fixture().anchor, nodeId: "missing" } })), /节点不存在/);
+	await assert.rejects(extractNovelOpening(base({ anchor: { ...fixture().anchor, packageRevision: "old" } })), /版本不匹配/);
+	const { stored, anchor } = fixture();
 	const node = stored.package.nodes[0];
 	const second = { ...node.sourceRefs[0], start: 0, end: 4, quote: stored.source.chunks[0].text.slice(0, 4) };
 	const changed = { ...node, sourceRefs: [node.sourceRefs[0], second], id: novelNodeId(stored.source, node.sourceRefs[0], node.key) };
@@ -98,7 +72,7 @@ test("小说开场提取：严格校验唯一引句并返回原文 chunk offsets
 	assert.equal(proposal.digest.length, 64);
 	assert.equal(proposal.evidence.length, 5);
 	for (const evidence of proposal.evidence) {
-		const chunk = properFixture().stored.source.chunks[evidence.source.chunkIndex];
+		const chunk = fixture().stored.source.chunks[evidence.source.chunkIndex];
 		assert.equal(chunk.text.slice(evidence.source.start, evidence.source.end), evidence.source.quote);
 		assert.equal(evidence.rangeEnd - evidence.rangeStart, evidence.source.quote.length);
 	}
