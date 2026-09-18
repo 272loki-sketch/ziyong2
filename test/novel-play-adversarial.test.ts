@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 
-import { buildNovelPackage, novelNodeId } from "../src/novel-play/canon.ts";
-import { prepareNovelSource } from "../src/novel-play/source.ts";
+import { buildNovelPackage } from "../src/novel-play/canon.ts";
+import { novelNodeId, prepareNovelSource } from "../src/novel-play/source.ts";
 import { saveNovelPackage } from "../src/novel-play/store.ts";
 import { saveStageSkill } from "../src/stage/skill-store.ts";
 import { NOVEL_PLAY_LIMITS, handleNovelPlayApiRequest, novelPlayCounters } from "../server/novel-play-api.ts";
@@ -249,13 +249,8 @@ test("corpus reads reject a symlink that escapes the corpus text directory", asy
 	const external = join(cwd, "outside.txt");
 	writeFileSync(external, input.text);
 	const textFile = join(cwd, ".liyuan", "outline", "research", "corpus", "texts", `${input.docId}.txt`);
-	writeFileSync(textFile, "");
-	try { symlinkSync(external, textFile); } catch {
-		// Windows can require unlink-before-symlink behavior; replace the fixture explicitly.
-		const { unlinkSync } = await import("node:fs");
-		unlinkSync(textFile);
-		symlinkSync(external, textFile);
-	}
+	unlinkSync(textFile);
+	symlinkSync(external, textFile);
 	const host = makeHost(cwd, async () => { throw new Error("model must not run for an escaped source"); });
 	const result = await request(host, "POST", "/api/novel-play/build", { docId: input.docId });
 	assert.equal(result.status, 400);
