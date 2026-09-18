@@ -6,19 +6,20 @@ permissions:
   contents: write
 jobs:
   fix:
-    if: github.event.head_commit.message == 'Run novel API blocker repair script'
+    if: github.event.head_commit.message == 'Execute novel API blocker repair'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: feat/novel-play-foundation
-          fetch-depth: 5
+          fetch-depth: 6
       - name: Apply blocker fixes
         shell: bash
         run: |
           git show e28b0ffc1f6e29ff5148db9f14ca70aace24ec07:.github/workflows/fix-novel-api-blockers.yml > /tmp/original.yml
           sed -n '/cat > \/tmp\/fix.py/,/python \/tmp\/fix.py/p' /tmp/original.yml | sed '$d' | sed 's/^          //' > /tmp/run-fix.sh
           bash /tmp/run-fix.sh
+          python /tmp/fix.py
           node --test --test-reporter=./scripts/test-summary.mjs test/novel-play*.test.ts
           node -e "import('./scripts/novel-integration/server-patch.mjs').then(({apply})=>{const fs=require('fs');const s=fs.readFileSync('server/rest.ts','utf8');if(apply(s)!==s||apply(apply(s))!==s)process.exit(1)})"
           git rm .github/workflows/fix-novel-api-blockers.yml
