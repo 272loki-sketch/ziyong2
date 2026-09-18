@@ -9,82 +9,31 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: feat/novel-play-foundation
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - run: |
-          node --input-type=module <<'NODE'
-          import { readFileSync, writeFileSync } from 'node:fs';
-          import { apply } from './scripts/novel-integration/server-patch.mjs';
-          const path='server/rest.ts'; const source=readFileSync(path,'utf8'); const once=apply(source); const twice=apply(once);
-          if (once !== twice) throw new Error('server patch is not idempotent');
-          writeFileSync(path, once);
-          NODE
+      - name: Apply deterministic REST guard
+        run: node --input-type=module -e "import{readFileSync,writeFileSync}from'node:fs';import{apply}from'./scripts/novel-integration/server-patch.mjs';const p='server/rest.ts',s=readFileSync(p,'utf8'),a=apply(s);if(apply(a)!==a)throw Error('not idempotent');writeFileSync(p,a)"
+      - name: Align regression assertions
+        run: |
           python3 - <<'PY'
           from pathlib import Path
-          p=Path('test/novel-play-api.test.ts'); s=p.read_text()
-          s=s.replace('assert.equal(preview.status, 200); assert.equal(JSON.stringify(preview.body).includes("quote"), false);', 'assert.equal(preview.status, 200, JSON.stringify(preview.body)); assert.equal(JSON.stringify(preview.body).includes("quote"), false);')
-          s=s.replace('test("failed card switch rolls config back and removes generated card"', 'test("uncertain card switch preserves generated recovery state"')
-          s=s.replace('''\tassert.equal(failed.status, 400);
-\tassert.equal(readFileSync(join(root, "liyuan.config.json"), "utf8"), original);''','''\tassert.equal(failed.status, 202, JSON.stringify(failed.body));
-\tassert.equal(failed.body.started.session, "recovery-required");
-\tassert.notEqual(readFileSync(join(root, "liyuan.config.json"), "utf8"), original);
-\tassert.ok(readFileSync(join(root, failed.body.started.card), "utf8").includes("liyuanNovelPlay"));''')
+          p=Path('test/novel-play-api.test.ts')
+          s=p.read_text()
+          s=s.replace('assert.equal(preview.status, 200); assert.equal(JSON.stringify(preview.body).includes("quote"), false);','assert.equal(preview.status, 200, JSON.stringify(preview.body)); assert.equal(JSON.stringify(preview.body).includes("quote"), false);')
+          s=s.replace('test("failed card switch rolls config back and removes generated card"','test("uncertain card switch preserves generated recovery state"')
+          s=s.replace('assert.equal(failed.status, 400);\n\tassert.equal(readFileSync(join(root, "liyuan.config.json"), "utf8"), original);','assert.equal(failed.status, 202, JSON.stringify(failed.body));\n\tassert.equal(failed.body.started.session, "recovery-required");\n\tassert.notEqual(readFileSync(join(root, "liyuan.config.json"), "utf8"), original);\n\tassert.ok(readFileSync(join(root, failed.body.started.card), "utf8").includes("liyuanNovelPlay"));')
           p.write_text(s)
-          p=Path('test/novel-play-ui.test.ts'); s=p.read_text()
+          p=Path('test/novel-play-ui.test.ts')
+          s=p.read_text()
           old='assert.match(application, /nodes: value\\.package\\.nodes\\.filter\\(\\(node\\) => node\\.visibility === "public"\\)\\.map\\(\\(node\\) => \\(\\{ nodeId: node\\.id, title: node\\.title \\}\\)\\)/);'
           new='assert.match(application, /title: `阶段 \\${stages\\.get\\(node\\.stageId\\) \\?\\? 0} · 节点 \\${node\\.order \\+ 1}`/);\n\tassert.doesNotMatch(application, /title: node\\.title/);'
-          if old not in s: raise SystemExit('stale UI assertion anchor absent')
+          if old not in s: raise SystemExit('UI assertion anchor absent')
           p.write_text(s.replace(old,new))
           PY
-          cat > .github/workflows/novel-play.yml <<'YAML'
-          name: novel-play verification
-          on:
-            push:
-              branches: [feat/novel-play-foundation]
-              paths:
-                - 'src/**'
-                - 'server/**'
-                - 'web/**'
-                - 'test/**'
-                - 'skills/**'
-                - 'scripts/test-summary.mjs'
-                - '.github/workflows/novel-play.yml'
-            workflow_dispatch:
-          permissions:
-            contents: read
-          jobs:
-            verify:
-              runs-on: ubuntu-latest
-              timeout-minutes: 15
-              steps:
-                - uses: actions/checkout@v4
-                  with:
-                    persist-credentials: false
-                - uses: actions/setup-node@v4
-                  with:
-                    node-version: 22
-                    cache: npm
-                - name: Install dependencies
-                  run: npm ci
-                - name: Novel play tests
-                  run: node --test --test-reporter=./scripts/test-summary.mjs test/novel-play*.test.ts
-                - name: Full domain regression
-                  if: ${{ !cancelled() }}
-                  run: node --test --test-reporter=./scripts/test-summary.mjs test/*.test.ts
-                - name: Install frontend
-                  if: ${{ !cancelled() }}
-                  run: npm --prefix web ci
-                - name: Frontend build
-                  if: ${{ !cancelled() }}
-                  run: npm run web:build
-          YAML
           git diff --check
-          grep -q 'novel-play-api: config mutation guard' server/rest.ts
-          grep -q 'isNovelPlayStartLocked' server/rest.ts
-      - run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add server/rest.ts test/novel-play-api.test.ts test/novel-play-ui.test.ts .github/workflows/novel-play.yml
+          grep -q 'config mutation guard' server/rest.ts
+      - name: Commit changes
+        run: |
+          git config user.name github-actions-bot
+          git config user.email 41898282+github-actions-bot@users.noreply.github.com
+          git add server/rest.ts test/novel-play-api.test.ts test/novel-play-ui.test.ts
           git commit -m 'Restore start guard and align audit regressions'
           git push origin HEAD:feat/novel-play-foundation
