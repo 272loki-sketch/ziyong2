@@ -25,7 +25,6 @@ import type { CharacterCard, LorebookEntry, MacroContext, RpConfig, WorldState }
 // ---------------- 分支 → 历史 ----------------
 
 /** 会话树条目的结构子集（不引 @liyuan/agent-runtime 类型，保持 src/ 独立） */
-
 export interface BranchEntryLike {
 	/** 树上条目 id（前情摘要用它锚定「覆盖到哪」） */
 	id?: string;
@@ -73,7 +72,6 @@ export interface RebuiltHistory {
 export const SUMMARY_ENTRY_TYPE = "rp-summary";
 
 /** rp-summary 条目的 data 形状 */
-
 export interface RpSummaryData {
 	/** 接力摘要正文（已合并更早的摘要） */
 	summary: string;
@@ -98,10 +96,7 @@ const summaryDataOf = (e: BranchEntryLike): RpSummaryData | null => {
  * 分支上生效的前情摘要 = **最后一条**摘要条目（每次压缩都把上一份合并进来，故后者全覆盖前者）。
  * 兼容旧会话里 pi 写的 `compaction` 条目：覆盖边界取 firstKeptEntryId 的前一条。
  * 返回 cut = 需要从历史里去掉的条目数（分支前缀长度）。
- *
- * 锚点缺失的摘要/compaction 视为坏条目：忽略并继续向前找更早的有效摘要，绝不按条目位置退守裁正文。
  */
-
 export function activeSummary(branch: BranchEntryLike[]): { summary: string; cut: number } | null {
 	for (let i = branch.length - 1; i >= 0; i--) {
 		const e = branch[i];
@@ -142,7 +137,6 @@ export function activeSummary(branch: BranchEntryLike[]): { summary: string; cut
  *
  * M4：有 rp-summary 时，被覆盖的早期条目整段不进历史，改由 summary 字段回读为【前情提要】。
  */
-
 export function rebuildHistory(branch: BranchEntryLike[], promptRules: DisplayRule[] = []): RebuiltHistory 
 {
 	const active = activeSummary(branch);
@@ -183,7 +177,8 @@ export function rebuildHistory(branch: BranchEntryLike[], promptRules: DisplayRu
 		(m as { _role?: "user" | "assistant" })._role ?? (m.role === "user" ? "user" : "assistant");
 	const needDepth = hasDepthLimits(promptRules);
 	const groupOf: number[] = [];
-	let groups = 0;
+	
+let groups = 0;
 	if (needDepth) {
 		let prevRole: "user" | "assistant" | null = null;
 		for (const m of patched) {
@@ -225,7 +220,8 @@ export function rebuildHistory(branch: BranchEntryLike[], promptRules: DisplayRu
 		}
 	}
 	let lastNarrativeText = "";
-	{
+	
+{
 		let inBackstageTurn = false;
 		for (const m of history) {
 			if (m.role === "user") {
@@ -322,7 +318,8 @@ export function buildStageSystemPrompt({
 	// 0) 梨园架构段：讲清脚下的机器怎么转（轮次、思考/扮演/写作三活动的位置、注入帧），供预设自行适配。
 	//    只写架构，不写角色（碰破限）、不教写作（那是预设的教导权）、不举写作细节（工具描述里已有）。
 	//    先于预设装配段：模型最先读到梨园怎么运转，再读预设教它演什么。
-	sections.push(tools === false
+	
+sections.push(tools === false
 		? `# 梨园运行架构
 当前 API 不支持原生工具调用。本拍使用纯文本主演模式：依据角色卡、当前分支事实和末端材料，直接输出完整的本拍剧情正文。不要输出工具名、JSON、函数调用、计划说明、状态栏或系统解释。`
 		: `# 梨园运行架构
@@ -337,7 +334,8 @@ export function buildStageSystemPrompt({
 	// 2) 兜底：预设没声明的 marker 槽位，梨园按自己的版式补——补的是位置，不是措辞之外的话。
 	const charParts: string[] = [];
 	if (!declared.has("charDescription") && card.description) charParts.push(m(card.description));
-	if (!declared.has("charPersonality") && card.personality) charParts.push(`## 性格\n${m(card.personality)}`);
+	
+if (!declared.has("charPersonality") && card.personality) charParts.push(`## 性格\n${m(card.personality)}`);
 	if (!declared.has("scenario") && card.scenario) charParts.push(`## 当前场景\n${m(card.scenario)}`);
 	if (!declared.has("dialogueExamples") && card.mesExample) {
 		charParts.push(`## 对白示例（仅供文风与语气参考，不是已发生的剧情）\n${m(card.mesExample)}`);
@@ -365,7 +363,8 @@ export function buildStageSystemPrompt({
 	);
 
 	// M-R1（PLAN-RECTIFY §2.1-5）：纯协议，零扮演词。扮演的每个字都有署名主人（P1）。
-	if (tools !== false) {
+	
+if (tools !== false) {
 		const askRule = allowAsk
 			? "用户主权未定且此刻不定就无法继续时可调用 `ask`；其余剧情走向由主演依据人物动机和已有事实自行决定。"
 			: "剧情走向由主演依据人物动机和已有事实自行决定，不在中途调用 `ask`，不弹出选择卡。";
@@ -378,7 +377,8 @@ export function buildStageSystemPrompt({
 	// MCP 外设（8/06 重接）：用户在「扩展能力 → MCP」接入的外部服务器。
 	// 工具已在清单里，这里只说明它们是什么、以及 RP 语境下的三条纪律。
 	// 措辞承自旧 director.ts（009e22e 换引擎时随 director 一起失联）。
-	if (mcpTools && mcpTools.length > 0) {
+	
+if (mcpTools && mcpTools.length > 0) {
 		const index = mcpTools.map((t) => `- \`${t.name}\`：${t.description}`).join("\n");
 		sections.push(
 			`# MCP 外设（用户接入的外部工具）
@@ -391,7 +391,8 @@ ${index}`,
 		);
 	}
 
-	sections.push(
+	
+sections.push(
 		`# 消息流约定
 - 权威优先级：用户本拍明确输入 ＞ 当前分支已提交正文 ＞【世界状态】/【活跃面板】等已确认动态状态 ＞ 角色卡稳定事实 ＞【前情提要】。这些内容发生冲突时，不得用建议类材料覆盖。
 - 建议类材料：文学画像、用户历史偏好画像、文学导演、生态候选、研究材料和【剧情记忆】中的事件/归档；它们只帮助写得更自然，不能制造事实、覆盖权威或替用户决定。
@@ -470,7 +471,8 @@ export interface StageInjectionOptions {
 	sceneConductor?: string;
 	/** 分支化后台世界状态的裁剪投影；完整状态不直接占用主演上下文。 */
 	literaryWorld?: string;
-	/** 人物、地点、日程与可错过事件的拍前可见投影；秘密只露边界。 */
+	
+/** 人物、地点、日程与可错过事件的拍前可见投影；秘密只露边界。 */
 	literaryEcology?: string;
 	/** 预设拆出的 D/E 方法论，直接作为本拍写作指导，不触发工具轮。 */
 	writerGuidance?: Array<{ topic: string; text: string }>;
@@ -546,7 +548,8 @@ export function buildStageInjection({
 		);
 	}
 
-	if (literaryDirection) {
+	
+if (literaryDirection) {
 		blocks.push(
 			`【本拍文学导演候选】\n这是建议层的拍前方向，不是正文、事实、事件清单或 beat_plan。它只约束角色主动性、个人线、幕后线和玩家停点；具体事件、顺序、动作、对白、镜头与段落由随后 beat_plan 决定，不得照抄本块为正文。\n${literaryDirection}`,
 		);
@@ -567,7 +570,8 @@ export function buildStageInjection({
 		);
 	}
 
-	if (writerGuidance?.length) {
+	
+if (writerGuidance?.length) {
 		blocks.push(
 			`【预设写作指导】\n以下是用户预设署名的写作方法与场景指导，只约束本拍写法，不是剧情事实、系统流程或待输出内容。按当前场景取用。\n${writerGuidance.map((item) => `## ${item.topic}\n${item.text}`).join("\n\n")}`,
 		);
@@ -594,7 +598,8 @@ export function buildStageInjection({
 		blocks.push(`【卡作者末端指令】\n${applyMacros(card.postHistoryInstructions, macro)}`);
 	}
 
-	blocks.push(`【语言】以${config.language}写叙事与对白（专有名词可保留原文）。`);
+	
+blocks.push(`【语言】以${config.language}写叙事与对白（专有名词可保留原文）。`);
 
 	// 字数一行：纯事实（无「朝这个量落笔」类指令）；无目标不出行
 	if (wordRange) {

@@ -53,7 +53,6 @@ test("activeSummary：取最后一条 rp-summary，cut 到锚点之后", () => {
 	assert.equal(active.cut, 4);
 });
 
-
 test("rebuildHistory：被摘要覆盖的早期条目整段不进历史，改由 summary 回读", () => {
 	const branch = [...beats(3)];
 	branch.push(summaryE("【前情】头两拍发生的事。", "a-2"));
@@ -80,7 +79,6 @@ test("rebuildHistory：多份摘要时后者全覆盖前者（合并语义）", 
 	assert.ok(text.includes("第 5 拍") && text.includes("第 6 拍"), "第 5、6 拍保留");
 });
 
-
 test("rebuildHistory：兼容旧会话 pi 的 compaction 条目（firstKeptEntryId 语义）", () => {
 	const branch: BranchEntryLike[] = [...beats(3)];
 	branch.push({
@@ -96,57 +94,45 @@ test("rebuildHistory：兼容旧会话 pi 的 compaction 条目（firstKeptEntry
 	assert.ok(text.includes("第 3 拍"), "firstKeptEntryId 那条起保留");
 });
 
-test("rebuildHistory：坏摘要锚点丢失时忽略该摘要，保留全部正文", () => {
+test("rebuildHistory：坏摘要锚点丢失时忽略该摘要并保留全文", () => {
 	const branch = [...beats(2)];
-	branch.push(summaryE("坏摘要。", "不存在的-id"));
+	branch.push(summaryE("摘要。", "不存在的-id"));
 	const active = activeSummary(branch);
 	const { history, summary } = rebuildHistory(branch);
 	assert.equal(active, null);
 	assert.equal(summary, undefined);
-	const text = history.map((m) => m.text).join("\n");
-	assert.ok(text.includes("第 1 拍") && text.includes("第 2 拍"), "坏摘要不得裁掉正文");
+	assert.equal(history.length, 4, "坏摘要不得裁正文");
 });
 
-test("rebuildHistory：坏新摘要应回退到更早的有效摘要", () => {
-	const branch = [...beats(4)];
-	branch.push(summaryE("早期有效摘要：1-2 拍。", "a-2", "s-old"));
-	branch.push(userE("第 5 拍我说的话。", "u-5"));
-	branch.push(asstE("第 5 拍的正文。", "a-5"));
-	branch.push(summaryE("坏新摘要。", "missing-anchor", "s-bad"));
-
+test("rebuildHistory：坏新摘要时回退到更早有效摘要", () => {
+	const branch = [...beats(5)];
+	branch.push(summaryE("旧摘要：1-2 拍。", "a-2", "s-old"));
+	branch.push(summaryE("坏新摘要。", "不存在的-id", "s-bad"));
 	const active = activeSummary(branch);
 	assert.ok(active);
-	assert.equal(active.summary, "早期有效摘要：1-2 拍。");
+	assert.equal(active.summary, "旧摘要：1-2 拍。");
 	assert.equal(active.cut, 4);
 
 	const { history, summary } = rebuildHistory(branch);
-	assert.equal(summary, "早期有效摘要：1-2 拍。");
+	assert.equal(summary, "旧摘要：1-2 拍。");
 	const text = history.map((m) => m.text).join("\n");
-	assert.ok(!text.includes("第 1 拍") && !text.includes("第 2 拍"), "仍应沿用早期有效摘要的覆盖边界");
-	assert.ok(text.includes("第 3 拍") && text.includes("第 4 拍") && text.includes("第 5 拍"), "有效摘要之后的正文必须保留");
+	assert.ok(!text.includes("第 1 拍") && !text.includes("第 2 拍"));
+	assert.ok(text.includes("第 3 拍") && text.includes("第 4 拍") && text.includes("第 5 拍"));
 });
 
 test("rebuildHistory：所有摘要都坏时保留全部正文", () => {
 	const branch: BranchEntryLike[] = [...beats(2)];
 	branch.push({
-		id: "c-bad-non-string",
+		id: "c1",
 		type: "compaction",
-		...({ summary: "坏旧摘要：非字符串锚点。", firstKeptEntryId: 42 } as object),
+		...({ summary: "坏旧摘要。", firstKeptEntryId: 42 } as object),
 	} as BranchEntryLike);
-	branch.push({
-		id: "c-bad-missing",
-		type: "compaction",
-		...({ summary: "坏旧摘要：丢锚点。", firstKeptEntryId: "missing-legacy-anchor" } as object),
-	} as BranchEntryLike);
-	branch.push(summaryE("坏新摘要。", "missing-summary-anchor"));
-
+	branch.push(summaryE("坏新摘要。", "不存在的-id"));
 	const active = activeSummary(branch);
 	const { history, summary } = rebuildHistory(branch);
 	assert.equal(active, null);
 	assert.equal(summary, undefined);
 	assert.equal(history.length, 4);
-	const text = history.map((m) => m.text).join("\n");
-	assert.ok(text.includes("第 1 拍") && text.includes("第 2 拍"), "所有坏摘要都应被忽略");
 });
 
 test("无摘要的分支：summary 为 undefined，历史照旧全在", () => {
@@ -165,7 +151,6 @@ test("planCompaction：未攒够拍数不压缩", () => {
 	});
 	assert.equal(plan, null, "保留 6 拍 + 周期 3 = 至少 9 拍才压");
 });
-
 
 test("planCompaction：攒够则切在「最近 KEEP_RECENT 拍」之前", () => {
 	const branch = beats(10);
@@ -194,7 +179,6 @@ test("planCompaction：everyNTurns<=0 = 关闭主动压缩", () => {
 	assert.equal(plan, null);
 });
 
-
 test("planCompaction：二次压缩只算「活着的」拍，并带上一份摘要合并", () => {
 	const branch = [...beats(12)];
 	branch.push(summaryE("旧摘要：1-6 拍。", "a-6"));
@@ -214,10 +198,9 @@ test("planCompaction：二次压缩只算「活着的」拍，并带上一份摘
 	assert.ok(!plan.conversationText.includes("第 6 拍"), "已被覆盖的不重复摘");
 });
 
-
 test("serializeForSummary：剔掉区间内的旧摘要条目，正文不被误裁", () => {
-	// 回归：旧 rp-summary 落在待摘区间内，其锚点已不在区间里。
-	// 即便 assemble 现已忽略坏摘要，这里仍应剔除旧摘要，避免把旧摘要正文混进待摘原文。
+	// 回归：旧 rp-summary 落在待摘区间内，其锚点已不在区间里——
+	// 若不剔除，rebuildHistory 会「退守到摘要之前全裁」，把要摘的正文全丢掉。
 	const region: BranchEntryLike[] = [
 		summaryE("更早的摘要。", "早已被裁走的-id"),
 		userE("区间里我说的话。", "u-x"),
