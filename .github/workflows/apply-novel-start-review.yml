@@ -1,0 +1,24 @@
+name: apply-novel-start-review
+on: [push]
+permissions:
+  contents: write
+jobs:
+  apply:
+    if: github.event.head_commit.message == 'Apply focused novel start review fixes'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/novel-play-foundation
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node scripts/apply-novel-start-review.mjs
+      - run: npm ci
+      - run: node --test --test-reporter=./scripts/test-summary.mjs test/novel-play-api.test.ts
+      - run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/novel-play/application.ts test/novel-play-api.test.ts
+          git commit -m "Harden novel start identity and rollback"
+          git push origin HEAD:feat/novel-play-foundation
