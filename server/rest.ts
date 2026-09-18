@@ -13,6 +13,8 @@ import { copyFileSync, createReadStream, existsSync, mkdirSync, readdirSync, rea
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, dirname, isAbsolute, join } from "node:path";
 
+import { handleNovelPlayApiRequest } from "./novel-play-api.ts";
+
 import {
 	EMPTY_AGENT_CONFIG,
 	deleteProfile,
@@ -1049,6 +1051,8 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 	};
 
 	try {
+		// novel-play-api: deterministic integration marker
+		if (await handleNovelPlayApiRequest(req, res, host)) return true;
 		const proposalRoute = /^POST \/api\/outline\/proposals\/([^/]+)\/(confirm|reject)$/.exec(route);
 		if (proposalRoute) {
 			if (refuseWhileStreaming()) return true;
