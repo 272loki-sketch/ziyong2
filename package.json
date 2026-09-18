@@ -3,7 +3,7 @@
   "version": "1.5.0",
   "description": "梨园（Liyuan）— 以 AI 为主演的角色扮演剧院",
   "scripts": {
-    "test": "if [ -x /opt/node22/bin/node ]; then /opt/node22/bin/node --test test/*.test.ts; else node --test test/*.test.ts; fi",
+    "test": "node --test test/*.test.ts",
     "web": "node server/main.ts",
     "web:new": "node server/main.ts --new",
     "web:build": "npm --prefix web run build",

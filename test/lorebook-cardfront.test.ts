@@ -1,15 +1,14 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { displayRules, extractLorebookRegexScripts } from "../src/cardfront.ts";
-import { buildCardFrontSnapshot } from "../src/cardfront.ts";
+import { buildCardFrontSnapshot, displayRules, extractLorebookRegexScripts } from "../src/cardfront.ts";
 import { applyCardSkin } from "../src/cardSkin.ts";
 import { prepareDisplayText } from "../src/postprocess.ts";
 import { splitHtmlParts } from "../web/src/htmlEmbed.ts";
+import { lorebookEntries, lorebookRegexScripts } from "./fixtures/lorebook-cardfront.ts";
 
-const path = "assets/lorebooks/日式中专大乱斗.json";
-const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+const path = "fixture:lorebook-cardfront";
+const raw = { extensions: { regex_scripts: lorebookRegexScripts }, entries: lorebookEntries };
 const scripts = extractLorebookRegexScripts(raw) as Array<Record<string, unknown>>;
 
 test("日式中专大乱斗：Luker视觉皮肤保留启用，由梨园原生数据源驱动", () => {
@@ -43,7 +42,7 @@ test("日式中专大乱斗：真实保护管线中贴吧先成整页，后续�
 });
 
 test("日式中专大乱斗：旧MVU禁用，日历/BBS格式资料保留，世界线变动仍启用", () => {
-	const entries = Object.values((raw as { entries: Record<string, Record<string, unknown>> }).entries);
+	const entries = Object.values(raw.entries);
 	for (const uid of [4, 8, 9, 14, 15, 17, 112, 114, 116, 124, 127, 169, 172, 173, 174, 175, 178, 182, 233]) {
 		const entry = entries.find((item) => item.uid === uid);
 		assert.equal(entry?.enabled, false, `uid ${uid} 应禁用`);

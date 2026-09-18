@@ -103,10 +103,10 @@ test("outline research store writes only compact source and mechanism JSON", asy
 	try {
 		const sm = new FauxSession();
 		const engine = new OutlineEngine({ cwd, getSessionManager: () => sm, loadMaterials: () => ({ config: { card: "private-card", userName: "Private User" }, card: { name: "Private Role" } } as never), runSideModel: async () => "{}", webResearch: async (queries) => {
-			assert.ok(queries.every((query) => !query.includes("Private Role") && !query.includes("用户原话")));
+			assert.ok(queries.every((query) => !query.includes("Private Role") && !query.includes("Private User")));
 			return [{ query: queries[0], results: [{ title: "Narrative pacing", url: "https://example.com/a", snippet: "long copyrighted excerpt that must not be stored" }] }];
 		}, getContext: () => ({ cardKey: "private-card" }) });
-		const view = await engine.research("用户原话 Private Role");
+		const view = await engine.research("Private User Private Role");
 		assert.equal(view.sources[0]?.url, "https://example.com/a");
 		assert.equal(JSON.stringify(view).includes("copyrighted excerpt"), false);
 	} finally { rmSync(cwd, { recursive: true, force: true }); }
