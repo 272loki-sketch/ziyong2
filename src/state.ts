@@ -3,8 +3,9 @@
  * 这是对 ST「模型忘状态」痛点的架构级解法（PLAN.md §3）。
  */
 
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { randomBytes } from "node:crypto";
+import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, rmSync, writeSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { readJsonFile } from "./jsonio.ts";
 import type { CharacterState, StateRoster, WorldState } from "./types.ts";
 
@@ -30,9 +31,42 @@ export function loadState(file: string): WorldState {
 	}
 }
 
+/** @internal Test seam for saveState only. Do not use from production code. */
+export const __internalStateFsOps = {
+	mkdirSync,
+	openSync,
+	writeSync,
+	fsyncSync,
+	closeSync,
+	renameSync,
+	rmSync,
+	randomBytes,
+};
+
 export function saveState(file: string, state: WorldState): void {
-	mkdirSync(dirname(file), { recursive: true });
-	writeFileSync(file, JSON.stringify(state, null, 2), "utf8");
+	const dir = dirname(file);
+	__internalStateFsOps.mkdirSync(dir, { recursive: true });
+	const temporary = join(dir, `.${basename(file)}.${__internalStateFsOps.randomBytes(8).toString("hex")}.tmp`);
+	const serialized = Buffer.from(JSON.stringify(state, null, 2), "utf8");
+	let fd: number | undefined;
+	try {
+		fd = __internalStateFsOps.openSync(temporary, "wx", 0o600);
+		try {
+			let offset = 0;
+			while (offset < serialized.length) {
+				offset += __internalStateFsOps.writeSync(fd, serialized, offset, serialized.length - offset, offset);
+			}
+			__internalStateFsOps.fsyncSync(fd);
+		} finally {
+			if (fd !== undefined) {
+				__internalStateFsOps.closeSync(fd);
+				fd = undefined;
+			}
+		}
+		__internalStateFsOps.renameSync(temporary, file);
+	} finally {
+		__internalStateFsOps.rmSync(temporary, { force: true });
+	}
 }
 
 export interface PatchResult {
