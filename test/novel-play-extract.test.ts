@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { extractNovelEvents, type NovelExtractionModelCall } from "../src/novel-play/extract.ts";
+import { extractNovelEvents, type NovelExtractionCheckpoint, type NovelExtractionModelCall } from "../src/novel-play/extract.ts";
 import type { NovelSource } from "../src/novel-play/source.ts";
 
 const skillBody = "Extract events from the supplied chunk as strict JSON.";
@@ -156,4 +156,61 @@ test("validates cached output with the same rules and replaces an invalid cached
 	});
 	assert.equal(retryCalls.count, 1);
 	assert.equal(recovered.package.nodes.length, 1);
+});
+
+test("publishes the first validated chunk before a later failure and resumes without repeating it", async () => {
+	const checkpoints: NovelExtractionCheckpoint[] = [];
+	const failingCalls = { count: 0 };
+	await assert.rejects(extractNovelEvents(source, {
+		skillBody,
+		maxAttempts: 1,
+		modelCall: sequence([result([event()]), "invalid second chunk"], failingCalls),
+		onCheckpoint: async checkpoint => { checkpoints.push(checkpoint); },
+	}), /failed for chunk 1/);
+	assert.equal(checkpoints.length, 1);
+	assert.deepEqual(Object.keys(checkpoints[0].completed), ["0"]);
+
+	const resumedCalls = { count: 0 };
+	const resumed = await extractNovelEvents(source, {
+		skillBody,
+		checkpoint: checkpoints[0],
+		modelCall: sequence([
+			result([event({ key: "bell", title: "钟响", summary: "钟声响起。", quote: "钟声响起。" })]),
+		], resumedCalls),
+	});
+	assert.equal(resumedCalls.count, 1);
+	assert.equal(resumed.package.nodes.length, 2);
+});
+
+test("rejects and retries a forward dependency before publishing a checkpoint", async () => {
+	const single = { ...source, chunks: [source.chunks[0]] };
+	const forward = result([
+		event({ key: "rain", title: "下雨", summary: "雨开始落下。", dependsOn: ["door"], quote: "雨落下来。" }),
+		event(),
+	]);
+	const valid = result([
+		event(),
+		event({ key: "rain", title: "下雨", summary: "雨开始落下。", dependsOn: ["door"], quote: "雨落下来。" }),
+	]);
+	const calls = { count: 0 };
+	const checkpoints: NovelExtractionCheckpoint[] = [];
+	const extracted = await extractNovelEvents(single, {
+		skillBody,
+		modelCall: sequence([forward, valid], calls),
+		onCheckpoint: checkpoint => { checkpoints.push(checkpoint); },
+	});
+	assert.equal(calls.count, 2);
+	assert.equal(checkpoints.length, 1);
+	assert.equal(checkpoints[0].completed["0"], valid);
+	assert.deepEqual(extracted.package.nodes[1].dependsOn, [extracted.package.nodes[0].id]);
+});
+
+test("rejects a non-finite maxAttempts value before calling the model", async () => {
+	let called = false;
+	await assert.rejects(extractNovelEvents(source, {
+		skillBody,
+		maxAttempts: Number.NaN,
+		modelCall: async () => { called = true; return result([event()]); },
+	}), /maxAttempts must be finite/);
+	assert.equal(called, false);
 });

@@ -22,9 +22,11 @@ export interface ExtractNovelEventsOptions {
 	modelCall: NovelExtractionModelCall;
 	skillBody: string;
 	signal?: AbortSignal;
-	/** Values above two are capped at two. */
+	/** Values above two are capped at two. Non-finite values are rejected. */
 	maxAttempts?: number;
 	checkpoint?: NovelExtractionCheckpoint;
+	/** Awaited after each cached or live chunk has passed full validation. */
+	onCheckpoint?: (checkpoint: NovelExtractionCheckpoint) => Promise<void> | void;
 }
 
 export interface NovelExtractionResult {
@@ -67,6 +69,10 @@ function checkpointKey(source: NovelSource, skillBody: string): string {
 	}));
 }
 
+function copyCheckpoint(key: string, completed: Record<string, string>): NovelExtractionCheckpoint {
+	return { key, completed: { ...completed } };
+}
+
 function boundedString(value: unknown, name: string, max: number): string {
 	if (typeof value !== "string" || !value.trim() || value.length > max) throw new Error(`${name} invalid`);
 	return value.trim();
@@ -82,15 +88,14 @@ function parseChunkResult(text: string, chunkText: string): RawNode[] {
 	if (!Array.isArray(rawNodes) || rawNodes.length < 1 || rawNodes.length > MAX_NODES_PER_CHUNK) {
 		throw new Error("chunk must contain between 1 and 100 evidenced events");
 	}
-	const keys = new Set<string>();
-	const nodes = rawNodes.map((raw, index): RawNode => {
+	const earlierKeys = new Set<string>();
+	return rawNodes.map((raw, index): RawNode => {
 		if (!raw || typeof raw !== "object" || Array.isArray(raw) || !ownKeysAre(raw as Record<string, unknown>, NODE_KEYS)) {
 			throw new Error(`event ${index} has an invalid shape`);
 		}
 		const item = raw as Record<string, unknown>;
 		const key = boundedString(item.key, `event ${index} key`, MAX_KEY);
-		if (keys.has(key)) throw new Error(`duplicate local event key: ${key}`);
-		keys.add(key);
+		if (earlierKeys.has(key)) throw new Error(`duplicate local event key: ${key}`);
 		const visibility = item.visibility;
 		if (visibility !== "public" && visibility !== "secret") throw new Error(`event ${key} visibility invalid`);
 		if (!Array.isArray(item.dependsOn) || item.dependsOn.length > MAX_NODES_PER_CHUNK
@@ -99,9 +104,13 @@ function parseChunkResult(text: string, chunkText: string): RawNode[] {
 		}
 		const dependsOn = item.dependsOn.map(dep => (dep as string).trim());
 		if (new Set(dependsOn).size !== dependsOn.length || dependsOn.includes(key)) throw new Error(`event ${key} dependencies invalid`);
+		for (const dependency of dependsOn) {
+			if (!earlierKeys.has(dependency)) throw new Error(`event ${key} dependency must be an earlier local explicit key: ${dependency}`);
+		}
 		const quote = boundedString(item.quote, `event ${key} quote`, MAX_QUOTE);
 		const first = chunkText.indexOf(quote);
 		if (first < 0 || chunkText.indexOf(quote, first + 1) >= 0) throw new Error(`event ${key} quote must occur exactly once in its chunk`);
+		earlierKeys.add(key);
 		return {
 			key,
 			title: boundedString(item.title, `event ${key} title`, MAX_TITLE),
@@ -111,10 +120,6 @@ function parseChunkResult(text: string, chunkText: string): RawNode[] {
 			quote,
 		};
 	});
-	for (const node of nodes) for (const dependency of node.dependsOn) {
-		if (!keys.has(dependency)) throw new Error(`event ${node.key} dependency is not a local explicit key: ${dependency}`);
-	}
-	return nodes;
 }
 
 function abortError(): Error {
@@ -134,6 +139,7 @@ function throwIfAborted(signal?: AbortSignal): void {
 export async function extractNovelEvents(source: NovelSource, options: ExtractNovelEventsOptions): Promise<NovelExtractionResult> {
 	if (!source.chunks.length) throw new Error("novel source has no chunks");
 	if (!options.skillBody.trim()) throw new Error("novel extraction skill body is empty");
+	if (options.maxAttempts !== undefined && !Number.isFinite(options.maxAttempts)) throw new Error("maxAttempts must be finite");
 	const attempts = Math.max(1, Math.min(2, Math.trunc(options.maxAttempts ?? 2)));
 	const key = checkpointKey(source, options.skillBody);
 	const completed: Record<string, string> = options.checkpoint?.key === key ? { ...options.checkpoint.completed } : {};
@@ -173,6 +179,9 @@ export async function extractNovelEvents(source: NovelSource, options: ExtractNo
 			const detail = lastError instanceof Error ? lastError.message : "unknown model failure";
 			throw new Error(`novel event extraction failed for chunk ${chunk.index} after ${attempts} attempt(s): ${detail}`);
 		}
+		throwIfAborted(options.signal);
+		await options.onCheckpoint?.(copyCheckpoint(key, completed));
+		throwIfAborted(options.signal);
 		const localIds = new Map<string, string>();
 		for (const raw of parsed) {
 			const start = chunk.text.indexOf(raw.quote);
@@ -189,5 +198,5 @@ export async function extractNovelEvents(source: NovelSource, options: ExtractNo
 			});
 		}
 	}
-	return { package: buildNovelPackage(source, stages, nodes), checkpoint: { key, completed } };
+	return { package: buildNovelPackage(source, stages, nodes), checkpoint: copyCheckpoint(key, completed) };
 }
