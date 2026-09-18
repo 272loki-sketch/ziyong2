@@ -70,7 +70,7 @@ test("build is an in-process bounded job and status never exposes source text", 
 
 test("GET start returns public node titles and preview token is immutable and single-use", async () => {
 	const root = cwd(); const input = corpus(root); const revision = stored(root, input.docId, input.text);
-	skill(root, "小说开场提取", "opening extraction"); skill(root, "小说开场边界", "never reveal future canon");
+	skill(root, "小说开场提取", "opening extraction"); skill(root, "小说开演边界", "never reveal future canon");
 	mkdirSync(join(root, "assets", "cards"), { recursive: true });
 	writeFileSync(join(root, "assets", "cards", "default_Qingwu.json"), JSON.stringify({ spec: "chara_card_v2", spec_version: "2.0", data: { name: "normal", description: "", personality: "", scenario: "", first_mes: "", mes_example: "", system_prompt: "", post_history_instructions: "", creator_notes: "", alternate_greetings: [], tags: [] } }));
 	writeFileSync(join(root, "liyuan.config.json"), JSON.stringify({ card: "assets/cards/default_Qingwu.json", userName: "old", userPersona: "", language: "zh-CN", scanDepth: 6, maxLoreInjections: 5 }));
@@ -90,7 +90,7 @@ test("GET start returns public node titles and preview token is immutable and si
 
 test("uncertain card switch preserves generated recovery state", async () => {
 	const root = cwd(); const input = corpus(root); const revision = stored(root, input.docId, input.text);
-	skill(root, "小说开场提取", "opening extraction"); skill(root, "小说开场边界", "boundary");
+	skill(root, "小说开场提取", "opening extraction"); skill(root, "小说开演边界", "boundary");
 	mkdirSync(join(root, "assets", "cards"), { recursive: true });
 	writeFileSync(join(root, "assets", "cards", "default_Qingwu.json"), "{}");
 	const original = JSON.stringify({ card: "assets/cards/default_Qingwu.json", userName: "old", userPersona: "", language: "zh-CN", scanDepth: 6, maxLoreInjections: 5 });
