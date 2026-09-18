@@ -12,7 +12,7 @@ const rest = readFileSync(new URL("../server/rest.ts", import.meta.url), "utf8")
 test("audit 1: start consumes a preview token and reserves the global start lock before awaiting work", () => {
 	const bodyRead = api.indexOf("const input = await body(req);", api.indexOf('POST /api/novel-play/start'));
 	const consume = api.indexOf("preview.used = true; instance.starting = true;", bodyRead);
-	const start = api.indexOf("await startFromConfirmedProposal", consume);
+	const start = api.indexOf("startFromConfirmedProposal", consume);
 	assert.ok(bodyRead >= 0 && consume > bodyRead && start > consume);
 	assert.match(api, /if \(instance\.starting\).*statusCode: 409/);
 });
@@ -22,8 +22,9 @@ test("audit 2: jobs and previews bind to runtime session and active config card"
 	assert.match(api, /interface Preview \{[^}]*binding: NovelPlayBinding/);
 	assert.match(api, /sameNovelPlayBinding\(job\.binding, current\)/);
 	assert.match(api, /bindingChecked\(host as NovelPlayModelHost, binding\)/);
-	assert.match(application, /memoryScope\(\)\.sessionId/);
-	assert.match(application, /loadRawConfig\(host\.cwd\)\.config\.card/);
+	assert.match(application, /const scope = host\.memoryScope\(\)/);
+	assert.match(application, /const sessionId = scope\.sessionId/);
+	assert.match(application, /runtimeCard !== configCard/);
 });
 
 test("audit 3: cancellation is terminal and workers cannot publish after cancellation", () => {
@@ -33,7 +34,9 @@ test("audit 3: cancellation is terminal and workers cannot publish after cancell
 });
 
 test("audit 4: build and preview have deadlines, disconnect abort, and slots follow underlying settlement", () => {
-	assert.equal(NOVEL_PLAY_LIMITS.buildDeadlineMs, 120_000);
+	assert.equal(NOVEL_PLAY_LIMITS.buildDeadlineMs, 30 * 60_000);
+	assert.equal(NOVEL_PLAY_LIMITS.modelCallDeadlineMs, 120_000);
+	assert.equal(NOVEL_PLAY_LIMITS.startSwitchDeadlineMs, 30_000);
 	assert.equal(NOVEL_PLAY_LIMITS.previewDeadlineMs, 45_000);
 	assert.match(api, /req\.once\("aborted", abort\)/);
 	assert.match(api, /responseEvents\.once\?\.\("close", close\)/);

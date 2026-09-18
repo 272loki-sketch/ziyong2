@@ -53,7 +53,8 @@ async function request(host: RestHost, method: string, url: string, payload?: un
 }
 
 function host(root: string, model: (system: string, user: string) => string): RestHost {
-	return { cwd: root, isStreaming: () => false, runSideText: async (_step, system, user) => model(system, user), memoryScope: () => ({ sessionId: "test", card: "assets/cards/default_Qingwu.json" }), switchToCard: async () => "created" } as unknown as RestHost;
+	let runtimeCard = "assets/cards/default_Qingwu.json";
+	return { cwd: root, isStreaming: () => false, runSideText: async (_step, system, user) => model(system, user), memoryScope: () => ({ sessionId: "test", card: runtimeCard }), switchToCard: async () => { runtimeCard = JSON.parse(readFileSync(join(root, "liyuan.config.json"), "utf8")).card; return "created"; } } as unknown as RestHost;
 }
 
 test("build is an in-process bounded job and status never exposes source text", async () => {
