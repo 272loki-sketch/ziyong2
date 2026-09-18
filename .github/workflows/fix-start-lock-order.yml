@@ -4,13 +4,13 @@ permissions:
   contents: write
 jobs:
   fix:
-    if: github.event.head_commit.message == 'Run start lock repair'
+    if: github.event.head_commit.message == 'Execute deterministic start lock repair'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: feat/novel-play-foundation
-      - run: python -c 'from pathlib import Path; p=Path("server/novel-play-api.ts"); s=p.read_text(); a="\ttry {\n\t\tconst current = novelPlayBinding(host as NovelPlayModelHost);"; b="\tif (route === \"POST /api/novel-play/start\" && (instance.starting || instance.recovery)) { send(res, 409, { error: \"小说开演正在启动或等待恢复\" }); return true; }\n\ttry {\n\t\tconst current = novelPlayBinding(host as NovelPlayModelHost);"; assert a in s; p.write_text(s.replace(a,b,1))'
+      - run: python scripts/fix-start-lock-order.py
       - run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
