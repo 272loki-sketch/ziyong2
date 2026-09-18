@@ -1,6 +1,8 @@
 name: Fix novel skill fixture
 on:
-  workflow_dispatch:
+  push:
+    branches: [feat/novel-play-foundation]
+    paths: ['.github/workflows/fix-novel-skill-fixture.yml']
 permissions:
   contents: write
 jobs:
