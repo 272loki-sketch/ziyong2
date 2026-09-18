@@ -85,7 +85,6 @@ const normName = (s: string) => s.trim().toLowerCase();
  * 防止同一角色被记成多份（实测 flash 会写出 "Alice"/"alice " 变体）。
  * 中文译名与原名的等同（爱丽丝=Alice）无法机械判定，交给 Phase 2 scribe。
  */
-
 export function canonicalizeCharacterKeys(
 	patch: Record<string, unknown>,
 	knownNames: string[],
@@ -120,7 +119,6 @@ export function canonicalizeCharacterKeys(
  * - inventory / plot_threads：数组整体替换（须传完整数组）
  * - 未知顶层键拒绝并告警（保持 schema 诚实）
  */
-
 export function applyPatch(state: WorldState, patch: Record<string, unknown>): PatchResult {
 	const next: WorldState = structuredClone(state);
 	const applied: string[] = [];
@@ -159,8 +157,7 @@ export function applyPatch(state: WorldState, patch: Record<string, unknown>): P
 				} else warnings.push("characters 需要对象，已忽略");
 				break;
 			}
-			
-case "flags": {
+			case "flags": {
 				if (value && typeof value === "object" && !Array.isArray(value)) {
 					for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
 						if (v === null) {
@@ -178,8 +175,7 @@ case "flags": {
 				break;
 			}
 			case "inventory":
-			
-case "plot_threads": {
+			case "plot_threads": {
 				if (Array.isArray(value)) {
 					// 非字符串元素**不静默丢弃**：模型常传 [{name,数量}] 这类对象，
 					// 旧实现 filter 掉后仍回报「成功」（applied 里是空数组），模型只能反复试错。
@@ -199,8 +195,7 @@ case "plot_threads": {
 				} else warnings.push(`${key} 需要完整数组（整体替换语义），已忽略`);
 				break;
 			}
-			
-case "roster": {
+			case "roster": {
 				// 登场名录编辑（用户主权，REST 侧用；模型工具 schema 不含此键）：
 				// {characters/items/events: {名称: null(删除) | 字符串(改一句话)}}。
 				// 注意：删除**活跃**条目会被本函数末尾的 registerRoster 立即重新登记——名录必须覆盖在场条目。
@@ -231,8 +226,7 @@ case "roster": {
 				warnings.push(`未知字段 ${key}，允许的顶层字段：${TOP_KEYS.join(", ")}`);
 		}
 	}
-	
-registerRoster(next);
+	registerRoster(next);
 	return { state: next, applied, warnings };
 }
 
@@ -268,7 +262,6 @@ function capRoster(reg: Record<string, string>, cap: number): Record<string, str
 	for (const k of keys.slice(keys.length - cap)) out[k] = reg[k]!;
 	return out;
 }
-
 
 /**
  * 名录登记（applyPatch 咽喉点调用）：把当前活跃的人物/物品/剧情线并入名录。
@@ -309,7 +302,6 @@ function rosterSection(label: string, entries: Array<[string, string]>): string 
 	const rest = titles.length - shown.length;
 	return `${label}：${shown.join("、")}${rest > 0 ? `……等 ${titles.length} 项` : ""}`;
 }
-
 
 /**
  * 名录索引渲染：只列**已不在当前状态**的条目（离场人物/失去的物品/已了结或改写的剧情线）——
