@@ -133,7 +133,7 @@ RestartSec=5
 ## 6. 健康检查
 
 ```bash
-# 本机直连（跳过 Nginx）
+# 本机盶连（跳过 Nginx）
 curl -fsS http://127.0.0.1:7620/healthz
 
 # 通过公网入口
@@ -211,7 +211,7 @@ NO_PROXY=localhost,127.0.0.1
 ```
 
 - 默认代理是宿主机 mihomo 的 `7890` 端口。
-- 设置 `LIYUAN_WEB_RESEARCH_PROXY=direct` 可改为直连。
+- 设置 `LIYUAN_WEB_RESEARCH_PROXY=direct` 可改为盶连。
 - 无公开作品出处的私人角色名会在发网前被拒绝。
 
 修改代理需编辑 `/etc/systemd/system/liyuan.service` 的 `Environment` 并重启。
@@ -265,8 +265,9 @@ local          VPS 实际运行版本（官方 + 本地增强）
 
 ```bash
 cd /root/Liyuan
-./scripts/update-local.sh
+./scrpts/update-local.sh
 ```
+
 
 脚本会先备份 Git、配置、世界/生态数据、Skill 覆盖和会话树，再把 `origin/master` 合并到 `local`；完整测试和前端构建通过后才重启服务并执行 HTTP 健康检查。它不会向 GitHub 推送代码。
 
@@ -333,7 +334,7 @@ journalctl -u liyuan --since "30 minutes ago" --no-pager | grep -E "\[corpus\]|�
 - `liyuan.config.json` 的 `stepModels.novelDigest` 是否为已验证的模型。模型名称带 `flash` 不代表一定兼容当前中转站的 reasoning/结构化协议。
 - `最终消息无文本` 通常表示 provider 返回了空 `content` 或最终消息未从 `stream.result()` 读取，不应盲目等待数小时。
 - 当前 Corpus 单次调用最多 4 次、硬超时 60 秒；研究旁路不叠加 SDK 的隐式 9 次重试。增强提炼失败会降级为 ready。
-- 详细根因和修复记录见 `docs/INCIDENT-20260901-NOVEL-DIGEST.md`。
+- 详细根因和修复记彑见 `docs/INCIDENT-20260901-NOVEL-DIGEST.md`。
 
 ## 13. 回滚
 

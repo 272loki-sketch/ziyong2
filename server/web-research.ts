@@ -16,8 +16,7 @@ function requestSignal(signal: AbortSignal): AbortSignal {
 export function resolveWebResearchProxy(env = process.env): URL | null {
 	const raw = env.LIYUAN_WEB_RESEARCH_PROXY
 		?? env.HTTPS_PROXY ?? env.https_proxy
-		?? env.HTTP_PROXY ?? env.http_proxy
-		?? "http://127.0.0.1:7890";
+		?? env.HTTP_PROXY ?? env.http_proxy;
 	if (!raw || raw.trim().toLowerCase() === "direct") return null;
 	const proxy = new URL(raw.includes("://") ? raw : `http://${raw}`);
 	if (proxy.protocol !== "http:") throw new Error(`不支持的联网代理协议：${proxy.protocol}`);
@@ -34,6 +33,7 @@ export function hostUsesWebResearchProxy(hostname: string, proxy: URL | null, en
 		return entry === "*" || host === entry || host.endsWith(`.${entry}`);
 	});
 }
+
 
 function tunnel(url: URL, proxy: URL, signal: AbortSignal): Promise<tls.TLSSocket> {
 	return new Promise((resolve, reject) => {
@@ -81,6 +81,7 @@ function tunnel(url: URL, proxy: URL, signal: AbortSignal): Promise<tls.TLSSocke
 	});
 }
 
+
 export async function requestText(url: URL, signal: AbortSignal): Promise<string> {
 	signal = requestSignal(signal);
 	const proxy = resolveWebResearchProxy();
@@ -118,6 +119,7 @@ const decode = (value: string): string => value
 	.replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(Number(dec)));
 const strip = (value: string): string => decode(value.replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
 
+
 export function parseDuckDuckGo(html: string): WebResearchResult[] {
 	const results: WebResearchResult[] = [];
 	const pattern = /<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a[^>]+class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
@@ -145,7 +147,8 @@ export function parseBing(html: string): WebResearchResult[] {
 	return results.filter((result) => result.title && result.url);
 }
 
-export function rankWebResearchResults(query: string, rows: WebResearchResult[], limit = 3): WebResearchResult[] {
+export function rankWebResearchResults(query: string, rows: WebResearchResult[], limit = 3): WebResearchResult[] 
+{
 	const terms = query.toLowerCase().replace(/["'“”‘’()[\]{}<>，。！？、：；/\\|]/g, " ")
 		.split(/\s+/).flatMap((term) => {
 			if (term.length < 2) return [];
@@ -172,6 +175,7 @@ export function rankWebResearchResults(query: string, rows: WebResearchResult[],
 	const minMatched = meaningful.length >= 3 ? 2 : 1;
 	return ranked.filter((row) => row.score > 0 && row.matched >= minMatched).slice(0, limit).map(({ score: _score, matched: _matched, index: _index, ...row }) => row);
 }
+
 
 function protectedNames(card: CharacterCard): string[] {
 	const sourceValues = [
@@ -206,6 +210,7 @@ function rejectReason(query: string, card: CharacterCard): string | undefined {
 	return undefined;
 }
 
+
 export async function webResearchBatch(
 	queries: string[],
 	maxResults: number,
@@ -216,7 +221,8 @@ export async function webResearchBatch(
 		if (query.length < 2) return { query, rejected: "查询脱敏后没有足够的公开主题" };
 		const rejected = rejectReason(query, options.card);
 		if (rejected) return { query, rejected };
-		try {
+		
+try {
 			const timeout = Number.parseInt(process.env.LIYUAN_WEB_RESEARCH_TIMEOUT_MS ?? "", 10) || DEFAULT_TIMEOUT_MS;
 			const signal = options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(timeout)]) : AbortSignal.timeout(timeout);
 			const searchUrl = process.env.LIYUAN_WEB_RESEARCH_URL;
@@ -253,7 +259,8 @@ export async function webResearchBatch(
 			bing.searchParams.set("setmkt", "zh-CN");
 			bing.searchParams.set("setcc", "CN");
 			const bingRows = parseBing(await requestText(bing, signal));
-			if (!bingRows.length) throw new Error((duckHtml && isSearchChallenge(duckHtml)) || Date.now() < duckChallengeUntil ? "搜索源返回人机验证，Bing 兜底也无结果" : "搜索源均无可解析结果");
+			
+if (!bingRows.length) throw new Error((duckHtml && isSearchChallenge(duckHtml)) || Date.now() < duckChallengeUntil ? "搜索源返回人机验证，Bing 兜底也无结果" : "搜索源均无可解析结果");
 			return { query, results: rankWebResearchResults(query, bingRows, maxResults) };
 		} catch (error) {
 			return { query, error: error instanceof Error ? error.message : String(error) };
