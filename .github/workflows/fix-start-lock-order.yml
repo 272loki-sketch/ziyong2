@@ -1,0 +1,31 @@
+name: Fix start lock ordering
+on: workflow_dispatch
+permissions:
+  contents: write
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/novel-play-foundation
+      - name: Patch and commit
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('server/novel-play-api.ts'); s=p.read_text()
+          old='''\tconst route = `${req.method} ${pathname}`; const query = new URLSearchParams((req.url ?? "").split("?")[1] ?? ""); const instance = stateFor(host); prune(instance);
+\ttry {
+\t\tconst current = novelPlayBinding(host as NovelPlayModelHost);'''
+          new='''\tconst route = `${req.method} ${pathname}`; const query = new URLSearchParams((req.url ?? "").split("?")[1] ?? ""); const instance = stateFor(host); prune(instance);
+\tif (route === "POST /api/novel-play/start" && (instance.starting || instance.recovery)) { send(res, 409, { error: "小说开演正在启动或等待恢复" }); return true; }
+\ttry {
+\t\tconst current = novelPlayBinding(host as NovelPlayModelHost);'''
+          assert old in s
+          p.write_text(s.replace(old,new))
+          PY
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add server/novel-play-api.ts
+          git commit -m "Check novel start lock before runtime binding"
+          git push origin HEAD:feat/novel-play-foundation
