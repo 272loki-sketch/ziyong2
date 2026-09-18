@@ -86,7 +86,7 @@ test("GET start returns public node titles and preview token is immutable and si
 	writeFileSync(join(root, "liyuan.config.json"), JSON.stringify({ card: "assets/cards/default_Qingwu.json", userName: "old", userPersona: "", language: "zh-CN", scanDepth: 6, maxLoreInjections: 5 }));
 	const h = host(root, () => JSON.stringify({ time: { text: "晨钟响起", quote: "晨钟响起" }, place: { text: "城门", quote: "城门" }, sceneText: { text: "晨钟响起", quote: "晨钟响起" }, openingNarration: { text: "旅人推开城门", quote: "旅人推开城门" }, publicCharacterProfiles: [], publicWorldFacts: [] }));
 	const options = await request(h, "GET", `/api/novel-play/start?docId=${input.docId}&revision=${revision}`);
-	assert.deepEqual(options.body.package.nodes, [{ nodeId: options.body.package.nodes[0].nodeId, title: "晨钟" }]);
+	assert.deepEqual(options.body.package.nodes, [{ nodeId: options.body.package.nodes[0].nodeId, title: "阶段 1 · 节点 1" }]);
 	const preview = await request(h, "POST", "/api/novel-play/preview", { docId: input.docId, revision, nodeId: options.body.package.nodes[0].nodeId, position: "before", player: { name: "阿岚", identity: "异乡旅人" } });
 	assert.equal(preview.status, 200); assert.equal(JSON.stringify(preview.body).includes("quote"), false);
 	const started = await request(h, "POST", "/api/novel-play/start", { previewToken: preview.body.preview.token, draft: { user: { name: "篡改" } } });

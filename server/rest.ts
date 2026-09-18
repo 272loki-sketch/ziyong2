@@ -1052,6 +1052,9 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 
 	try {
 		// novel-play-api: deterministic integration marker
+		// novel-play-api: config mutation guard
+		const novelPlayConfigMutation = route === "PUT /api/config" || route === "POST /api/card/switch";
+		if (novelPlayConfigMutation && isNovelPlayStartLocked(host)) { sendJson(res, 409, { error: "小说开演启动期间不能修改角色或配置" }); return true; }
 		if (await handleNovelPlayApiRequest(req, res, host)) return true;
 		const proposalRoute = /^POST \/api\/outline\/proposals\/([^/]+)\/(confirm|reject)$/.exec(route);
 		if (proposalRoute) {
