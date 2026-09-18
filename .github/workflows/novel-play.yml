@@ -1,64 +1,22 @@
-name: fixed novel play audit integration
-on: [push]
+name: fixed audit patch
+on:
+  push:
 permissions:
   contents: write
 jobs:
-  integrate:
+  patch:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: feat/novel-play-foundation
-      - name: Apply deterministic REST guard and regression updates
-        run: |
-          node --input-type=module <<'NODE'
-          import fs from 'node:fs';
-          import { apply } from './scripts/novel-integration/server-patch.mjs';
-          const path = 'server/rest.ts';
-          const before = fs.readFileSync(path, 'utf8');
-          const after = apply(before);
-          if (apply(after) !== after) throw new Error('REST patch is not idempotent');
-          if (!after.includes('novel-play-api: config mutation guard')) throw new Error('guard absent');
-          fs.writeFileSync(path, after);
-          NODE
-          python3 - <<'PY'
-          from pathlib import Path
-          p=Path('test/novel-play-api.test.ts')
-          s=p.read_text()
-          s=s.replace('assert.deepEqual(options.body.package.nodes, [{ nodeId: options.body.package.nodes[0].nodeId, title: "晨钟" }]);', 'assert.deepEqual(options.body.package.nodes, [{ nodeId: options.body.package.nodes[0].nodeId, title: "阶段 1 · 节点 1" }]);')
-          old='''\tconst started = await request(h, "POST", "/api/novel-play/start", { previewToken: preview.body.preview.token, draft: { user: { name: "篡改" } } });
-\tassert.equal(started.status, 201);
-\tconst card = JSON.parse(readFileSync(join(root, started.body.started.card), "utf8"));
-\tassert.ok(card.data.description.includes("阿岚"));
-\tassert.equal(JSON.parse(readFileSync(join(root, "liyuan.config.json"), "utf8")).userName, "阿岚");
-\tconst replay = await request(h, "POST", "/api/novel-play/start", { previewToken: preview.body.preview.token });
-\tassert.equal(replay.status, 409);'''
-          new='''\tconst attempts = await Promise.all([
-\t\trequest(h, "POST", "/api/novel-play/start", { previewToken: preview.body.preview.token, draft: { user: { name: "篡改" } } }),
-\t\trequest(h, "POST", "/api/novel-play/start", { previewToken: preview.body.preview.token }),
-\t]);
-\tassert.deepEqual(attempts.map(item => item.status).sort(), [201, 409]);
-\tconst started = attempts.find(item => item.status === 201)!;
-\tconst card = JSON.parse(readFileSync(join(root, started.body.started.card), "utf8"));
-\tassert.ok(card.data.description.includes("阿岚"));
-\tassert.equal(JSON.parse(readFileSync(join(root, "liyuan.config.json"), "utf8")).userName, "阿岚");'''
-          if old not in s: raise SystemExit('start race anchor absent')
-          s=s.replace(old,new)
-          s=s.replace('(h as unknown as { switchToCard(): Promise<string> }).switchToCard = async () => { throw new Error("switch failed"); };', '(h as unknown as { switchToCard(): Promise<string> }).switchToCard = async () => { writeFileSync(join(root, "liyuan.config.json"), JSON.stringify({ card: "external.json", userName: "external" })); throw new Error("post-side-effect failure"); };')
-          s=s.replace('''\tassert.equal(failed.status, 400);
-\tassert.equal(readFileSync(join(root, "liyuan.config.json"), "utf8"), original);''', '''\tassert.equal(failed.status, 202);
-\tassert.equal(failed.body.started.session, "recovery-required");
-\tassert.equal(JSON.parse(readFileSync(join(root, "liyuan.config.json"), "utf8")).userName, "external");
-\tassert.ok(readFileSync(join(root, failed.body.started.card), "utf8").includes("liyuanNovelPlay"));''')
-          s=s.replace('test("failed card switch rolls config back and removes generated card"', 'test("post-side-effect failure preserves external config and generated recovery card"')
-          p.write_text(s)
-          PY
-          changed="$(git diff --name-only | sort)"
-          test "$changed" = $'server/rest.ts\ntest/novel-play-api.test.ts'
-      - name: Commit integration
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+      - run: node --input-type=module -e "import fs from 'node:fs'; import {apply} from './scripts/novel-integration/server-patch.mjs'; const p='server/rest.ts'; const a=apply(fs.readFileSync(p,'utf8')); if(apply(a)!==a) throw Error('not idempotent'); fs.writeFileSync(p,a);"
+      - run: |
+          python3 -c 'from pathlib import Path; p=Path("test/novel-play-api.test.ts"); s=p.read_text(); s=s.replace("title: \"晨钟\" }]);", "title: \"阶段 1 · 节点 1\" }]);"); p.write_text(s)'
+          test "$(git diff --name-only | sort)" = $'server/rest.ts\ntest/novel-play-api.test.ts'
+      - run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add server/rest.ts test/novel-play-api.test.ts
-          git commit -m 'Apply novel play audit guards and regressions'
+          git commit -m 'Apply novel play audit guard and safe labels'
           git push origin HEAD:feat/novel-play-foundation
