@@ -211,7 +211,7 @@ NO_PROXY=localhost,127.0.0.1
 ```
 
 - 默认代理是宿主机 mihomo 的 `7890` 端口。
-- 设置 `LIYUAN_WEB_RESEARCH_PROXY=direct` 可改为直连。
+- 设置 `LIYUAN_WEB_RESEARCH_PROXY=direct` 可改为盶连。
 - 无公开作品出处的私人角色名会在发网前被拒绝。
 
 修改代理需编辑 `/etc/systemd/system/liyuan.service` 的 `Environment` 并重启。
