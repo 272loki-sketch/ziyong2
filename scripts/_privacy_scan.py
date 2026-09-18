@@ -30,7 +30,7 @@ PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 
 # Placeholder-ish allowed substrings near matches
 ALLOW = re.compile(
-    r"YOUR_|your_|example|placeholder|<[^>\n]+>|\$\{[^}\n]+\}|process\.env|API_KEY_HERE|xxxx|TODO|changeme",
+    r"YOUR_|your_|example|placeholder|<[^>\n]+>|\$\{[^}\n]+\}|process\.env|API_KEY_HERE|xxxx|TODO|changeme|privacy-scan:\s*allow-test-fixture",
     re.I,
 )
 
@@ -42,7 +42,7 @@ PLACEHOLDER_PASSWORD = re.compile(
 
 class PrivacyScanSelfTest(unittest.TestCase):
     def test_flags_explicit_http_basic_url(self) -> None:
-        text = "remote " + "https://alice:" + "RealSecret_123456@internal.local/repo.git"
+        text = "remote " + "https://alice:" + "RealSecret_123456@internal.local/repo.git"  # privacy-scan: allow-test-fixture
         hits = find_hits_in_text("docs.txt", text)
         self.assertEqual(1, len(hits))
         self.assertIn("[http_basic_url]", hits[0])
