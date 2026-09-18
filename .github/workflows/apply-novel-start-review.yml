@@ -4,7 +4,7 @@ permissions:
   contents: write
 jobs:
   apply:
-    if: github.event.head_commit.message == 'Apply focused novel start review fixes'
+    if: github.event.head_commit.message == 'Apply corrected novel start review fixes'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -14,6 +14,7 @@ jobs:
         with:
           node-version: 22
       - run: node scripts/apply-novel-start-review.mjs
+      - run: node scripts/fix-novel-test-session.mjs
       - run: npm ci
       - run: node --test --test-reporter=./scripts/test-summary.mjs test/novel-play-api.test.ts
       - run: |
