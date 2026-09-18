@@ -7,8 +7,9 @@
  * 真身是会话树里的 rp-panels 快照——随剧情分支走（rewind 后面板同步回退）。
  */
 
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { readJsonFile } from "./jsonio.ts";
 
 export type PanelKind = "markdown" | "svg" | "html";
@@ -32,6 +33,17 @@ export const PANEL_SOFT_LIMIT = 6;
 /** 单面板内容上限（字符）：SVG 地图/HTML 面板绰绰有余，防失控巨帧 */
 export const PANEL_MAX_CHARS = 120_000;
 
+/** 仅供测试替身注入；生产仍走原生 fs。 */
+export const __panelFsOps = {
+	writeFileSync,
+	renameSync,
+	unlinkSync,
+};
+
+function panelTempFile(file: string): string {
+	return join(dirname(file), `.${basename(file)}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`);
+}
+
 export function loadPanels(file: string): PanelMap {
 	try {
 		const raw = readJsonFile(file);
@@ -43,7 +55,19 @@ export function loadPanels(file: string): PanelMap {
 
 export function savePanels(file: string, panels: PanelMap): void {
 	mkdirSync(dirname(file), { recursive: true });
-	writeFileSync(file, JSON.stringify(panels, null, 2), "utf8");
+	const temp = panelTempFile(file);
+	const body = JSON.stringify(panels, null, 2);
+	try {
+		__panelFsOps.writeFileSync(temp, body, { encoding: "utf8", flag: "wx", mode: 0o600, flush: true });
+		__panelFsOps.renameSync(temp, file);
+	} catch (err) {
+		try {
+			__panelFsOps.unlinkSync(temp);
+		} catch {
+			// temp 未落盘或已被清走时忽略
+		}
+		throw err;
+	}
 }
 
 /** 未归档面板（页签展示序） */
@@ -63,6 +87,7 @@ export type PanelWriteResult =
 			overLimit: boolean;
 	  }
 	| { ok: false; error: string };
+
 
 export function writePanel(
 	panels: PanelMap,
@@ -108,6 +133,7 @@ export function closePanel(panels: PanelMap, rawName: string): PanelCloseResult 
 }
 
 /** 末端注入用的一行活跃面板速览；无活跃面板返回 null */
+
 export function formatPanelIndex(panels: PanelMap): string | null {
 	const active = activePanels(panels);
 	if (active.length === 0) return null;
