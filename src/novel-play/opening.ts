@@ -266,5 +266,6 @@ export async function extractNovelOpening(input: ExtractNovelOpeningInput): Prom
 			lastError = error;
 		}
 	}
-	throw new Error(`开场提取在 ${maxAttempts} 次尝试后失败`, { cause: lastError });
+	const detail = lastError instanceof Error ? `：${lastError.message}` : "";
+	throw new Error(`开场提取在 ${maxAttempts} 次尝试后失败${detail}`, { cause: lastError });
 }
