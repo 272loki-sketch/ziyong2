@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 
 import { readCardRawJson } from "../card.ts";
@@ -36,6 +36,12 @@ export type StartResult =
 
 const sha256 = (value: string): string => createHash("sha256").update(value, "utf8").digest("hex");
 
+function atomicWrite(path: string, bytes: string): void {
+	const temporary = `${path}.${randomUUID()}.tmp`;
+	try { writeFileSync(temporary, bytes, { encoding: "utf8", flag: "wx" }); renameSync(temporary, path); }
+	catch (error) { rmSync(temporary, { force: true }); throw error; }
+}
+
 function loadRawConfig(cwd: string): { path: string; existed: boolean; bytes: string; config: RpConfig } {
 	const path = resolveConfigPath(cwd);
 	const existed = existsSync(path);
@@ -45,9 +51,14 @@ function loadRawConfig(cwd: string): { path: string; existed: boolean; bytes: st
 }
 
 export function novelPlayBinding(host: NovelPlayModelHost): NovelPlayBinding {
-	const sessionId = host.memoryScope().sessionId;
+	const scope = host.memoryScope();
+	const sessionId = scope.sessionId;
+	const runtimeCard = String(scope.card ?? "");
+	const configCard = String(loadRawConfig(host.cwd).config.card ?? "");
 	if (!sessionId) throw new Error("当前会话不可用");
-	return { sessionId, card: String(loadRawConfig(host.cwd).config.card ?? "") };
+	if (!runtimeCard) throw new Error("当前运行时角色卡不可用");
+	if (!configCard || runtimeCard !== configCard) throw new Error("运行时角色卡与配置不一致，请刷新或重启服务后重试");
+	return { sessionId, card: runtimeCard };
 }
 
 export function sameNovelPlayBinding(a: NovelPlayBinding, b: NovelPlayBinding): boolean {
@@ -74,7 +85,13 @@ export function readyCorpusSource(cwd: string, docId: string): { document: Pick<
 	const root = corpusTextsDir(cwd);
 	const textFile = join(root, `${document.id}.txt`);
 	if (!resolve(textFile).startsWith(`${resolve(root)}${sep}`)) throw new Error("非法文档标识");
-	const text = readFileSync(textFile, "utf8");
+	let realRoot: string; let realTextFile: string;
+	try { realRoot = realpathSync(root); realTextFile = realpathSync(textFile); }
+	catch { throw new Error("小说原文文件不可用"); }
+	const rel = relative(realRoot, realTextFile);
+	if (!rel || rel.startsWith("..") || rel.startsWith(sep)) throw new Error("小说原文文件越界");
+	if (realTextFile !== join(realRoot, `${document.id}.txt`)) throw new Error("小说原文归属无效");
+	const text = readFileSync(realTextFile, "utf8");
 	if (!text.trim() || text.length !== document.chars) throw new Error("小说原文与文档长度不一致");
 	return { document, text };
 }
@@ -140,11 +157,11 @@ function restoreOwnedPreSwitch(before: ReturnType<typeof loadRawConfig>, ownedBy
 	let current = "";
 	try { current = readFileSync(before.path, "utf8"); } catch { return; }
 	if (current !== ownedBytes || !sameNovelPlayBinding(novelPlayBinding(host), { ...binding, card: JSON.parse(ownedBytes).card })) return;
-	if (before.existed) writeFileSync(before.path, before.bytes, "utf8"); else rmSync(before.path, { force: true });
+	if (before.existed) atomicWrite(before.path, before.bytes); else rmSync(before.path, { force: true });
 	rmSync(cardFile, { force: true });
 }
 
-export async function startFromConfirmedProposal(host: NovelPlayModelHost, input: { stored: StoredNovelPackage; anchor: NovelAnchor; proposal: NovelOpeningProposal }, expected: NovelPlayBinding): Promise<StartResult> {
+export async function startFromConfirmedProposal(host: NovelPlayModelHost, input: { stored: StoredNovelPackage; anchor: NovelAnchor; proposal: NovelOpeningProposal }, expected: NovelPlayBinding, onSwitchPrepared?: (card: string) => void): Promise<StartResult> {
 	if (input.proposal.confirmed !== false) throw new Error("预览状态无效");
 	if (!sameNovelPlayBinding(novelPlayBinding(host), expected)) throw new Error("会话或角色卡已变化，请重新预览");
 	const before = loadRawConfig(host.cwd);
@@ -160,9 +177,10 @@ export async function startFromConfirmedProposal(host: NovelPlayModelHost, input
 		writeFileSync(absoluteCard, `${JSON.stringify(raw, null, "\t")}\n`, { encoding: "utf8", flag: "wx" });
 		const next = { ...before.config, userName: confirmed.user.name, card: relativeCard };
 		ownedBytes = `${JSON.stringify(next, null, "\t")}\n`;
-		writeFileSync(before.path, ownedBytes, "utf8");
-		const afterWrite = novelPlayBinding(host);
-		if (afterWrite.sessionId !== expected.sessionId || afterWrite.card !== relativeCard) throw new Error("配置写入期间会话发生变化");
+		atomicWrite(before.path, ownedBytes);
+		const afterScope = host.memoryScope();
+		if (afterScope.sessionId !== expected.sessionId || String(afterScope.card ?? "") !== expected.card || readFileSync(before.path, "utf8") !== ownedBytes) throw new Error("配置写入期间会话发生变化");
+		onSwitchPrepared?.(relativeCard);
 	} catch (error) {
 		restoreOwnedPreSwitch(before, ownedBytes, absoluteCard, host, expected);
 		throw error;

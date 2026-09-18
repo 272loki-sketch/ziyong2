@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 
 import type { RestHost } from "./rest.ts";
 import {
-	buildPackage, createOpeningProposal, novelPlayBinding, sameNovelPlayBinding, startFromConfirmedProposal, startOptions,
+	buildPackage, createOpeningProposal, novelPlayBinding, readyCorpusSource, sameNovelPlayBinding, startFromConfirmedProposal, startOptions,
 	type NovelPlayBinding, type NovelPlayModelHost, type PreviewPublicDto,
 } from "../src/novel-play/application.ts";
 import type { NovelAnchor } from "../src/novel-play/canon.ts";
@@ -15,7 +15,9 @@ export const NOVEL_PLAY_LIMITS = {
 	maxBuildOperations: 2,
 	maxPreviewOperations: 2,
 	previewRequestsPerMinute: 6,
-	buildDeadlineMs: 120_000,
+	buildDeadlineMs: 30 * 60_000,
+	modelCallDeadlineMs: 120_000,
+	startSwitchDeadlineMs: 30_000,
 	previewDeadlineMs: 45_000,
 	jobRetentionMs: 30 * 60_000,
 	previewTokenTtlMs: 10 * 60_000,
@@ -24,7 +26,7 @@ export const NOVEL_PLAY_LIMITS = {
 type JobState = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 interface Job { id: string; docId: string; binding: NovelPlayBinding; state: JobState; createdAt: number; updatedAt: number; controller: AbortController; result?: unknown; error?: string }
 interface Preview { token: string; expiresAt: number; used: boolean; binding: NovelPlayBinding; stored: StoredNovelPackage; anchor: NovelAnchor; proposal: NovelOpeningProposal }
-interface InstanceState { jobs: Map<string, Job>; previews: Map<string, Preview>; starting: boolean; buildOperations: number; previewOperations: number; previewStarts: Map<string, number[]> }
+interface InstanceState { jobs: Map<string, Job>; previews: Map<string, Preview>; starting: boolean; recovery?: { card?: string; session: "recovery-required"; recovery: string }; buildOperations: number; previewOperations: number; previewStarts: Map<string, number[]> }
 
 const instances = new WeakMap<object, InstanceState>();
 const stateFor = (host: object): InstanceState => {
@@ -33,7 +35,7 @@ const stateFor = (host: object): InstanceState => {
 	return state;
 };
 export const isNovelPlayStartLocked = (host: object): boolean => stateFor(host).starting;
-export const novelPlayCounters = (host: object) => { const state = stateFor(host); return { buildOperations: state.buildOperations, previewOperations: state.previewOperations, jobs: state.jobs.size, previews: state.previews.size, starting: state.starting }; };
+export const novelPlayCounters = (host: object) => { const state = stateFor(host); return { buildOperations: state.buildOperations, previewOperations: state.previewOperations, jobs: state.jobs.size, previews: state.previews.size, starting: state.starting, recovery: state.recovery }; };
 
 const terminal = (state: JobState): boolean => state === "succeeded" || state === "failed" || state === "cancelled";
 const send = (res: ServerResponse, code: number, value: unknown): void => { if (res.writableEnded || res.destroyed) return; res.writeHead(code, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }); res.end(JSON.stringify(value)); };
@@ -58,6 +60,7 @@ export async function handleNovelPlayApiRequest(req: IncomingMessage, res: Serve
 		const current = novelPlayBinding(host as NovelPlayModelHost);
 		if (route === "POST /api/novel-play/build") {
 			const input = await body(req); const binding = novelPlayBinding(host as NovelPlayModelHost); const docId = text(input.docId, "docId", 200);
+			readyCorpusSource(host.cwd, docId);
 			const active = [...instance.jobs.values()].filter(job => sameNovelPlayBinding(job.binding, binding) && !terminal(job.state));
 			if (active.some(job => job.docId === docId)) throw Object.assign(new Error("该小说已在构建中"), { statusCode: 409 });
 			if (instance.buildOperations >= NOVEL_PLAY_LIMITS.maxBuildOperations) throw Object.assign(new Error("小说构建队列已满"), { statusCode: 429 });
@@ -96,9 +99,20 @@ export async function handleNovelPlayApiRequest(req: IncomingMessage, res: Serve
 			if (instance.starting) throw Object.assign(new Error("小说开演正在启动"), { statusCode: 409 });
 			const requested = text(input.previewToken, "previewToken", 200); const preview = [...instance.previews.values()].find(item => tokenEqual(item.token, requested));
 			if (!preview || preview.used || preview.expiresAt <= Date.now()) throw Object.assign(new Error("预览令牌无效或已过期"), { statusCode: 409 });
-			preview.used = true; instance.starting = true;
-			try { bindingChecked(host as NovelPlayModelHost, preview.binding); const result = await startFromConfirmedProposal(host as NovelPlayModelHost, preview, preview.binding); send(res, result.session === "created" ? 201 : 202, { started: result }); return true; }
-			finally { instance.starting = false; }
+			preview.used = true; instance.starting = true; instance.recovery = undefined;
+			bindingChecked(host as NovelPlayModelHost, preview.binding);
+			let preparedCard: string | undefined;
+			const operation = startFromConfirmedProposal(host as NovelPlayModelHost, preview, preview.binding, card => { preparedCard = card; });
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const tracked = operation.then(result => ({ kind: "result" as const, result }), error => ({ kind: "error" as const, error })).finally(() => {
+				try { novelPlayBinding(host as NovelPlayModelHost); instance.starting = false; instance.recovery = undefined; }
+				catch { instance.recovery = { ...(preparedCard ? { card: preparedCard } : {}), session: "recovery-required", recovery: "角色切换结果不确定。为避免迟到的切换与新操作竞争，服务已保持锁定。请检查当前会话；若切换仍卡住，请重启服务后恢复。" }; }
+			});
+			const outcome = await Promise.race([tracked, new Promise<{ kind: "timeout" }>(resolve => { timer = setTimeout(() => resolve({ kind: "timeout" }), NOVEL_PLAY_LIMITS.startSwitchDeadlineMs); })]);
+			if (timer) clearTimeout(timer);
+			if (outcome.kind === "timeout") { instance.recovery = { ...(preparedCard ? { card: preparedCard } : {}), session: "recovery-required", recovery: "角色切换未在期限内完成，结果仍不确定。配置和生成角色卡已保留，危险操作继续锁定。请检查当前会话；若切换仍卡住，请重启服务后恢复。" }; send(res, 202, { started: instance.recovery }); return true; }
+			if (outcome.kind === "error") throw outcome.error;
+			send(res, outcome.result.session === "created" ? 201 : 202, { started: outcome.result }); return true;
 		}
 		send(res, 404, { error: `未知接口：${route}` }); return true;
 	} catch (error) { const status = typeof (error as { statusCode?: unknown }).statusCode === "number" ? (error as { statusCode: number }).statusCode : 400; send(res, status, { error: error instanceof Error ? error.message : String(error) }); return true; }
