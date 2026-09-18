@@ -1,0 +1,28 @@
+name: Apply durable novel API hardening
+on:
+  push:
+    branches: [feat/novel-play-foundation]
+permissions:
+  contents: write
+jobs:
+  apply:
+    if: github.event.head_commit.message == 'Apply durable novel API hardening'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/novel-play-foundation
+          fetch-depth: 12
+      - name: Apply and commit source before tests
+        shell: bash
+        run: |
+          git show e28b0ffc1f6e29ff5148db9f14ca70aace24ec07:.github/workflows/fix-novel-api-blockers.yml > /tmp/original.yml
+          sed -n '/cat > \/tmp\/fix.py/,/python \/tmp\/fix.py/p' /tmp/original.yml | sed '$d' | sed 's/^          //' > /tmp/run-fix.sh
+          bash /tmp/run-fix.sh
+          python /tmp/fix.py
+          git checkout -- test/novel-play-api-audit.test.ts
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/novel-play/application.ts server/novel-play-api.ts
+          git commit -m "Harden novel API admission and switch recovery"
+          git push origin HEAD:feat/novel-play-foundation
