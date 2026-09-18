@@ -18,6 +18,7 @@ export type MdPart =
 	| { kind: "blockquote"; lines: string[] }
 	| { kind: "options"; items: { key: string; text: string }[] };
 
+
 /** 管道行 → 单元格（去首尾空管道；不处理转义 \| ——预设表格不用它） */
 function splitCells(line: string): string[] {
 	let t = line.trim();

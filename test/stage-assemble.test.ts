@@ -220,16 +220,14 @@ test("system prompt：字节稳定、宏替换；扮演话语零残留（P1—�
 });
 
 test("system prompt：# 工作方式 = 纯协议（§2.1-5 逐字）；tools=false 时不出现", () => {
-	const p = buildStageSystemPrompt({ card, config, constantLore: [] });
+	const p = buildStageSystemPrompt({ card, config, constantLore: [], allowAsk: true });
 	assert.ok(p.includes("# 工作方式"), "工作方式节在场");
-	assert.ok(
-		p.includes(
-			"每拍第 1 轮用 `beat_plan` 列路标（没有戏的拍可 `draft_write` 一次交完）；正文用 `draft_append` 逐路标写在稿纸上，写完 `draft_seal` 收笔。剧情走向要用户拍板时随时 `ask`。每轮注入的【进度】【判定】【记账】【谢幕】是当前状态，以它为准。",
-		),
-		"文案即规格，逐字一致",
-	);
+	assert.ok(p.includes("用户主权未定且此刻不定就无法继续时可调用 `ask`"), "ask 模式与运行时工具能力一致");
+	const silent = buildStageSystemPrompt({ card, config, constantLore: [], allowAsk: false });
+	assert.ok(silent.includes("不在中途调用 `ask`"), "未暴露 ask 时明确禁止虚构选择卡");
 	const noTools = buildStageSystemPrompt({ card, config, constantLore: [], tools: false });
 	assert.ok(!noTools.includes("# 工作方式"), "无工具形态不声明工作方式");
+	assert.ok(noTools.includes("纯文本主演模式"), "无工具 API 得到明确的纯文本交付协议");
 	assert.ok(!noTools.includes("memory_search") && !noTools.includes("lorebook_search"), "语义表的工具指引随 tools=false 摘除");
 });
 

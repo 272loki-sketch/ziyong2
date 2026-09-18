@@ -70,6 +70,7 @@ test("beat_plan：受理回执一句事实（§2.4）；重拟保留已勾条目
 	assert.ok(ws.plan.every((s) => !s.done), "新计划默认全未完成");
 	assert.equal(r.text, "计划已接受（3 条路标）。", "受理回执 = 契约文案，无清单回显无教学");
 
+	runWriteTool(ws, d, "draft_append", { segment: "她推门进院。" });
 	runWriteTool(ws, d, "beat_step_done", { step: 1 });
 	// 重拟：走岔了改写后两条，但已经演过的第一条不该因此丢掉进度
 	const again = runWriteTool(ws, d, "beat_plan", {
@@ -148,16 +149,18 @@ test("稿纸单拍边界：计划漏过时正文仍拒绝跳到放学或体育�
 	assert.equal(ws.draft, "");
 });
 
-test("beat_plan 固定小窗口：wordRange 放宽也不授权更多事件", () => {
+test("beat_plan：长篇目标动态放宽路标数，但仍保持有限窗口", () => {
 	assert.equal(planStepBudget(), 3);
 	assert.equal(planStepBudget({ min: 500, max: 800 }), 3);
-	assert.equal(planStepBudget({ min: 2000, max: 4000 }), 3);
+	assert.equal(planStepBudget({ min: 1500, max: 1800 }), 4);
+	assert.equal(planStepBudget({ min: 2700, max: 3300 }), 6);
+	assert.equal(planStepBudget({ min: 4000, max: 5000 }), 8);
 
 	const ws = createWorkspace();
-	const d = minRules();
+	const d = { ...deps(), rules: { wordRange: { min: 2700, max: 3300 } } };
 	const r = runWriteTool(ws, d, "beat_plan", { steps: ["一", "二", "三", "四", "五", "六", "七", "八"] });
-	assert.equal(r.ok, false, "长叙事也只能先规划固定候选窗口");
-	assert.match(r.text, /最多 3 条/);
+	assert.equal(r.ok, false);
+	assert.match(r.text, /最多 6 条/);
 });
 
 test("beat_step_done：按序号勾掉并回报剩余；越界/重复勾/无计划都拒收", () => {
@@ -166,6 +169,7 @@ test("beat_step_done：按序号勾掉并回报剩余；越界/重复勾/无计�
 	assert.equal(runWriteTool(ws, d, "beat_step_done", { step: 1 }).ok, false, "没有计划时无从勾起");
 
 	runWriteTool(ws, d, "beat_plan", { steps: ["推门进院", "被弟子拦下"] });
+	runWriteTool(ws, d, "draft_append", { segment: "她推门进院。" });
 	const ok = runWriteTool(ws, d, "beat_step_done", { step: 1 });
 	assert.equal(ok.ok, true);
 	assert.equal(ws.plan[0]?.done, true);
@@ -298,12 +302,13 @@ test("draft_append：追加不覆盖；封笔前无验收报告，封笔后事�
 	assert.ok(ws.draft.includes("山门外雪落了一夜。"));
 	assert.ok(ws.draft.includes("她还在窗边坐着"));
 	assert.equal(ws.appends, 2);
-	// 封笔：零测量值（去数字化）——字数与目标都不回传，验收只留发现事实
+	// 明确篇幅目标时，前两次过短封笔会让模型继续展开；第三次才允许收束。
+	assert.equal(runWriteTool(ws, d, "draft_seal", {}).ok, false);
+	assert.equal(runWriteTool(ws, d, "draft_seal", {}).ok, false);
 	const r3 = runWriteTool(ws, d, "draft_seal", {});
 	assert.equal(ws.sealed, true);
 	assert.match(r3.text, /已封笔/);
-	assert.doesNotMatch(r3.text, /\d+ 字|目标 800/, "字数与目标不回传（8/10 去数字化）");
-	assert.doesNotMatch(r3.text, /待修|违规|修正/, "验收恒为事实陈述（P2）");
+	assert.doesNotMatch(r3.text, /待修|违规|修正/, "封笔回执不变成质量报告");
 });
 
 test("draft_write：不以固定字数限制模型，格式尾巴完整保留", () => {
@@ -335,7 +340,9 @@ test("draft_append：不限制续写段数，模型自行决定何时封笔", ()
 	assert.equal(ws.appendLimitReached, false);
 	assert.equal(runWriteTool(ws, d, "draft_append", { segment: "第5段。" }).ok, true);
 	assert.equal(ws.appendRejects, 0);
-	assert.equal(runWriteTool(ws, d, "draft_seal", {}).ok, true);
+	assert.equal(runWriteTool(ws, d, "draft_seal", {}).ok, false, "明显低于目标时首次封笔应暂缓");
+	assert.equal(runWriteTool(ws, d, "draft_seal", {}).ok, false, "第二次仍给模型继续展开机会");
+	assert.equal(runWriteTool(ws, d, "draft_seal", {}).ok, true, "第三次允许收束，避免死循环");
 });
 
 test("draft_append：明确 2800-3200 长篇目标时，2200 字首段不提前封笔", () => {
@@ -456,6 +463,29 @@ test("draft_seal：空工作区封笔被拒", () => {
 	assert.match(r.text, /draft_write|draft_append/);
 });
 
+test("draft_seal：明确长篇目标时，过短正文前两次封笔被暂缓", () => {
+	const ws = createWorkspace();
+	const d = { ...deps(), rules: { wordRange: { min: 2700, max: 3300 } } };
+	runWriteTool(ws, d, "draft_append", { segment: "字".repeat(800) });
+	const first = runWriteTool(ws, d, "draft_seal", {});
+	const second = runWriteTool(ws, d, "draft_seal", {});
+	const third = runWriteTool(ws, d, "draft_seal", {});
+	assert.equal(first.ok, false);
+	assert.equal(second.ok, false);
+	assert.match(first.text, /2700–3300/);
+	assert.equal(third.ok, true, "两次软门禁后仍允许收束，避免模型死循环");
+});
+
+test("稿纸收稿：多个完整句挤成超长小说段时拒收，要求模型重排", () => {
+	const ws = createWorkspace();
+	const long = `${"池宽治压低声音说着考试规则。".repeat(30)}`;
+	const result = runWriteTool(ws, deps(), "draft_append", { segment: long });
+	assert.equal(result.ok, false);
+	assert.match(result.text, /插入空行|小说段落/);
+	assert.equal(ws.draft, "");
+	assert.match(result.activity ?? "", /过长/);
+});
+
 test("draft_seal：封笔后 draft_edit 仍可改（封笔≠锁稿，改完再验）", () => {
 	const ws = createWorkspace();
 	const d = deps();
@@ -466,6 +496,32 @@ test("draft_seal：封笔后 draft_edit 仍可改（封笔≠锁稿，改完再�
 	const r = runWriteTool(ws, d, "draft_edit", { edits: [{ old: "窗边", new: "廊下" }] });
 	assert.equal(r.ok, true);
 	assert.ok(ws.draft.includes("廊下"));
+	assert.equal(ws.sealed, false, "正文变化后必须重新封笔");
+});
+
+test("正文变化会废弃按旧稿提交的账本补丁", () => {
+	const ws = createWorkspace();
+	const d = deps();
+	runWriteTool(ws, d, "draft_write", { content: "她留在山门。" });
+	runWriteTool(ws, d, "draft_seal", {});
+	assert.equal(runWriteTool(ws, d, "world_state_update", { patch: { location: "山门" } }).ok, true);
+	assert.equal(ws.patches.length, 1);
+	assert.equal(runWriteTool(ws, d, "draft_edit", { edits: [{ old: "留在山门", new: "走进前院" }] }).ok, true);
+	assert.equal(ws.patches.length, 0, "旧正文产生的 patch 不能提交到新正文");
+	assert.equal(ws.sealed, false);
+});
+
+test("draft_edit 不能绕过收尾格式和跨场景门禁", () => {
+	const d = deps();
+	const formatWs = createWorkspace();
+	runWriteTool(formatWs, d, "draft_write", { content: "她留在门边。" });
+	assert.equal(runWriteTool(formatWs, d, "draft_edit", { edits: [{ old: "门边", new: "<calendar>次日</calendar>" }] }).ok, false);
+	assert.equal(formatWs.draft, "她留在门边。");
+
+	const sceneWs = createWorkspace();
+	runWriteTool(sceneWs, d, "draft_write", { content: "她留在门边。" });
+	assert.equal(runWriteTool(sceneWs, d, "draft_edit", { edits: [{ old: "她留在门边。", new: "第二天，她去了体育馆。" }] }).ok, false);
+	assert.equal(sceneWs.draft, "她留在门边。");
 });
 
 test("draft_write：全量替换语义——第二稿覆盖第一稿", () => {

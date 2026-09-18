@@ -48,6 +48,8 @@ export interface TurnWorkspace {
 	planWrites: number;
 	/** 已封笔（M-E）：正文写完了（8/10 起封笔只是状态切换，不触发任何检验） */
 	sealed: boolean;
+	/** 正文明显低于明确篇幅目标时已拒绝过的封笔次数。 */
+	shortSealRejects: number;
 	/** 交稿次数（含宽进严出代收） */
 	writes: number;
 	/** draft_append 追加段数（M-E KPI：分段续写是否真发生） */
@@ -124,6 +126,7 @@ export function createWorkspace(): TurnWorkspace {
 		plan: [],
 		planWrites: 0,
 		sealed: false,
+		shortSealRejects: 0,
 		writes: 0,
 		appends: 0,
 		appendRejects: 0,
@@ -307,13 +310,36 @@ function draftBodyChars(text: string): number {
 const DELIVERY_FORMAT_RE = /<\/?(?:images|calendar|options|status|state\d*|StatusPlaceHolderImpl|UpdateVariable|main_output|content)\b|<!DOCTYPE\s+html|<html\b|```(?:html|css|javascript|js)\b/i;
 const CROSS_SCENE_RE = /(?:放学后|下午课程结束后|到了?傍晚|到了?夜晚|到了?深夜|次日|翌日|第二天|随后回宿舍|回到宿舍入睡|开始夜跑|前往交流会|前往体育馆|离开食堂(?:后|并)|走向教室|回到教室|时间跳转|数小时后|几天后)/i;
 
+const MAX_PROSE_PARAGRAPH_CHARS = 220;
+
+function proseParagraphIssue(text: string): string | undefined {
+	const long = text
+		.split(/\n\s*\n/)
+		.map((part) => part.trim())
+		.filter(Boolean)
+		.find((part) => part.length > MAX_PROSE_PARAGRAPH_CHARS && (part.match(/[。！？!?]/g)?.length ?? 0) >= 2);
+	return long ? `发现约 ${long.length} 字的长段，含多个完整句` : undefined;
+}
+
 function containsDeliveryFormat(text: string): boolean {
 	return DELIVERY_FORMAT_RE.test(text);
 }
 
-/** 计划只覆盖固定的小窗口；wordRange 不授权更多事件。 */
-export function planStepBudget(_wordRange?: { min: number; max: number }): number {
-	return MAX_STEPS;
+/** 正文发生变化后，旧封笔与基于旧稿提交的账本补丁都不再成立。 */
+function reopenDraft(ws: TurnWorkspace): void {
+	ws.sealed = false;
+	ws.patches = [];
+	ws.patchAudit = [];
+}
+
+/** 长篇目标允许更多短路标，但每条仍只是当前场景的抽象转折。 */
+export function planStepBudget(wordRange?: { min: number; max: number }): number {
+	if (!wordRange) return MAX_STEPS;
+	if (wordRange.max <= 1_000) return 3;
+	if (wordRange.max <= 1_800) return 4;
+	if (wordRange.max <= 2_600) return 5;
+	if (wordRange.max <= 3_600) return 6;
+	return 8;
 }
 
 /** 渲染清单：方框 + 待办，已完成的打勾划掉（□/☑ 与删除线同构于用户看到的任务列表） */
@@ -404,11 +430,16 @@ export function runWriteTool(
 
 	if (name === "beat_step_done") {
 		if (ws.plan.length === 0) return { text: "本拍还没有计划。", ok: false };
+		if (!ws.draft.trim()) return { text: "尚无已受理正文，不能把路标标为完成。先演出对应内容。", ok: false };
 		const idx = typeof args.step === "number" ? args.step : Number.NaN;
 		if (!Number.isInteger(idx) || idx < 1 || idx > ws.plan.length) {
 			return { text: `step 需为 1~${ws.plan.length} 的序号（当前计划 ${ws.plan.length} 条）。`, ok: false };
 		}
 		const target = ws.plan[idx - 1]!;
+		const firstPending = ws.plan.findIndex((step) => !step.done);
+		if (firstPending >= 0 && idx !== firstPending + 1) {
+			return { text: `请按顺序推进路标：当前应先处理第 ${firstPending + 1} 条。`, ok: false };
+		}
 		if (target.done) {
 			return { text: `第 ${idx} 条已经勾过了。`, ok: false };
 		}
@@ -431,7 +462,15 @@ export function runWriteTool(
 				ok: false,
 			};
 		}
-		if (!internal && !deps.transitionAuthorized && CROSS_SCENE_RE.test(content)) {
+		const paragraphIssue = proseParagraphIssue(content);
+		if (paragraphIssue) {
+			return {
+				text: `正文未收：${paragraphIssue}。请按自然动作或反应插入空行，保持小说段落，不要把多段剧情压成一大块；稿纸不会替你改写。`,
+				activity: "小说段落过长被拦下",
+				ok: false,
+			};
+		}
+		if (!deps.transitionAuthorized && CROSS_SCENE_RE.test(content)) {
 			return {
 				text: "正文未收：本拍越过了用户输入所在的当前场景。删掉放学、回教室、体育馆、夜晚或次日等后续，只演眼前互动并把行动权交还用户。",
 				activity: "正文跨场景被拦下",
@@ -451,8 +490,8 @@ export function runWriteTool(
 		}
 		ws.draft = content;
 		ws.writes++;
-		// draft_write 只是全量写入，不替模型决定收笔；后续仍可继续 append 或显式 seal。
-		ws.sealed = false;
+		// 全量重写会使旧封笔与按旧稿提交的账本补丁失效。
+		reopenDraft(ws);
 		ws.overBudget = false;
 		// 时间线：正文按交稿位置入档。重交是**替换**不是追加——
 		// 末段若已是本工作区写过的正文，改写它，避免多稿在屏上叠成几份。
@@ -474,6 +513,14 @@ export function runWriteTool(
 				ok: false,
 			};
 		}
+		const paragraphIssue = proseParagraphIssue(seg);
+		if (paragraphIssue) {
+			return {
+				text: `本段未受理：${paragraphIssue}。请按自然动作或反应插入空行后重交，保持小说段落，不要把多段剧情压成一大块。`,
+				activity: "小说段落过长被拦下",
+				ok: false,
+			};
+		}
 		if (!deps.transitionAuthorized && CROSS_SCENE_RE.test(seg)) {
 			return {
 				text: "本段未受理：本拍只能停留在用户最新输入所在的当前场景。删掉放学、回教室、体育馆、夜晚或次日等后续，改写为眼前人物的即时反应与玩家停点。",
@@ -486,6 +533,7 @@ export function runWriteTool(
 		const bodyChars = draftBodyChars(nextDraft);
 		ws.draft = nextDraft;
 		ws.appends++;
+		reopenDraft(ws);
 		ws.overBudget = false;
 		// 续写的正文入时间线：追加一段（不是替换——已写的部分是已经发生的事，不推翻）
 		ws.timeline.push({ kind: "text", text: seg, draft: true });
@@ -499,6 +547,16 @@ export function runWriteTool(
 
 	if (name === "draft_seal") {
 		if (!ws.draft.trim()) return { text: "工作区还没有稿件——先用 draft_write / draft_append 写正文。", ok: false };
+		const chars = draftBodyChars(ws.draft);
+		const target = deps.rules.wordRange;
+		if (target && chars < target.min && ws.shortSealRejects < 2) {
+			ws.shortSealRejects++;
+			return {
+				text: `封笔暂缓：当前正文约 ${chars} 字，明确目标约 ${target.min}–${target.max} 字。继续当前场景的既有互动、人物主动性、环境变化或信息交换；不要跳时空、不要替用户行动、不要为凑字数新增无因果事件。`,
+				activity: `正文篇幅不足，继续展开（${chars}/${target.min} 字）`,
+				ok: false,
+			};
+		}
 		ws.sealed = true;
 		return {
 			text: `已封笔。${sealFacts(ws)}`,
@@ -519,9 +577,32 @@ export function runWriteTool(
 			// 整批未套用：现稿一字未动，回报每处失败原因供模型修正
 			return { text: `改稿未套用：\n${r.details.join("\n")}`, activity: "改稿未套用", ok: false };
 		}
+		if (containsDeliveryFormat(r.text)) {
+			return {
+				text: "改稿未套用：修改后的正文含状态、日历、选项或 HTML 等收尾格式。格式应留给封笔后的独立收尾。",
+				activity: "改稿夹带收尾格式被拦下",
+				ok: false,
+			};
+		}
+		if (!deps.transitionAuthorized && CROSS_SCENE_RE.test(r.text)) {
+			return {
+				text: "改稿未套用：修改后的正文越过了用户输入所在的当前场景。只有用户明确要求推进时间或地点时才允许跨场景。",
+				activity: "改稿跨场景被拦下",
+				ok: false,
+			};
+		}
+		const paragraphIssue = proseParagraphIssue(r.text);
+		if (paragraphIssue) {
+			return {
+				text: `改稿未套用：${paragraphIssue}。请在自然动作、反应或对白转折处插入空行。`,
+				activity: "改稿后的小说段落过长被拦下",
+				ok: false,
+			};
+		}
 		const editedBodyChars = draftBodyChars(r.text);
 		ws.draft = r.text;
 		ws.edits++;
+		reopenDraft(ws);
 		ws.overBudget = false;
 		// 时间线：定点改稿后正文原地更新（改的是同一份稿，不新开一段）。
 		// 续写形态下按段重切，保住「一段段长出来」的形态不塌成一整块。

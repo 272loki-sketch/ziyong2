@@ -1,5 +1,9 @@
 # PLAN-ROUND-FLOW：分轮演出流程定义（最终形态）
 
+> 当前实现校准：2026-09-18。运行时现状以 `docs/ARCHITECTURE-OVERVIEW.md`、`docs/ARCHITECTURE-RP-PIPELINE-20260902.md` 和 `docs/WRITER-API-COMPATIBILITY.md` 为准；本文早期设计记录保留作演进背景。
+
+当前运行时补充：`beat_plan` 与首次正文写入强制分轮；同一生成轮只接受一次正文写入或修改；正文变化会重新打开封笔并废弃旧账本 patch；检索最多 3 次；主演流和 `ask` 均有硬超时。工具不兼容或文本化伪工具协议会触发一次纯文本主演降级。独立谢幕在场记、世界和生态结算后读取最终状态，图片要求从 format plan 推导。
+
 > 2026-08-08 定稿。本文定义梨园 RP agent 一拍之内**按思考轮次**的完整流程——模型每一轮思考
 > 看到什么、思考什么、调用什么，以及 ask 工具接入后的变化。它是提示词与 harness 改造的
 > 唯一靶子：任何改动都要回答「离这个流程近了多少」。
@@ -11,6 +15,8 @@
 > 独立谢幕格式轮的提示词已全部 Skill 化（见 `skills/` 与 `docs/STANDALONE-INTEGRATION-BASELINE.md`）；
 > 流程骨架不变——拍前工件注入 → `beat_plan` 路标 → `draft_append` 分段演出 → `draft_seal`
 > 封笔 → 主演记账 → 独立谢幕格式轮 → 正文（`rpNarrative`）/ 格式（`rpCurtain`）分工件落树。
+
+**2026-09-14 当前实现补充**：预设字数目标支持区间、约数和下限表达，例如 `500–800字`、`大概3000字`、`约3000字左右`、`不少于2000字`。约 3000 字目标会把 `beat_plan` 上限放宽到 6 条，最高 8 条；正文低于下限的前两次 `draft_seal` 会软拒绝，要求继续当前场景，第三次允许收束。正文关键路径已移除按在场角色逐个调用 `characterRehearsal`，人物主动性由 Stitches 导演统一处理。带函数工具的兼容模型只有明确支持 `reasoning_effort` 时才接收该参数。模型连接面板与设置页保存后立即热切换，不要求重启。
 >
 > **v1.5.1 现状（2026-08-16）**：新增后台世界推演与两级重 Roll，完整设计见
 > `docs/PLAN-WORLD-ENGINE.md`：
@@ -40,8 +46,8 @@
 >   绝不从模型回调直接写分支。世界引擎现已升级为**角色卡自适应模块化 v2**（卡级画像/
 >   Manifest/模块 Skill），权威设计在 `docs/PLAN-WORLD-ENGINE.md`。
 > - **记忆后台**：压缩摘要采用数据库式 `version=2` envelope（`summaryMarkdown + events`），
->   事件 canonical id 由代码按 sourceRef 生成；归档证据与事件卡写入采用 fire-and-forget，
->   不得阻塞 `agent end`。拍前只有命中历史回照预判才触发云端召回，超时降级为摘要+状态。
+>   事件 canonical id 由代码按 sourceRef 生成；压缩归档与事件卡写入在摘要落树前完成，滚动事件在正文关键路径外，
+>   不得阻塞正文首字。拍前只有命中历史回照预判才触发云端召回，超时降级为摘要+状态。
 > - **失败降级**：aftermath 失败仍落一轮 `degraded` 生态快照（轮次+1、事实保留），
 >   世界失败保留旧快照；旁路流式异常自动做一次非流式降级再失败。
 > - **搜索熔断**：DuckDuckGo 人机验证命中后熔断 30 分钟，直接走 Bing。
@@ -215,6 +221,12 @@ draft_append」。到这一行为止，**正文一个字都不许出现**——�
    预设没有选择框才用 ask 工具弹卡
 6. ask 的结果改变了剧情输入，应计入「这一拍有戏」的事实（lookups 或单独打点，接回时定）
 
+### 4.1 正文输入与记忆注入（2026-09-18）
+
+- 正文不会把原始角色卡 JSON、小说全文或全部世界书作为单独内容全量发送。压缩前使用当前分支活跃历史；压缩后由 `rp-summary` 接替早期正文，并保留最近正文；只有命中历史回照意图时才追加有限剧情记忆。
+- 不新增硬裁剪正常正文历史，以保留剧情连续性。初次 writer 请求的输入构成记录在 assistant details 的 `rpInputComposition` 中，字段包括系统、摘要、历史、动态注入、本拍用户输入、工具 schema 字符数和合计字符数。
+- 记忆压缩先完成 evidence/事件写入再追加摘要；周期记忆保存完整 N 拍窗口并带来源锚点，事件命中后可继续回读 Session Tree 原文。
+
 ## 5. 任务流程的固定与可变
 
 **固定不变的部分（骨架）**：演一段 → 评估 → 再演。寒暄例外（没戏拍直接交）。
@@ -317,9 +329,9 @@ H 脑内 harness、I 死块 → 退场/蒸发。
 | P13 random 会话内钉死 | ✅（原已实现） | `preset-macro.ts` 内容寻址（同参数恒选同项）——TAXONOMY §4.5 已落地，确认无需改动 |
 | P14 rehearsalGuard 默认开 | ✅ | `engine.ts`：`config.rehearsalGuard !== false`（显式 false 才关） |
 
-测试：563 全绿（新增 ask 四用例 + 更新 assemble 断言）。
+历史测试记录：563 全绿（新增 ask 四用例 + 更新 assemble 断言）；当前专项与完整测试结果以 `docs/ARCHITECTURE-OVERVIEW.md` 的 2026-09-18 验收记录为准。
 
-未做（需用户拍板）：
+历史遗留（不阻塞当前正文主链）：
 - P6 draft_write 门禁扩判据（查过库 **或** 计划 ≥2 条）——现只按 lookups，纯情感戏/纯场景戏（不查库）仍可一次交完
 - ask 结果落树留痕（wire.ts choiceOfToolResult 只认 ask_director；当前台上 ask 走 live 卡，重放不还原已决卡）
 

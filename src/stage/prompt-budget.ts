@@ -3,7 +3,10 @@ import type { BeatMsg } from "./assemble.ts";
 
 export function clipPromptText(text: string | undefined, max: number): string {
 	const value = text ?? "";
-	return value.length <= max ? value : `${value.slice(0, max)}\n……（输入已裁剪 ${value.length - max} 字）`;
+	if (value.length <= max) return value;
+	if (max <= 0) return "";
+	const suffix = `\n……（输入已裁剪 ${value.length - max} 字）`;
+	return max <= suffix.length ? suffix.slice(0, max) : `${value.slice(0, max - suffix.length)}${suffix}`;
 }
 
 export function boundedHistory(history: BeatMsg[], maxMessages: number, maxTotal = 60_000): BeatMsg[] {

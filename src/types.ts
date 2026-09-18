@@ -137,11 +137,22 @@ export interface RpConfig {
 	literaryEcologyEnabled?: boolean;
 	/** 联网查证：off=关闭；auto=模型按需；manual=仅用户本拍明确要求联网时可用 */
 	webResearchMode?: "off" | "auto" | "manual";
-	/** 小说长文消化：手动触发后台管道，纯手动无后台自动成本。 */
+	/** 小说长文消化：支持手动导入、手动选书与可选的每日自动任务。 */
 	novelDigest?: {
 		enabled: boolean;
 		chunkChars: number;
 		maxCallsPerDoc: number;
+		autoSchedule?: {
+			enabled: boolean;
+			hour: number;
+			minute: number;
+			maxPerRun: number;
+			queries: string[];
+		};
+	};
+	/** 普通研究搜索的每日自动任务；默认关闭，避免未确认的联网和模型成本。 */
+	researchSearchSchedule?: {
+		enabled: boolean; hour: number; minute: number; maxPerRun: number; topics: string[];
 	};
 	/** 各旁路步骤的项目级模型覆盖；缺少某项即继承当前剧情总插头 */
 	stepModels?: import("./model-routing.ts").StepModelOverrides;
@@ -163,8 +174,15 @@ export const DEFAULT_CONFIG: RpConfig = {
 	literaryProfileEveryNTurns: 8,
 	literaryWorldEnabled: false,
 	literaryEcologyEnabled: false,
+	creationMode: "silent",
 	webResearchMode: "off",
-	novelDigest: { enabled: true, chunkChars: 20000, maxCallsPerDoc: 800 },
+	researchSearchSchedule: { enabled: false, hour: 6, minute: 0, maxPerRun: 3, topics: ["校园恋爱中的慢热互信", "日常剧情中的关系推进", "悬疑故事的信息分配"] },
+	novelDigest: {
+		enabled: true,
+		chunkChars: 20000,
+		maxCallsPerDoc: 800,
+		autoSchedule: { enabled: false, hour: 5, minute: 0, maxPerRun: 3, queries: ["学園 日常", "現代 日常 社会人", "青春 日常"] },
+	},
 };
 
 /** 宏替换上下文 */

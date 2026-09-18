@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -7,16 +7,18 @@ import test from "node:test";
 import { buildRpSummaryInitialPrompt, buildRpSummaryPrompt, buildRpSummaryUpdatePrompt, RP_SUMMARY_SECTIONS } from "../src/scribe.ts";
 import {
 	memoryArchiveCompacted,
+	memoryArcRecallForTurn,
 	memoryEvidenceForEvent,
 	memoryHasEvent,
 	memoryListEventDigests,
 	memoryRecallForTurn,
 	memoryUpsertEventDigest,
 	updateMemoryConfig,
+	memoryListDiff,
 } from "../src/memory/service.ts";
 import { evictByPriority, evictionRank } from "../src/memory/store.ts";
 import { parseRpSummaryEnvelope } from "../src/stage/compact.ts";
-import { shouldRecallHistory, sideTextRetryLimit, sideTextTimeoutMs } from "../src/stage/engine.ts";
+import { shouldRecallHistory, classifyRecallIntent, sideTextRetryLimit, sideTextTimeoutMs } from "../src/stage/engine.ts";
 import type { MemoryChunk, MemoryChunkMeta, MemoryImportance, RpEventDigest } from "../src/memory/types.ts";
 
 const scope = { sessionId: "sess-rp", card: "assets/cards/rpcard.png" };
@@ -212,7 +214,264 @@ test("rp-memory: 摘要 envelope 可解析；旧 Markdown 仍兼容；历史触�
 	assert.equal(parseRpSummaryEnvelope("## Story Phase\n旧格式").summary, "## Story Phase\n旧格式");
 	assert.equal(shouldRecallHistory("今天放学后去体育馆。"), false);
 	assert.equal(shouldRecallHistory("你还记得我们第一次见面吗？"), true);
+	assert.equal(shouldRecallHistory("这些年我们一路走来经历了什么"), true);
 	assert.equal(sideTextTimeoutMs("memoryEvents"), 60_000);
 	assert.equal(sideTextTimeoutMs("compaction"), 120_000);
 	assert.equal(sideTextRetryLimit("memoryEvents"), 1);
+});
+
+test("rp-memory: 语义去重——同事件不同描述→合并一张卡+sourceRefs累积+status演进", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "liyuan-rpmem-merge-"));
+	try {
+		enableMemory(cwd);
+	const first = { ...sampleEvent, importance: "major" as const, status: "active" as const,
+		sourceRefs: [{ entryId: "entry-0010", entryType: "message", turn: 10 }] };
+	await memoryUpsertEventDigest(cwd, scope, first);
+	const cards1 = memoryListEventDigests(cwd, scope);
+	assert.equal(cards1.length, 1);
+
+	const evolved: RpEventDigest = { ...sampleEvent,
+		id: "source_same_event_wording",
+		sourceKey: "source_same_event_wording",
+		title: "雨中初遇（更新版）",
+		status: "resolved",
+		importance: "core",
+		summary: "男主递伞后女主终于接过，误会解除。",
+		sourceRefs: [{ entryId: "entry-0020", entryType: "message", turn: 20 }],
+	};
+	await memoryUpsertEventDigest(cwd, scope, evolved);
+	const cards2 = memoryListEventDigests(cwd, scope);
+	assert.equal(cards2.length, 1, "余弦相似文案合并，不应新增卡");
+	const merged = cards2[0];
+	assert.equal(merged.status, "resolved");
+	assert.equal(merged.importance, "core", "合并取高importance");
+	assert.equal(merged.title, "男女主初次相遇", "保旧title为召回锚稳定");
+	assert.match(merged.summary, /解除/);
+	assert.ok(merged.sourceRefs.length >= 2, "sourceRefs 累积不丢");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("rp-memory: 长期事件 sourceRefs 保留最新24条而非最旧证据", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "liyuan-rpmem-refs-"));
+	try {
+		enableMemory(cwd);
+		for (let turn = 1; turn <= 30; turn++) {
+			const prior = memoryListEventDigests(cwd, scope)[0];
+			await memoryUpsertEventDigest(cwd, scope, {
+				...sampleEvent,
+				id: turn === 1 ? sampleEvent.id : `source-evolved-${turn}`,
+				sourceKey: turn === 1 ? sampleEvent.sourceKey : `source-evolved-${turn}`,
+				sourceRefs: [
+					...(prior?.sourceRefs.slice(-1) ?? []),
+					{ entryId: `entry-${turn}`, entryType: "message", turn },
+				],
+			}, turn === 1 ? undefined : { mergeInto: prior!.id, reason: "test-evolution" });
+		}
+		const refs = memoryListEventDigests(cwd, scope)[0]!.sourceRefs;
+		assert.equal(refs.length, 24);
+		assert.equal(refs[0]!.entryId, "entry-7");
+		assert.equal(refs.at(-1)!.entryId, "entry-30");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("rp-memory: 锚词直通——recallAnchors命中不依赖embedding质量", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "liyuan-rpmem-anchor-"));
+	try {
+		enableMemory(cwd);
+		await memoryUpsertEventDigest(cwd, scope, sampleEvent);
+		const hits = await memoryRecallForTurn(cwd, scope, "还记得那把伞吗");
+		const eventHit = hits.find((item) => item.meta?.kind === "event");
+		assert.ok(eventHit, "锚词直通应命中事件卡（local-hash下embedding可能不中）");
+		assert.equal(eventHit.score, 2);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("rp-memory: 召回意图——sweep扫码荡型请求", () => {
+	assert.equal(classifyRecallIntent("今天去体育馆吗"), "point");
+	assert.equal(classifyRecallIntent("从头讲讲我们当初怎么认识的"), "sweep");
+	assert.equal(classifyRecallIntent("还记得我们第一次见面吗"), "point");
+	assert.equal(classifyRecallIntent("这一路走来经历了什么"), "sweep");
+	assert.equal(classifyRecallIntent("我们之间到底发生过什么"), "point");
+	assert.equal(classifyRecallIntent("来龙去脉给我说清楚"), "sweep");
+});
+
+test("rp-memory: 线召回——按弧线聚合、分支过滤、cap生效", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "liyuan-rpmem-arc-"));
+	try {
+		enableMemory(cwd);
+		const makeEvent = (id: string, arc: string | undefined, turn: number, title: string, summary: string): RpEventDigest => ({
+			kind: "rp-event-digest", id, title, status: "active", importance: "normal", tags: [], recallAnchors: [],
+			summary, evidenceLevel: "source-backed", turnRange: { from: turn, to: turn },
+			sourceRefs: [{ entryId: `entry-turn-${turn}`, entryType: "message", turn }], arc,
+		});
+		await memoryUpsertEventDigest(cwd, scope, makeEvent("e1", "误会线", 1, "递伞误会", "女主误认男主为催债人。"));
+		await memoryUpsertEventDigest(cwd, scope, makeEvent("e2", "误会线", 23, "关系恶化", "两人冷战数月。"));
+		await memoryUpsertEventDigest(cwd, scope, makeEvent("e3", "误会线", 87, "互相理解", "误会终于澄清。"));
+		await memoryUpsertEventDigest(cwd, scope, makeEvent("e4", "救赎线", 50, "一次救助", "男主在事故中救了女主。"));
+		const arcs = memoryArcRecallForTurn(cwd, scope, new Set(["entry-turn-1", "entry-turn-23", "entry-turn-87", "entry-turn-50"]));
+		assert.ok(arcs.length >= 2);
+		assert.match(arcs[0].text, /误会线/);
+		assert.match(arcs[0].text, /拍1|拍23|拍87/);
+		const hidden = memoryArcRecallForTurn(cwd, scope, new Set(["entry-turn-999"]));
+		assert.equal(hidden.length, 0, "兄弟分支无可见事件→无线");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("rp-memory: memory_diff审计记录create/merge", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "liyuan-rpmem-diff-"));
+	try {
+		enableMemory(cwd);
+		await memoryUpsertEventDigest(cwd, scope, sampleEvent);
+		const diff1 = memoryListDiff(cwd, scope);
+		assert.ok(diff1.length >= 1);
+	assert.equal(diff1[0].op, "create");
+	assert.equal(diff1[0].title, "男女主初次相遇");
+
+	const evolved = { ...sampleEvent, title: "雨中初遇（修正）", summary: "同ID覆盖走update。", status: "resolved" as const };
+	await memoryUpsertEventDigest(cwd, scope, evolved);
+	const diff2 = memoryListDiff(cwd, scope);
+	assert.ok(diff2.length >= 2);
+	assert.ok(diff2[0].op === "merge" || diff2[0].op === "update");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("rp-memory: SKILL.md含op/arc/links字段要求", () => {
+	const skill = readFileSync("skills/剧情记忆摘要/SKILL.md", "utf8");
+	assert.match(skill, /"op"/);
+	assert.match(skill, /"arc"/);
+	assert.match(skill, /"links"/);
+	assert.match(skill, /caused_by/);
+	assert.match(skill, /evolved_from/);
+	assert.match(skill, /resolved_the/);
+	assert.match(skill, /contradicts/);
+	assert.match(skill, /merge:</);
+	assert.match(skill, /existing-arcs/);
+});
+
+test("rp-memory: 逐 entry 归档 → 事件证据精确到条目，不误拉到无关 entry", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "liyuan-rpmem-precise-"));
+	try {
+		enableMemory(cwd);
+		await memoryArchiveCompacted(cwd, scope, "整段占位", {
+			perEntry: [
+				{ entryId: "entry-001", entryType: "message", turn: 1, text: "早上的寒暄：沈舟值日后在走廊遇见云澜，只说了两句天气。".repeat(8) },
+				{ entryId: "entry-002", entryType: "message", turn: 2, text: "云澜把一块青玉佩塞进沈舟掌心，说三年后在青梧谷相见，以此为信物。" },
+				{ entryId: "entry-003", entryType: "message", turn: 3, text: "两人各怀心事，谁也没有再说话。".repeat(6) },
+			],
+		});
+		await memoryUpsertEventDigest(cwd, scope, {
+			...sampleEvent,
+			sourceRefs: [{ entryId: "entry-002", entryType: "message", turn: 2 }],
+			sourceKey: "source_envelope_002",
+		});
+		const targets = memoryListEventDigests(cwd, scope);
+		const event = targets.find((e) => e.title === sampleEvent.title);
+		assert.ok(event, "事件卡应已入库");
+		const evidence = await memoryEvidenceForEvent(cwd, scope, event!.id, 2);
+		assert.ok(evidence.length >= 1, "应返回证据原文块");
+		assert.ok(evidence[0]!.text.includes("青玉佩"), "证据应来自 entry-002 而非寒暄/沉默条目");
+		assert.ok(!evidence[0]!.text.includes("寒暄"), "不得误拉到 entry-001");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("rp-memory: 分支可见性 every 语义——多 sourceRefs 需全部落在祖先链", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "liyuan-rpmem-every-"));
+	try {
+		enableMemory(cwd);
+		await memoryUpsertEventDigest(cwd, scope, {
+			...sampleEvent,
+			title: "跨分支合并事件",
+			sourceRefs: [
+				{ entryId: "ancestor-1", entryType: "message", turn: 2 },
+				{ entryId: "sibling-9", entryType: "message", turn: 9 },
+			],
+			branchLeafId: "leaf-b",
+		});
+		const events = memoryListEventDigests(cwd, scope, new Set(["ancestor-1"]));
+		assert.equal(events.length, 0, "只看到部分 refs → 整卡不可见（防兄弟分支污染）");
+
+		const visible = memoryListEventDigests(cwd, scope, new Set(["ancestor-1", "sibling-9"]));
+		assert.ok(visible.some((e) => e.title === "跨分支合并事件"), "全部 refs 在祖先链 → 可见");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("rp-memory: 显式 merge 跨分支目标被拒，共享来源才放行", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "liyuan-rpmem-mergeguard-"));
+	try {
+		enableMemory(cwd);
+		await memoryUpsertEventDigest(cwd, scope, {
+			...sampleEvent,
+			title: "初遇雨夜",
+			sourceRefs: [{ entryId: "entry-a", entryType: "message", turn: 1 }],
+			branchLeafId: "leaf-a",
+		});
+		const created = memoryListEventDigests(cwd, scope);
+		const targetId = created[0]!.id;
+
+		const cross = await memoryUpsertEventDigest(cwd, scope, {
+			...sampleEvent,
+			title: "初遇雨夜（兄弟分支演进）",
+			sourceRefs: [{ entryId: "entry-b", entryType: "message", turn: 2 }],
+			branchLeafId: "leaf-b",
+		}, { mergeInto: targetId });
+		assert.equal(cross.stored, false, "无共享来源 → 不得跨分支合并");
+		assert.match(cross.error ?? "", /not reachable|merge target/i);
+
+		const shared = await memoryUpsertEventDigest(cwd, scope, {
+			...sampleEvent,
+			title: "初遇雨夜（补录）",
+			sourceRefs: [{ entryId: "entry-a", entryType: "message", turn: 1 }],
+			branchLeafId: "leaf-a",
+		}, { mergeInto: targetId });
+		assert.equal(shared.stored, true, "共享来源 → 允许合并");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("rp-memory: 并发归档不丢写（keyed 锁串行化）", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "liyuan-rpmem-conc-"));
+	try {
+		enableMemory(cwd);
+		const entries = Array.from({ length: 6 }, (_, i) => ({
+			entryId: `entry-c-${i}`,
+			entryType: "message" as const,
+			turn: i + 1,
+			text: `并发归档第 ${i} 段正文，包含独特标记 token-${i} 与后续剧情的足够长度描述。`,
+		}));
+		await Promise.all(
+			entries.map((e, i) => memoryArchiveCompacted(cwd, scope, entries.map((x) => x.text).join("\n"), { perEntry: [e] })),
+		);
+		const { loadChunks } = await import("../src/memory/store.ts");
+		const chunks = loadChunks(cwd, scope, "narrative");
+		for (let i = 0; i < entries.length; i++) {
+			assert.ok(chunks.some((c) => c.text.includes(`token-${i}`)), `第 ${i} 段归档不得被并发覆盖丢失`);
+		}
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("rp-memory: parseRpSummaryEnvelope 暴露 wasEnvelope 标志", () => {
+	const envelope = parseRpSummaryEnvelope(JSON.stringify({ version: 2, summaryMarkdown: "## Story Phase\n开局。", events: [], }));
+	assert.equal(envelope.wasEnvelope, true);
+	const legacy = parseRpSummaryEnvelope("## 前情提要\n三拍剧情。");
+	assert.equal(legacy.wasEnvelope, false);
+	const garbage = parseRpSummaryEnvelope("   ");
+	assert.equal(garbage.wasEnvelope, false);
+	assert.equal(garbage.summary, "");
 });

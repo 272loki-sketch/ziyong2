@@ -192,22 +192,56 @@ test("serializeForSummary：补丁已套用（摘要读到的与模型读到的�
 
 // ---------------- 执行：落树 / 归档 / 叶守卫 ----------------
 
+/** v2 envelope：10 节齐全，供严格校验通过。 */
+const v2Summary = (extra = ""): string =>
+	JSON.stringify({
+		version: 2,
+		summaryMarkdown: [
+			`## Story Phase`,
+			`开局三拍。${extra}`,
+			`## Story Progress`,
+			`第一拍发生的事件；第二拍的发展；第三拍的收束。`,
+			`## Characters`,
+			`沈舟：当前状态；云澜：当前状态。`,
+			`## Core Events`,
+			`（无事件卡）`,
+			`## Promises & Threads`,
+			`暂无未兑现承诺。`,
+			`## Canon Facts`,
+			`已确认时间线与人物关系。`,
+			`## Knowledge Boundaries`,
+			`沈舟不知道云澜的秘密。`,
+			`## Compression Boundary`,
+			`压缩区间结束时位于第三拍末尾。`,
+			`## Current Continuity`,
+			`由最近保留正文与 rp-state 提供。`,
+			`## Recall Index`,
+			`（无回照词）`,
+		].join("\n"),
+		events: [],
+	});
+
 const makeDeps = (
 	over: Partial<CompactRunDeps> & { resp?: string | { error: string } } = {},
-): CompactRunDeps & { appended: unknown[]; archived: string[] } => {
+): CompactRunDeps & { appended: unknown[]; archived: string[]; archivedEntries: number[] } => {
 	const appended: unknown[] = [];
 	const archived: string[] = [];
+	const archivedEntries: number[] = [];
 	return {
 		appended,
 		archived,
-		sideText: async () => over.resp ?? "## 前情提要\n三拍剧情。",
+		archivedEntries,
+		sideText: async () => over.resp ?? v2Summary("前情提要"),
 		appendSummaryEntry: (data) => appended.push(data),
 		getLeafId: () => "leaf-1",
-		archive: async (t) => void archived.push(t),
+		archive: async (t, opts) => {
+			void archived.push(t);
+			archivedEntries.push(opts?.perEntry?.length ?? 0);
+		},
 		...(over.sideText ? { sideText: over.sideText } : {}),
 		...(over.getLeafId ? { getLeafId: over.getLeafId } : {}),
 		...(over.archive !== undefined ? { archive: over.archive } : {}),
-	} as CompactRunDeps & { appended: unknown[]; archived: string[] };
+	} as CompactRunDeps & { appended: unknown[]; archived: string[]; archivedEntries: number[] };
 };
 
 const input = (branch: BranchEntryLike[], everyNTurns = 3) => ({
@@ -219,7 +253,7 @@ const input = (branch: BranchEntryLike[], everyNTurns = 3) => ({
 	everyNTurns,
 });
 
-test("runCompaction：落 rp-summary 快照 + 归档被裁正文", async () => {
+test("runCompaction：落 rp-summary 快照 + 归档被裁正文（逐 entry 锚点）", async () => {
 	const deps = makeDeps();
 	const r = await runCompaction(deps, input(beats(10)));
 
@@ -231,6 +265,30 @@ test("runCompaction：落 rp-summary 快照 + 归档被裁正文", async () => {
 	assert.ok(data.summary.includes("前情提要"));
 	assert.equal(deps.archived.length, 1, "被裁正文必须先归档（细节召回靠它）");
 	assert.ok(deps.archived[0].includes("第 1 拍"));
+	assert.deepEqual(deps.archivedEntries, [8], "归档携带 8 条被裁树条目（2 拍 × user/assistant）的逐 entry 锚点");
+});
+
+test("runCompaction：真实叶推进语义下先归档再追加摘要", async () => {
+	let leaf = "leaf-before";
+	let archivedAt: string | undefined;
+	const deps = makeDeps({
+		getLeafId: () => leaf,
+		archive: async () => { archivedAt = leaf; },
+	});
+	deps.appendSummaryEntry = (data) => {
+		deps.appended.push(data);
+		leaf = "summary-leaf";
+	};
+	const r = await runCompaction(deps, input(beats(10)));
+	assert.equal(r.kind, "compacted");
+	assert.equal(archivedAt, "leaf-before", "归档必须在摘要条目推进叶之前执行");
+	assert.equal(leaf, "summary-leaf");
+});
+
+test("planCompaction：单条消息超过硬上限时不提交超限计划", () => {
+	const branch = beats(7);
+	(branch[0]!.message!.content as Array<{ type: string; text: string }>)[0]!.text = "超长输入".repeat(30_001);
+	assert.equal(planCompaction(branch, { everyNTurns: 1, keepRecentBeats: 6, minChars: 1, userName: "沈舟", charName: "云澜" }), null);
 });
 
 test("runCompaction：未到期 = skipped，不落树不归档", async () => {
@@ -246,13 +304,27 @@ test("runCompaction：叶守卫——调用期间切分支则整体丢弃（R9�
 	const deps = makeDeps({
 		sideText: async () => {
 			leaf = "leaf-2"; // 模拟调用期间 swipe/rewind
-			return "## 前情提要\n摘要。";
+			return v2Summary("前情提要");
 		},
 		getLeafId: () => leaf,
 	});
 	const r = await runCompaction(deps, input(beats(10)));
 	assert.equal(r.kind, "stale");
 	assert.equal(deps.appended.length, 0, "摘要绝不能落到导航后的分支上");
+});
+
+test("runCompaction：无结构文本/单节旧样式响应 → 拒绝提交（v2 strict）", async () => {
+	const noStructure = await runCompaction(makeDeps({ resp: "## 前情提要\n三拍剧情。" }), input(beats(10)));
+	assert.equal(noStructure.kind, "failed", "单节 Markdown 缺结构，不得成为第二套事实权威");
+
+	const truncated = await runCompaction(makeDeps({ resp: "开局拍了三章，后来……" }), input(beats(10)));
+	assert.equal(truncated.kind, "failed", "无标题纯文本必须拒绝");
+
+	const envelopeMissingSections = await runCompaction(
+		makeDeps({ resp: JSON.stringify({ version: 2, summaryMarkdown: "## Story Phase\n开局。", events: [] }) }),
+		input(beats(10)),
+	);
+	assert.equal(envelopeMissingSections.kind, "failed", "v2 envelope 缺章节同样拒绝");
 });
 
 test("runCompaction：旁路调用失败/空摘要 → failed，正文不受影响", async () => {

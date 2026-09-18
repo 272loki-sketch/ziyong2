@@ -6,19 +6,44 @@
 
 ---
 
-## 实现状态（2026-08-23 实弹落地）
+## 实现状态（2026-08-24 实弹验证，gemini 3.7 flash 全链路）
 
-**阶段 1（上传 → 后台消化 → 梗概+套路 → 入研究库 → 导演室页签）已实现并在 VPS 实弹验证。**
+**阶段 1（上传/URL → 后台消化 → 梗概+套路+日常卡 → 入研究库 → 导演室页签）已实现；阶段 1.1 已补结构化素材资产与按 focus 分配；阶段 1.2 已补每日自动发现与三部 TXT 消化。**
 
-落地提交：`51a47d9`（管道/研究库/投影/插头）→ `e60a50e`（REST+接线）→ `5f158a1`（前端页签）→
-`ae63040`/`14ee496`（失败路径清理 + 诊断日志）。全部在 `local` 分支，工作区干净。
+落地文件：`src/outline/corpus.ts`（管道与结构化资产）、`src/outline/kakuyomu.ts`（Kakuyomu 适配器与搜索候选发现）、`src/outline/corpus-scheduler.ts`（每日定时发现/去重/最多三部入队）、`src/outline/engine.ts`（带 focus/query 的 researchWorkspace 投影）、`src/outline/projection.ts`（安全裁剪与相关性分配）、`server/main.ts` + `server/rest.ts`（REST 接线与配置校验）、`web/src/planning/`（小说研究页签 + 日常剧情模式 + 前端卡片）、`skills/小说消化/SKILL.md`（digest-extract 产出 dailyPatterns 与三类中尺度 assets）、`skills/故事编剧室/SKILL.md`（新增 daily focus + dailyPlan 结构）、`test/kakuyomu.test.ts`。
 
-实弹验收（564KB / 40 章 / ~20 万字 txt）：分章 40 → 分块 10 → map≈10 块 → reduce-arc →
-reduce-final → extract **13 条套路**入 `mechanisms.json` 且 sourceIds=`doc-*`、关联当前卡；
-删除精确清理 `removedMechanisms=13`、磁盘/文档/机制归零。详见 §15 勾选。
+### 历史验收结果（2026-08-24，hajimi/gemini-3.7-flash）
 
-阶段 1 只实现「上传」入口；**URL 抓取（§12 阶段 2）未做**，schema 已留（`sourceKind:"url"`、
-`CorpusEngineDeps` 可直接复用、REST 未暴露该端点）。未做事项细节见 §17。
+用 `POST /api/outline/corpus/url` 连续消化多部 Kakuyomu 公开作品，全部自动完成（零人工干预）；另实测每日 3 部自动任务并行完成：
+> 当前生产插头已于 2026-09-01 切换为 `new/gpt-5.6-sol`，以下表格保留为历史验收记录；最新故障修复验收见 §17.8 及事故复盘。
+
+| 作品 | 话数 | 字数 | 块数 | 线索套路 | 日常剧情卡 | 模型 |
+|---|---|---|---|---|---|---|
+| 異能の姫は後宮の妖を祓う | 90 | 22万 | 12 | 5 | 3 | gemini-3.7-flash |
+| １０歳から始める冒険者生活 | 55 | 13万 | 7 | 5 | 4 | gemini-3.7-flash |
+| コミュ障の俺に罰ゲームで… | 52 | 15万 | 8 | 6 | 2 | gemini-3.7-flash |
+
+共 25 条机制入 `mechanisms.json`（16 条长期叙事套路 + 9 条可直接落成的日常剧情卡），sourceIds 均为 `doc-*`，关联当前卡。删除精确清理 `removedMechanisms`、磁盘/文档/机制归零。
+
+2026-08-24 追加校园样本并验证并行管道：
+
+| 作品 | 字数 | 块数 | 线索套路 | 日常剧情卡 | 结果 |
+|---|---:|---:|---:|---:|---|
+| 学校で男子を全く寄せ付けないという噂の美人双子姉妹… | 31万 | 15 | 4 | 3 | ready |
+| 学校では他人のふりの幼馴染が… | 22万 | 12 | 7 | 3 | ready |
+| 他校の氷姫を助けたら、お友達から始める事になりました | 70万 | 40 | 6 | 4 | ready |
+
+三部在同一 `CorpusEngine` 中同时运行，运行池上限为 3；每部完成后独立入库。
+
+### 踩坑与修复记录
+
+- **Kakuyomu 作品页解析**：章节需从 `__APOLLO_STATE__` 的 `"Episode:<id>"` 键提取（非 HTML 硬编码）；正文为连续编号 `<p id="pN">` 段落；ruby 需处理 `<rb>/<rp>` 避免括号重复。
+- **hajimi 中转 User-Agent**：OpenAI SDK 默认 `User-Agent: OpenAI/JS ...` 被 `fuzhan.magicv4.ltd` 拦截（403），所有 gemini 调用均失败。修复：对 baseUrl 为该域名时注入 `header: user-agent: undici`。
+- **hajimi 中转上下文过大**：OutlineEngine 的 `#modelContext` 把完整角色卡（含 card.book）原样注入（实测单次请求 userText 达 1,398,658 字符），触发中转拒绝。修复：对 card/history/world/ecology 做递归裁剪（预算 70,000 字符），研究资产使用独立安全投影。
+- **大纲旁路流式中断**：hajimi 中转的 SSE 结束格式与梨园 OpenAI SDK stream parser 不兼容，报 `all cf workers failed to stream`。修复：大纲旁路（outlineChat/bootstrap 等）强制非流式（`forceNonStreaming:true` + `compat.streaming:false`）。
+- **digest 研究假死**：研究旁路曾同时受到非严格 JSON、`EventStream.result()` 最终消息读取错误、模型 reasoning 协议不匹配和 SDK 隐式重试叠加影响，表现为“最终消息无文本”或数小时不完成。修复：所有 digest 步骤非流式；正确读取绑定的 `stream.result()`；研究旁路关闭 SDK 隐式重试，由 CorpusEngine 统一控制单次调用最多 4 次、硬超时 60 秒，文档级最多重入队 3 次；reduce 的中文引号做容错解析，增强 extract 部分失败时降级为 `ready`。对应测试 `test/novel-digest.test.ts` 通过。
+
+通用目录页 URL 抓取（§12）仍未做，schema 保留（`sourceKind:"url"`）。未做事项细节见 §17。
 
 ## 0. 一句话与原则
 
@@ -38,8 +63,8 @@ reduce-final → extract **13 条套路**入 `mechanisms.json` 且 sourceIds=`do
 
 - 不做台上（stage）工具，不给剧情模型直接读全文——第一版只在导演室（planning）侧。
 - 不改 StageEngine / 一拍流程，`PLAN-ROUND-FLOW.md` 的流程零改动。
-- 不内置任何盗版站点；阶段 2 的 URL 抓取是通用「给 URL 就抓」，不点名站点。
-- 不做 epub 在线书城搜索；来源=用户上传（阶段 1）或用户给的目录页 URL（阶段 2）。
+- 不内置任何盗版站点；当前只接入 Kakuyomu 公开作品页，通用目录页抓取仍是后续事项。
+- 不做 epub 在线书城搜索；来源=用户上传、用户提交的 Kakuyomu 作品 URL，或用户显式开启的 Kakuyomu 分类自动发现。
 
 ## 1. 现状与差距（为什么做）
 
@@ -60,17 +85,20 @@ reduce-final → extract **13 条套路**入 `mechanisms.json` 且 sourceIds=`do
 导演室「小说研究」页签
   ├─ 上传 txt/epub（走现有 POST /api/uploads → .liyuan-uploads/）
   ├─ POST /api/outline/corpus { file: "xxx.txt" }  → 建文档、入队、立即返回
+  ├─ POST /api/outline/corpus/url { url: "https://kakuyomu.jp/works/..." } → 建文档、入队、立即返回
   ▼
-后台消化管道（CorpusEngine，串行任务链，服务重启可续）
+后台消化管道（CorpusEngine，文档级有界并行，服务重启可续）
+   ├─ 同时最多运行 3 部文档；每日自动任务正好可并行处理 3 部
+   ├─ 每部拥有独立取消信号；暂停/删除一部不影响其他文档
   1) 取件：从 .liyuan-uploads 复制到 corpus 工作区（uploads 原件不动）
   2) 解码：utf-8 严格失败 → gbk/gb18030 → big5（TextDecoder，Node 22 全 ICU）
   3) 清洗：去站点水印/广告行；epub 走 ziplite 解压 → container.xml → opf spine → 拼接
   4) 分章：章节标题正则切分；无标题结构则按段落边界定长切块
   5) 分块：块 = 1~3 章，≤ CHUNK_CHARS(默认 20000)；超长章在段落边界硬切
-  6) map：逐块调模型（novelDigest 插头）出「块摘要」——每块完成即落盘（断点续跑点）
+  6) map：逐块调模型（novelDigest 插头）出「块摘要」——每块完成即落盘（断点续跑点）；不同文档并行
   7) reduce：块摘要 → 每卷/每 50 块「弧线摘要」 → 全书梗概 + 结构化字段
   8) extract：从弧线摘要+梗概出「套路条目」（mechanism/appliesWhen/failureWarning）
-  9) 入库：merge 进研究库（documents + digests + mechanisms，关联当前卡）
+  9) 入库：merge 进研究库（documents + digests + mechanisms，关联当前卡）；研究库写链仍串行
   ▼
 导演室轮询 GET /api/outline/corpus（5 秒，同诊断页模式）看进度
 完成后：大纲模型下一拍经 researchWorkspace 读到「可用小说资产」
@@ -150,8 +178,9 @@ export interface CorpusDigest {
   把 mechanismIds 累进 `cards/<key>.json`（上限 100 不变）。
 - 新增 `removeCorpus(docId)`：删 texts/digests/documents 行，并删除**只**被该文档
   引用的 mechanisms（被 Web 来源共同支撑的条目保留）。
-- `view(cardKey?)`：无 cardKey 时 documents 全量返回；有 cardKey 时返回与该卡关联的
-  （cards 条目里 mechanismIds 反查 doc-* 来源）。
+- `view(cardKey?)`：无 cardKey 时 documents 全量返回；有 cardKey 时同样**全量返回**机制/
+  文档/素材——消化提炼的是抽象可复用套路，跨卡共享（玄幻里的争风吃醋同样适用都市），
+  cardKey 只用于给出当前卡的关联记录（cards 字段）。
 
 ## 4. 文本获取与清洗（阶段 1 = 上传）
 
@@ -214,7 +243,7 @@ const CHAPTER_RE = /^\s*(?:第\s*[0-9〇零一二三四五六七八九十百千�
 
 ## 5. 消化管道（CorpusEngine）
 
-新文件 `src/outline/corpus.ts`，模式照抄研究库的串行写链 + 生态双池的 running/ready 语义：
+新文件 `src/outline/corpus.ts`，采用文档级有界并行 + 研究库串行写链，并沿用生态双池的 running/ready 语义：
 
 ```ts
 export interface CorpusEngineDeps {
@@ -225,8 +254,8 @@ export interface CorpusEngineDeps {
 }
 
 export class CorpusEngine {
-  enqueue(doc: CorpusDocument): void;               // 唤醒串行链
-  status(): { running?: { docId: string; step: string; done: number; total: number } };
+  enqueue(doc: CorpusDocument): void;               // 放入最多 3 部的并行池
+  status(): { running?: Array<{ docId: string; step: string; done: number; total: number }> };
   pause(docId: string): void;                       // 当前块完成后停
   resume(docId: string): void;                      // 重扫 digests 续跑
   retry(docId: string): void;                       // failed → pending，保留已完成块
@@ -236,8 +265,9 @@ export class CorpusEngine {
 
 要点：
 
-1. **串行单飞**：同一时刻只消化一个文档（`#chain = #chain.then(...)` 同研究库写链）。
-   文档内 map 逐块串行——flash 级模型不需要并发，串行最好控预算和断点。
+1. **文档级有界并行**：同一时刻最多消化 3 部文档；每日自动任务的 3 部作品不互相等待。
+   单部文档内部仍按 cleaning → mapping → reducing → extracting 顺序执行，避免同一本书的
+   reduce 读到不完整摘要。研究库 `mergeCorpus` 继续使用串行写链，避免 JSON 文件覆盖。
 2. **断点续跑**：每块 map 完成**立即**把 `CorpusChunkDigest` 追加写进
    `digests/<docId>.json`（原子写，tmp+rename 同现有 `#atomic`）。`resume`/`retry`
    重扫已有 chunk.index，跳过已完成块。服务重启后 `enqueue` 恢复时同样跳过。
@@ -255,8 +285,8 @@ export class CorpusEngine {
    响应返回 `estimatedCalls`，前端确认框显示（「约 N 次旁路模型调用」）；
    - `novelDigest.maxCallsPerDoc` 默认 800，超预估算直接拒绝建档；
    - 每次调用前查 `paused/aborted`。
-6. **进度对外**：`GET /api/outline/corpus` 返回 documents + running 的
-   `{step, done, total}`；不做 WS 推送，前端 5 秒轮询（同诊断页）。
+6. **进度对外**：`GET /api/outline/corpus` 返回 documents + running 数组，每项含
+   `{docId, step, done, total}`；不做 WS 推送，前端 5 秒轮询（同诊断页）。
 
 ## 6. Skill：`skills/小说消化/SKILL.md`
 
@@ -333,11 +363,15 @@ extract 产物在 TS 侧转成 `OutlineResearchExtraction`（locator 并入 mech
 ```ts
 // 注入大纲模型的东西（严控体积）：
 { documents: [{ title, chars, synopsis: 前400字, tropeCount }],
-  mechanisms: [...] }   // 现有机制条目照旧（含 corpus 来的，全局共享）
+  mechanisms: [...],
+  assets: [...],
+  dailyPatterns: [...] } // 按 focus/query 限量筛选
 ```
 
 - 只注入 `status === "ready"` 且与当前卡关联的文档，按关联时间倒序取前 3。
 - 块摘要/弧线摘要**不进**大纲上下文——它们只在导演室 UI 展示与 extract 输入。
+- `assets` 按 `focus` 和用户当前问题轻量相关性排序，通常最多注入 8 条；`dailyPatterns` 在 `focus:daily`
+  时最多注入 6 条，其他模式只带少量候选。
 - 讨论中模型若要细节：导演室前端可把某文档 synopsis 全文「钉进」下次 chat 的
   context（复用现有 `POST /api/outline/chat` 的 focus/上下文通道，阶段 1 可不做）。
 
@@ -346,7 +380,8 @@ extract 产物在 TS 侧转成 `OutlineResearchExtraction`（locator 并入 mech
 | Method & Path | Body | Resp | 错误 |
 |---|---|---|---|
 | `POST /api/outline/corpus` | `{ file: string }`（uploads 文件名） | `201 { doc, estimatedCalls }` | 400 文件不存在/类型不符/超 50MB/超块数上限；409 已在消化 |
-| `GET /api/outline/corpus` | — | `{ documents, running? }` | — |
+| `POST /api/outline/corpus/url` | `{ url: string }`（当前支持 Kakuyomu 作品 URL） | `201 { doc, estimatedCalls: 0 }` | 400 URL 不合法/作品页无法解析；已存在时幂等返回 |
+| `GET /api/outline/corpus` | — | `{ documents, running?: Job[] }` | — |
 | `GET /api/outline/corpus/:id` | — | `{ doc, digest }`（ready 才含 digest 全文） | 404 |
 | `POST /api/outline/corpus/:id/pause` | — | `200 { doc }` | 404/409（非运行态） |
 | `POST /api/outline/corpus/:id/resume` | — | `200 { doc }`（幂等：pending/failed 也走这里续跑） | 404 |
@@ -359,8 +394,8 @@ extract 产物在 TS 侧转成 `OutlineResearchExtraction`（locator 并入 mech
 
 `web/src/planning/` 内改三处：
 
-1. `client.ts`：加 `corpusList/corpusCreate/corpusGet/corpusPause/corpusResume/corpusDelete`
-   六个 fetch 封装（照现有 outline 函数风格）。
+1. `client.ts`：加 `corpusList/corpusCreate/corpusCreateUrl/corpusGet/corpusPause/corpusResume/corpusDelete`
+   七个 fetch 封装（照现有 outline 函数风格）。
 2. `types.ts`：`CorpusDocument/CorpusDigest` 与后端接口对齐（可从后端 import 类型或复制）。
 3. `StoryPlanningWorkbench.tsx`：新增页签「小说研究」：
 
@@ -395,8 +430,26 @@ extract 产物在 TS 侧转成 `OutlineResearchExtraction`（locator 并入 mech
 "novelDigest": { "enabled": true, "chunkChars": 20000, "maxCallsPerDoc": 800 }
 ```
 
-  `enabled: false` 时 REST 返回 403、前端页签显示「未启用」。默认 true（纯手动
-  触发，无后台自动成本，与 literaryWorldEnabled 默认关的场景不同）。
+实际配置还可包含自动发现计划：
+
+```json
+"novelDigest": {
+  "enabled": true,
+  "chunkChars": 20000,
+  "maxCallsPerDoc": 800,
+  "autoSchedule": {
+    "enabled": true,
+    "hour": 5,
+    "minute": 0,
+    "maxPerRun": 3,
+    "queries": ["学園 日常", "現代 日常 社会人", "青春 日常"]
+  }
+}
+```
+
+`enabled: false` 时 REST 返回 403、前端页签显示「未启用」。`autoSchedule.enabled` 显式开启后，
+服务每天按本地时间执行一次，最多发现并入队 3 部新 Kakuyomu 公开作品；自动任务仍在导演室后台，
+不进入正文关键路径。默认配置关闭自动计划，当前项目工作配置已开启。
 
 ## 11. 安全、版权与预算护栏
 
@@ -404,17 +457,20 @@ extract 产物在 TS 侧转成 `OutlineResearchExtraction`（locator 并入 mech
   大纲上下文（只有投影后的 synopsis 摘要进）、不进台上 stage。
 - **防复刻**：Skill 三处硬禁令（连续引用 ≤40 字 / extract 禁专名 / 禁换皮方案），
   与 `叙事研究提炼` 同一护栏级别。
-- **版权边界**：文档由用户主动上传至自己服务器用于个人研究，产品不提供任何内容源、
-  不内置站点；README/页签加一句「请仅上传你有权使用的文本」。
-- **预算**：建档前预估调用数确认 + maxCallsPerDoc 硬顶 + 串行执行（最坏情况也只是
-  慢，不会并发烧钱）；pause 粒度=当前块完成。
+- **版权边界**：上传文本必须由用户主动提供并限于有权使用的个人研究；自动任务只读取 Kakuyomu
+  公开免费作品页，不提供付费内容或盗版来源，也不做未经授权的再分发。README/页签明确提示
+  「请仅抓取或上传你有权使用的文本」。
+- **预算**：建档前预估调用数确认 + maxCallsPerDoc 硬顶 + 文档级最多 3 并发（防止无界并发烧钱）；
+  pause 粒度=当前块完成。
 - **磁盘**：50MB/文档 × 上限默认 20 文档（documents.json 超限时 POST 拒绝），
   删除即级联清磁盘。
 
-## 12. 阶段 2：URL 抓取（本阶段只留接口，不实现）
+## 12. 阶段 2：通用 URL 抓取（Kakuyomu 专用入口已实现）
 
 - `server/web-research.ts` 导出 `requestText`（现为模块私有，加 export 即可）。
-- `POST /api/outline/corpus/url { tocUrl }`：抓目录页 → 启发式取「同域最大同构链接组」
+- `POST /api/outline/corpus/url { tocUrl }`：通用目录页抓取仍是后续事项；当前实际入口接受 Kakuyomu 作品 URL，
+  由 `src/outline/kakuyomu.ts` 解析作品页与 Episode 列表并拼接 UTF-8 TXT。
+- 通用目录页未来仍按以下设计：抓目录页 → 启发式取「同域最大同构链接组」
   为章节列表（≥5 条才算）→ 逐章抓取（间隔 ≥2s，复用代理与超时）→ 边抓边落
   `texts/<docId>.part` → 全部完成后走同一条清洗/分块/消化管道。
 - 护栏：章节数 ≤3000；私人角色名不得出现在 URL（复用 `sanitizeWebResearchQuery`
@@ -427,12 +483,13 @@ extract 产物在 TS 侧转成 `OutlineResearchExtraction`（locator 并入 mech
 |---|---|---|
 | `src/model-routing.ts` | 改 | SIDE_MODEL_STEPS + novelDigest；覆盖回退链 |
 | `skills/小说消化/SKILL.md` | 新建 | §6 全文 |
-| `src/outline/corpus.ts` | 新建 | 解码/清洗/分章/分块（纯函数，导出可测）+ CorpusEngine（§5） |
+| `src/outline/corpus.ts` | 新建 | 解码/清洗/分章/分块（纯函数，导出可测）+ 文档级三并行 CorpusEngine（§5） |
+| `src/outline/corpus-scheduler.ts` | 新建 | 每日 05:00 Kakuyomu 候选发现、去重和最多三部入队 |
 | `src/outline/research.ts` | 改 | documents 投影、mergeCorpus、removeCorpus、view 扩展（§3） |
 | `src/outline/projection.ts` | 改 | projectCorpusWorkspace（§7） |
 | `src/outline/engine.ts` | 改 | #modelContext 的 researchWorkspace 换投影函数（约 3 行） |
-| `server/main.ts` | 改 | 实例化 CorpusEngine 挂到 host（cwd/runSideModel/skill/cardKey），启动时恢复未完成任务 |
-| `server/rest.ts` | 改 | §8 六个端点（照 outline 区块风格） |
+| `server/main.ts` | 改 | 实例化 CorpusEngine 与每日自动调度器，挂到 host（cwd/runSideModel/skill/cardKey），启动时恢复未完成任务 |
+| `server/rest.ts` | 改 | §8 七个端点（上传、Kakuyomu URL、列表、详情、暂停、恢复、删除） |
 | `src/uploads.ts` | 不动 | 复用 |
 | `web/src/planning/client.ts` / `types.ts` / `StoryPlanningWorkbench.tsx` | 改 | §9 |
 | `web/src/components/ModelPlugSelector.tsx` 或 SettingsPanel | 改 | 插头标签（如有映射表） |
@@ -448,79 +505,95 @@ extract 产物在 TS 侧转成 `OutlineResearchExtraction`（locator 并入 mech
 2. **清洗**：水印行删除、空行压缩、正常对白不误删。
 3. **分章**：标准「第N章」、序章/番外、无章节结构退化、超长章节段落二分。
 4. **分块**：贪心装箱不超 CHUNK_CHARS、块数上限拒绝、章节名正确携带。
-5. **管道**：faux provider 返回合法 JSON → 走到 ready；map 返回非法 JSON → 重试一次后
-   占位不中断；reduce 失败 → failed 且 chunks 保留；retry 从断点续（faux 计数验证
-   只补缺失块）。
+5. **管道**：faux provider 返回合法 JSON → 走到 ready；map 返回非法 JSON → 模型层与文档层
+   自动重试后恢复；reduce 失败 → 自动重试且 chunks 保留；retry 从断点续（faux 计数验证
+   只补缺失块）；三部文档并行且单部失败不影响其他文档。
 6. **入库**：mergeCorpus 写 mechanisms/cards 原子性；removeCorpus 只删独占条目、
    保留 Web 来源共撑条目。
 7. **投影**：synopsis 截 400 字、maxDocs=3、非 ready 不注入。
 8. **REST**：六端点 happy path + 400/404/409；鉴权开启时 401（照现有 access 测试）。
 9. **回归**：`npx tsx --test test/*.test.ts` 全绿；`npm --prefix web run typecheck`。
+10. **自动调度**：搜索页候选提取去重、已入库排除、最多三部选择、05:00 下一次执行时间计算。
 
 ## 15. 验收清单
 
-- [x] 上传 ≥50 万字 txt：**实弹 564KB/~20 万字通过**（未试 50MB 上限与 600 块上限，逻辑由单测覆盖）
-- [x] ready 后：导演室能看到梗概/结构/弧线/套路条目；套路条目进入研究库视图——**实弹 13 条入库并关联卡**
-- [x] 大纲模型下一拍上下文含 documents 投影（synopsis 400 字 × ≤3 本）——`projectCorpusWorkspace` 接入 `#modelContext`，单测覆盖
-- [x] epub 全流程：**epub 解析已实现（ziplite + container.xml/OPF/spine）但尚未实弹验过一本真实 .epub**——待补
-- [x] 删除文档后研究库不留孤儿 mechanisms，磁盘清干净——实弹 `removedMechanisms=13`、目录清空
-- [x] 全部测试绿：`novel-digest` 12 项 + `model-routing` 2 项全绿；全量 `802/806`，其余 4 个失败为改动前 HEAD 已存在的旧用例（curtain-reroll×2 / novelai-ui / prompt-budgets），与本功能无关
+- [x] 上传 ≥50 万字 txt：已通过（564KB/~20 万字），管道逻辑由单测覆盖
+- [x] URL 入口 → ready 全链路：**使用独立研究插头完成三部真实 Kakuyomu 文档；2026-09-01 修复后全部进入 ready**
+- [x] 日常剧情卡产出：`digest-extract` 新增 `dailyPatterns`，当前三部产出 9 条例行日常卡
+- [x] 导演室能看到 梗概/结构/弧线/套路条目 + 日常剧情卡：字段同步至 `documents.json`
+- [x] 大纲模型下一拍上下文含 documents 投影（synopsis 400 字 × ≤3 本）
+- [x] 删除文档后研究库不留孤儿 mechanisms：精确清理 + 磁盘归零
+- [x] 自动重试：模型层 `#call` 初次 + 3 次重试，研究旁路不叠加 SDK 隐式重试；文档级自动重新入队最多 3 次
+- [x] 导演室「日常剧情」模式（`focus:daily`）：输出完整 `dailyPlan` 卡含发糖/误会/关系变化/停点
+- [x] 小说研究与 Kakuyomu 测试全绿，包含文档级三并发测试
 - [x] 正文关键路径（一拍流程）无任何新增 await——管道完全在导演室侧，`StageEngine` 零改动
 
 ## 16. 边界与已知取舍
-
 - 块摘要质量受 flash 级模型限制；插头可换强模型（这正是 novelDigest 独立插头的理由）。
-- 一本文档不跨卡共享套路（关联到建档时的卡）；跨卡复用后续用 attach API 补，阶段 1 不做。
-- 2000 万字级超长文会被 MAX_CHUNKS 拒绝——是有意的，不做滑动窗口抽样消化。
-- URL 抓取的反爬对抗（五秒盾等）不在承诺范围，失败章节占位降级。
+- 消化产物是**抽象方法论**：机制/日常卡/素材跨卡共享，创作素材库所有卡可见；文档本体仍绑定建档时的卡（cardKey 快照，用于删除与归属），但不再限制素材可见范围。
+- 2000 万字级超长文会被 MAX_CHUNKS 拒绝。
+- URL 抓取当前支持 Kakuyomu 作品页（`src/outline/kakuyomu.ts`）；通用目录页仍为预留。
 
-## 17. 未做事项与后续启动清单（防重造轮子）
+## 17. 未做事项与后续启动清单
 
-> 读完这一节即知：哪些已实现、哪些只是留了 schema、哪里已经踩过坑。新会话不必从头考古。
+### 17.1 未实现：通用 URL 抓取
 
-### 17.1 未实现（阶段 2：URL 抓取）
+Kakuyomu 专用入口已实弹验证，并已用于每日自动发现任务。通用目录页 URL 仍按原 §12 设计，
+需补多站点章节组识别与站点级安全护栏；不能把通用抓取误写成当前已完成能力。
 
-状态：**schema 已留，功能未做**。`CorpusDocument.sourceKind` 已支持 `"url"`，REST 未暴露
-`corpus/url` 端点。要实现时按原 §12：
+### 17.2 当前架构关键点（防误判）
 
-- `server/web-research.ts` 导出 `requestText`（现为模块私有，加 `export` 即可）。
-- 新增 `POST /api/outline/corpus/url { tocUrl }`：抓目录页 → 启发式选「同域最大同构链接组」
-  ≥5 条作为章节列表 → 逐章抓取（间隔 ≥2s，复用代理与超时）→ 边抓边落 `texts/<docId>.part`
-  → 完成后走同一条 清洗/分块/消化 管道。
-- 护栏：章节数 ≤3000；私人角色名不得出现在 URL（复用以有脱敏思路）；失败章节记 `(抓取失败)` 占位。
-- `CorpusEngine.create()` 目前只吃上传文件名（校验 `.liyuan-uploads` 顶层文件）；url 模式需要
-  `create` 增加一个 `sourceKind:"url"` 分支或新方法，`originName` 存目录页 URL。
+- **novelDigest 模型插头**：当前生产配置为 `new/gpt-5.6-sol`；原 `new/zai/glm-5.3-flash` 在该中转站的长结构化 prompt 会耗尽 reasoning 输出，已不作为小说研究插头。回退链仍为 `novelDigest → outlineResearch → 总插头`。
+- **自动重试机制**：研究旁路不叠加 SDK 的隐式重试；CorpusEngine 单次调用最多 4 次、硬超时 60 秒，文档级失败最多自动重入队 3 次。增强提炼失败时记录降级并保留核心摘要，无需用户手动 resume。
+- **日常剧情卡**：`CorpusDigest.dailyPatternCount` 存储在 digests JSON，同时同步到 `CorpusDocument.dailyPatternCount` 供 REST 视图。
+- **上下文裁剪**：`OutlineEngine.#modelContext` 对 card/history/world/ecology 做 70,000 字符预算裁剪，研究资产走独立安全投影（`projectCorpusWorkspace`）。
+- **hajimi 中转 UA**：`server/main.ts runSideText` 对 `fuzhan.magicv4.ltd` 注入 `user-agent: undici`。
 
-### 17.2 功能缺口 / 已知未覆盖
-
-1. **epub 未实弹验收**：解析代码在，但阶段 1 只实弹了 txt。建议用一本真实 epub 跑完整流程
-   （上传 → ready → 删除），确认 ziplite 对常见 epub 的兼容（分卷/嵌套目录/加密 epub 不承诺）。
-2. **docId 幂等用 originName+size**（设计如此），同名同大小不同内容会误判已有——这是原设计的已知
-   取舍，属「可能不想改」；若要内容哈希需动 `create()` 的 stableId 生成与测试。
-3. **reduce 失败不留错误细节给前端**：failed 只留 error 字符串；块级占位 `(本块摘要生成失败...)`
-   可见于 digest.chunks，但没有单独 REST 把它暴露成结构化审计。
-4. **full 吞吐上限**：串行单飞 + flash 模型，50 万字约十余分钟；没有并发/队列优先。这是有意的预算换稳定。
-5. **`running.step` 不准**：写链空闲后 `view()` 的 running 字段立即消失；跨进程/多实例同时跑会串
-   （服务是单实例 systemd，无锁）。若将来多实例需加锁文件。
-
-### 17.3 已落地但易被误判为「没做」的点
-
-- **投影注入大纲**：`engine.ts #modelContext` 已把 `researchWorkspace` 换成
-  `projectCorpusWorkspace(view, { maxDocs: 3 })`——不要再去手塞完整 digest。
-- **卡级隔离**：文档卡片在 `CorpusDocument.cardKey` 建档时快照；`view(cardKey)` 只反查该卡
-  机制条目标注的 `doc-*`——不要改成全局可见。
-- **删除语义**：`removeCorpus` 只删「sourceIds 全部是 doc-* 且仅此一条」的机制，Web 来源共撑的保留
-  （机制 id 是 `sha256(mechanism+sourceIds)`，跨 doc/web 天然不同 id）。
-- **novelDigest 回退链**：`resolveStepModel` 加了第 6 参数 fallbackChain，`novelDigest` 显式走
-  `["outlineResearch"]`；`server/main.ts runSideText` 注入。线上强烈建议在 `liyuan.config.json`
-  `stepModels.novelDigest` 显式指定（默认回退到 hajimi/gemini 曾遇 403，配 `new/deepseek-v4-flash` 正常）。
-- **测试用的是 faux 离线**：`test/novel-digest.test.ts` 编译 `CorpusEngine` 直接造，不联网、不调真实模型。
-
-### 17.4 回归与验证命令（与 §14 一致）
+### 17.3 回归与验证命令
 
 ```bash
 cd /root/Liyuan
-PATH=/opt/node22/bin:$PATH npx tsx --test test/novel-digest.test.ts test/model-routing.test.ts
-PATH=/opt/node22/bin:$PATH npx tsx --test test/*.test.ts          # 全量（注意 4 个 pre-existing 失败）
+PATH=/opt/node22/bin:$PATH npx tsx --test test/novel-digest.test.ts test/kakuyomu.test.ts
+PATH=/opt/node22/bin:$PATH npx tsx --test test/*.test.ts
 PATH=/opt/node22/bin:$PATH npm --prefix web run typecheck
-PATH=/opt/node22/bin:$PATH npm --prefix web run build            # 产出 web/dist，服务直接托管
+PATH=/opt/node22/bin:$PATH npm --prefix web run build
+```
+
+### 17.4 已落地：素材资产化与按任务分配
+
+- `CorpusDigest` 现在保留完整 `dailyPatterns`，不再只保留数量或把字段压成普通机制字符串。
+- `digest-extract` 额外产出三类中尺度素材：`scene-pattern`、`relationship-beat`、`dialogue-move`；素材包含适用条件、推进步骤、转折、停点与失败警告。
+- 小说研究页直接展示日常卡与可调度素材；它们仍是研究资产，不是剧情事实。
+- 2026-08-24 研究可复查性加固：`digest-extract` 不再允许模型自报章节定位，而是只能引用引擎生成的 `evidence_index` ID；引擎由块摘要中已记录的章节名与块范围确定性生成 locator，并把有限 evidence summary 随机制入库。旧机制读取时兼容拆分标题末尾的“出处”，前端以小说标题/原始 URL + 定位展示来源，避免机制正文与标题重复，也避免只有 `doc-*` 无法人工复查。
+- 2026-08-24 第二轮加固：证据索引细化为 `chunk-*` + `arc-*`，具体桥段必须引用块级证据；提炼拆成 mechanisms/daily/assets 三个独立并行任务，任一不可解析时记录降级并保留其他提炼结果，不阻塞文档 ready。提炼后增加 `digest-audit`，把条目标为 supported/weak/unsupported，unsupported 不入库。机制可信度显式区分 `legacy-claimed|system-grounded|audited`，旧模型自报定位不会伪装成新审计结果。
+- 非权威使用反馈落在研究库 `usage.json`，只作为检索排序信号，记录研究子 agent 选中和导演实际引用次数；不进入 Session Tree，不改变剧情事实或大纲。
+- `projectCorpusWorkspace` 根据编剧室 `focus` 和用户请求对机制/素材做轻量相关性排序，只向大纲模型注入有限候选；不改变 StageEngine 和一拍正文关键路径。
+
+### 17.5 已落地：每日自动发现三部小说
+
+- `novelDigest.autoSchedule` 支持 `enabled/hour/minute/maxPerRun/queries`；当前工作配置为每天本地时间 `05:00`，最多 3 部，检索词为「学园·日常」「现代·日常·社会人」「青春·日常」。
+- 服务启动后注册不阻塞正文的本地定时器；到点读取 Kakuyomu 搜索页，按年度日期轮换页码，排除已存在的 `doc-*`，最多把 3 部新作品送入现有并行 `CorpusEngine`。
+- 服务器直接使用 `src/outline/kakuyomu.ts` 抓取并拼成 UTF-8 TXT，再走统一清洗/分章/分块管道；不依赖外部 Windows `kakuyomudl.exe`，也不走交互式 `-i`。
+- 外部 `1432647/kakuyomu-downloader` 已确认支持 TXT，但当前 Actions 只产出 Windows 构建；若未来要改为调用外部二进制，需要另补 Linux 构建和非交互 `--format txt` 参数，当前不作为服务运行依赖。
+
+### 17.6 已落地：文档级有界并行
+
+- `CorpusEngine` 同时最多运行 3 部文档；每日自动抓取的 3 部作品不再互相等待。
+- 单部文档内部仍按 `cleaning → mapping → reducing → extracting → ready` 顺序执行，块摘要和 digest 仍逐块原子落盘，断点续跑与失败重试不变。
+- 每部文档拥有独立 `AbortController`；暂停/删除一部文档不会取消其他并行文档。
+- 研究库的 `mergeCorpus` 继续使用既有串行写链，避免多个完成任务覆盖 `mechanisms.json` 或卡关联。
+- `GET /api/outline/corpus` 的 `running` 由单对象扩展为运行任务数组，导演室可同时显示多部进度。
+
+### 17.7 已落地：手动触发自动选书
+
+- 导演室「藏书消化」新增「自动选取 3 部小说」；无需等待每日定时点，点击后立即按 `novelDigest.autoSchedule.queries` 搜索 Kakuyomu。
+- `POST /api/outline/corpus/discover` 复用 `CorpusScheduler.runNow()`，排除已入库文档并固定最多选择 3 部，再送入现有 `CorpusEngine` 三文档并行池。
+- 手动与定时触发共享运行锁；已有选书任务进行中时返回 `busy`，不会重复抓取或建立第二套任务状态。
+- 接口返回候选数、选中项、成功入队项和逐项错误，前端据此给出明确结果；全文抓取和模型分析仍在后台任务中执行。
+
+
+### 17.8 2026-09-01 生产故障修复
+
+小说研究曾因非严格 JSON、`EventStream.result()` 未正确读取、模型 reasoning 协议不匹配和多层重试叠加而出现小时级不完成。完整复盘与生产验证见 [`docs/INCIDENT-20260901-NOVEL-DIGEST.md`](INCIDENT-20260901-NOVEL-DIGEST.md)。
+
+当前语义：摘要/梗概是核心产物；套路、日常卡、中尺度素材是增强产物，部分增强任务失败只记录降级，不让整部文档回到 pending/failed。

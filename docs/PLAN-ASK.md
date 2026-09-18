@@ -1,5 +1,7 @@
 # PLAN-ASK：ask 重开——开局收集 + 续写裁决
 
+> 历史契约校准：当前 ask 是否可用取决于 `creationMode === "ask"`、宿主 `askUser` 和主演工具能力；纯文本降级模式不提供 ask。运行时最终行为见 `docs/WRITER-API-COMPATIBILITY.md`。
+
 2026-08-11 立。承 PLAN-RECTIFY（M-R1 删除四门禁与轮次卡后 ask 失去全部送达席位）与 8/11 凌晨 skill 数据侧路线实弹失败（收笔二分 + 开拍第四问「一点变化没有」，已撤销）。本文档是契约：文案即规格。
 
 ## 0. 定案依据（用户 8/11 拍板）

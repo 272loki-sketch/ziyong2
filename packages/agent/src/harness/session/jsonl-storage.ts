@@ -248,6 +248,29 @@ export class JsonlSessionStorage implements SessionStorage<JsonlSessionMetadata>
 	}
 
 	async appendEntry(entry: SessionTreeEntry): Promise<void> {
+		// A session can be open in more than one harness (for example, two browser
+		// tabs or a reconnect while a generation is still running).  Each harness
+		// keeps its own in-memory leaf, so using the parentId supplied by the caller
+		// can silently append a new turn to an old sibling branch.  The JSONL file
+		// is the shared source of truth: refresh the current leaf immediately before
+		// appending and re-parent the entry when the caller's snapshot is stale.
+		const latest = getFileSystemResultOrThrow(
+			await this.fs.readTextLines(this.filePath),
+			`Failed to refresh session leaf ${this.filePath}`,
+		);
+		let latestLeaf = this.currentLeafId;
+		for (const line of latest) {
+			if (!line?.trim()) continue;
+			try {
+				const parsed = JSON.parse(line) as SessionTreeEntry;
+				if (parsed.type !== "session") latestLeaf = leafIdAfterEntry(parsed);
+			} catch {
+				// The normal append path validates lines; leave the in-memory leaf intact
+				// if a concurrent writer has not finished its final newline yet.
+			}
+		}
+		if (entry.parentId !== latestLeaf) entry.parentId = latestLeaf;
+		this.currentLeafId = latestLeaf;
 		getFileSystemResultOrThrow(
 			await this.fs.appendFile(this.filePath, `${JSON.stringify(entry)}\n`),
 			`Failed to append session entry ${entry.id}`,

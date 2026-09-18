@@ -8,6 +8,11 @@ import type { WebResearchItem, WebResearchResult } from "../src/tools/web-resear
 const DEFAULT_TIMEOUT_MS = 15_000;
 let duckChallengeUntil = 0;
 
+/** 每次外部网页请求都必须有上限；搜索调度传入的 signal 本身不会自动超时。 */
+function requestSignal(signal: AbortSignal): AbortSignal {
+	return AbortSignal.any([signal, AbortSignal.timeout(DEFAULT_TIMEOUT_MS)]);
+}
+
 export function resolveWebResearchProxy(env = process.env): URL | null {
 	const raw = env.LIYUAN_WEB_RESEARCH_PROXY
 		?? env.HTTPS_PROXY ?? env.https_proxy
@@ -51,19 +56,33 @@ function tunnel(url: URL, proxy: URL, signal: AbortSignal): Promise<tls.TLSSocke
 			}
 			socket.write(`${headers.join("\r\n")}\r\n\r\n`);
 		});
-		socket.on("data", (chunk) => {
+		const onConnectData = (chunk: Buffer) => {
 			buffer += chunk.toString("latin1");
 			const end = buffer.indexOf("\r\n\r\n");
 			if (end < 0) return;
 			const status = buffer.slice(0, buffer.indexOf("\r\n"));
 			if (!/^HTTP\/1\.[01] 2\d\d /.test(status)) return fail(new Error(`代理 CONNECT 失败：${status}`));
+			socket.off("data", onConnectData);
+			socket.off("error", fail);
 			signal.removeEventListener("abort", abort);
-			resolve(tls.connect({ socket, servername: url.hostname }));
-		});
+			const secureSocket = tls.connect({ socket, servername: url.hostname });
+			const onSecureConnect = () => {
+				secureSocket.off("error", onTlsError);
+				resolve(secureSocket);
+			};
+			const onTlsError = (error: Error) => {
+				secureSocket.off("secureConnect", onSecureConnect);
+				fail(error);
+			};
+			secureSocket.once("secureConnect", onSecureConnect);
+			secureSocket.once("error", onTlsError);
+		};
+		socket.on("data", onConnectData);
 	});
 }
 
-async function requestText(url: URL, signal: AbortSignal): Promise<string> {
+export async function requestText(url: URL, signal: AbortSignal): Promise<string> {
+	signal = requestSignal(signal);
 	const proxy = resolveWebResearchProxy();
 	if (!hostUsesWebResearchProxy(url.hostname, proxy)) {
 		const response = await fetch(url, { headers: { "user-agent": "Mozilla/5.0", accept: "text/html" }, signal });
@@ -93,8 +112,10 @@ async function requestText(url: URL, signal: AbortSignal): Promise<string> {
 }
 
 const decode = (value: string): string => value
-	.replaceAll("&amp;", "&").replaceAll("&quot;", '"').replaceAll("&#x27;", "'")
-	.replaceAll("&lt;", "<").replaceAll("&gt;", ">");
+	.replaceAll("&nbsp;", " ").replaceAll("&amp;", "&").replaceAll("&quot;", '"').replaceAll("&#x27;", "'")
+	.replaceAll("&lt;", "<").replaceAll("&gt;", ">")
+	.replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(Number.parseInt(hex, 16)))
+	.replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(Number(dec)));
 const strip = (value: string): string => decode(value.replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
 
 export function parseDuckDuckGo(html: string): WebResearchResult[] {
@@ -126,7 +147,14 @@ export function parseBing(html: string): WebResearchResult[] {
 
 export function rankWebResearchResults(query: string, rows: WebResearchResult[], limit = 3): WebResearchResult[] {
 	const terms = query.toLowerCase().replace(/["'“”‘’()[\]{}<>，。！？、：；/\\|]/g, " ")
-		.split(/\s+/).map((term) => term.trim()).filter((term) => term.length >= 2);
+		.split(/\s+/).flatMap((term) => {
+			if (term.length < 2) return [];
+			// 中文没有空格分词：保留完整词，并补充 2 字片段用于标题/摘要命中。
+			const parts = /[\u3400-\u9fff]{2,}/.test(term) ? [term, ...Array.from({ length: Math.max(0, term.length - 1) }, (_, i) => term.slice(i, i + 2))] : [term];
+			return parts;
+		}).filter((term, index, all) => all.indexOf(term) === index);
+	const generic = new Set(["叙事", "故事", "结构", "选择", "后果", "书评", "影评", "节奏", "失败原因", "可复用", "负面案例"]);
+	const meaningful = terms.filter((term) => !generic.has(term));
 	const seen = new Set<string>();
 	const ranked = rows.flatMap((row, index) => {
 		let normalizedUrl = row.url;
@@ -135,12 +163,14 @@ export function rankWebResearchResults(query: string, rows: WebResearchResult[],
 		seen.add(normalizedUrl);
 		const title = row.title.toLowerCase();
 		const snippet = row.snippet.toLowerCase();
-		const score = terms.reduce((sum, term) => sum + (title.includes(term) ? 3 : 0) + (snippet.includes(term) ? 1 : 0), 0);
-		return [{ ...row, url: normalizedUrl, score, index }];
+		const matched = meaningful.filter((term) => title.includes(term) || snippet.includes(term));
+		const score = matched.reduce((sum, term) => sum + (title.includes(term) ? 3 : 1), 0);
+		return [{ ...row, url: normalizedUrl, score, matched: matched.length, index }];
 	});
 	ranked.sort((a, b) => b.score - a.score || a.index - b.index);
-	const useful = ranked.some((row) => row.score > 0) ? ranked.filter((row) => row.score > 0) : ranked;
-	return useful.slice(0, limit).map(({ score: _score, index: _index, ...row }) => row);
+	// 相关性不足时返回空集合，绝不把搜索源的原始导航/推荐结果写进素材库。
+	const minMatched = meaningful.length >= 3 ? 2 : 1;
+	return ranked.filter((row) => row.score > 0 && row.matched >= minMatched).slice(0, limit).map(({ score: _score, matched: _matched, index: _index, ...row }) => row);
 }
 
 function protectedNames(card: CharacterCard): string[] {
@@ -220,6 +250,8 @@ export async function webResearchBatch(
 			const bing = new URL("https://www.bing.com/search");
 			bing.searchParams.set("q", query);
 			bing.searchParams.set("setlang", "zh-Hans");
+			bing.searchParams.set("setmkt", "zh-CN");
+			bing.searchParams.set("setcc", "CN");
 			const bingRows = parseBing(await requestText(bing, signal));
 			if (!bingRows.length) throw new Error((duckHtml && isSearchChallenge(duckHtml)) || Date.now() < duckChallengeUntil ? "搜索源返回人机验证，Bing 兜底也无结果" : "搜索源均无可解析结果");
 			return { query, results: rankWebResearchResults(query, bingRows, maxResults) };

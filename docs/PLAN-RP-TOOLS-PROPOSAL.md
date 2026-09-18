@@ -1,5 +1,7 @@
 # RP 工具清单提案（M-B 设计发现产出）
 
+> 历史提案。本文中的 `draft_check`、旧验收报告和待注册工具数量属于早期设计；当前工具执行以 `src/stage/tools.ts`、`src/stage/workspace.ts` 和 `docs/ARCHITECTURE-OVERVIEW.md` 为准。
+
 > 2026-08-04。上游：docs/PLAN-RP-AGENT.md（两层契约）、PLAN-RP-AGENT-EXEC.md §3（M-B 要点）。
 > 本文档是**提案**——两个发现渠道的产出合成。
 >

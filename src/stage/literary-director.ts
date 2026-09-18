@@ -21,6 +21,13 @@ export interface LiteraryDirection {
 	withheldInformation?: string[];
 	relationshipLimit?: string;
 	playerStop?: string;
+	/** 每拍固定生成的写作控制：只约束表现，不是剧情事实。 */
+	sceneMode?: string;
+	subtext?: string;
+	rhythm?: string;
+	dialogueRatio?: number;
+	sensoryFocus?: string[];
+	avoid?: string[];
 }
 
 const MAX_ITEMS = 3;
@@ -61,6 +68,7 @@ export function buildLiteraryDirectorPrompt(input: {
 	literaryProfile?: LiteraryProfileData | null;
 	continuity?: LiteraryContinuity | null;
 	ecology?: string;
+	plotAdaptation?: string;
 	research?: unknown;
 	outline?: unknown;
 	activatedLore: LorebookEntry[];
@@ -71,13 +79,13 @@ export function buildLiteraryDirectorPrompt(input: {
 	return {
 		systemPrompt: `你是梨园文学工作流唯一的拍前导演。你只给主演一块简短、受限的 Stitches 风格方向，不写正文、对白、状态补丁、输出格式或事件顺序，也不复述输入。
 
-判断场景压力、各角色的动机/即时意图/行动上限、个人线、幕后线、可选拍点、应暂扣的信息、关系推进上限，以及涉及玩家行动、思想、对白或重大选择前的停点。
+判断场景压力、各角色的动机/即时意图/行动上限、个人线、幕后线、可选拍点、应暂扣的信息、关系推进上限，以及涉及玩家行动、思想、对白或重大选择前的停点。每一拍还必须给出 sceneMode、subtext、rhythm、dialogueRatio、sensoryFocus、avoid，供主演控制现场感、节奏和反八股；这些是写作约束，不是正文内容。
 
 continuity 仅是连续性约束，research 仅是参考材料。不得创造新事实，不得把 candidateBeats 或其他候选写成已发生历史，不得替玩家选择。具体发生什么和怎么写均由下游主演决定。
 
 单拍边界是硬约束：默认只推进最新用户输入所在的当前场景和眼前一次互动。用户只说一句话、做一个动作或补充当前场景时，candidateBeats 只能覆盖对方即时反应、一次必要交互与把话递回玩家；不得擅自跳到稍后、放学、夜晚、次日，不得把交流会、夜跑、复盘、入睡等后续日程塞进同一拍。只有用户明确要求时间跳转、概述一段时期或当前场景已自然结束，才允许跨场景。最新输入若复述或细化上拍中的瞬间，视为从当前分支叶继续，不得重演已经发生的后续。
 
-严格只返回 JSON：{"scenePressure":"...","characterInitiatives":[{"character":"...","motive":"...","immediateIntent":"...","limit":"..."}],"personalThreads":[],"offstageThreads":[],"candidateBeats":[],"withheldInformation":[],"relationshipLimit":"...","playerStop":"..."}。所有数组最多三项；不适用时使用空字符串或空数组。`,
+严格只返回 JSON：{"scenePressure":"...","characterInitiatives":[{"character":"...","motive":"...","immediateIntent":"...","limit":"..."}],"personalThreads":[],"offstageThreads":[],"candidateBeats":[],"withheldInformation":[],"relationshipLimit":"...","playerStop":"...","sceneMode":"...","subtext":"...","rhythm":"slow|medium|fast","dialogueRatio":0.6,"sensoryFocus":[],"avoid":[]}。所有数组最多三项；dialogueRatio 为 0 到 1；不适用时使用空字符串或空数组。`,
 		userText: JSON.stringify(
 			{
 				participants: { character: input.charName, user: input.userName },
@@ -90,7 +98,8 @@ continuity 仅是连续性约束，research 仅是参考材料。不得创造新
 				continuity_constraints: input.continuity ?? null,
 				research_reference_only: input.research ?? null,
 				committed_outline_candidate_not_fact: input.outline ?? null,
-				living_ecology: input.ecology ?? null,
+			living_ecology: input.ecology ?? null,
+			ecology_plot_adaptation_candidate_not_fact: input.plotAdaptation ?? null,
 			},
 			null,
 			2,
@@ -124,13 +133,19 @@ export function parseLiteraryDirection(value: unknown): LiteraryDirection | unde
 		characterInitiatives = legacy?.map((motive) => ({ character: "", motive, immediateIntent: "", limit: "" }));
 	}
 	const scenePressure = text(parsed.scenePressure);
+	const sceneMode = text(parsed.sceneMode);
+	const subtext = text(parsed.subtext);
+	const rhythm = text(parsed.rhythm);
+	const dialogueRatio = typeof parsed.dialogueRatio === "number" && Number.isFinite(parsed.dialogueRatio) ? Math.max(0, Math.min(1, parsed.dialogueRatio)) : undefined;
+	const sensoryFocus = items(parsed.sensoryFocus);
+	const avoid = items(parsed.avoid);
 	const personalThreads = items(parsed.personalThreads);
 	const offstageThreads = items(parsed.offstageThreads);
 	const candidateBeats = items(parsed.candidateBeats);
 	const withheldInformation = items(parsed.withheldInformation);
 	const relationshipLimit = text(parsed.relationshipLimit);
 	const playerStop = text(parsed.playerStop);
-	if (!scenePressure && !characterInitiatives && !personalThreads && !offstageThreads && !candidateBeats && !withheldInformation && !relationshipLimit && !playerStop) return undefined;
+	if (!scenePressure && !characterInitiatives && !personalThreads && !offstageThreads && !candidateBeats && !withheldInformation && !relationshipLimit && !playerStop && !sceneMode && !subtext && !rhythm && dialogueRatio === undefined && !sensoryFocus && !avoid) return undefined;
 	return {
 		version: 1,
 		...(scenePressure ? { scenePressure } : {}),
@@ -141,6 +156,12 @@ export function parseLiteraryDirection(value: unknown): LiteraryDirection | unde
 		...(withheldInformation ? { withheldInformation } : {}),
 		...(relationshipLimit ? { relationshipLimit } : {}),
 		...(playerStop ? { playerStop } : {}),
+		...(sceneMode ? { sceneMode } : {}),
+		...(subtext ? { subtext } : {}),
+		...(rhythm ? { rhythm } : {}),
+		...(dialogueRatio !== undefined ? { dialogueRatio } : {}),
+		...(sensoryFocus ? { sensoryFocus } : {}),
+		...(avoid ? { avoid } : {}),
 	};
 }
 
@@ -154,5 +175,11 @@ export function formatLiteraryDirection(direction: LiteraryDirection): string {
 	if (direction.withheldInformation?.length) lines.push(`暂扣信息：${direction.withheldInformation.join("；")}`);
 	if (direction.relationshipLimit) lines.push(`关系上限：${direction.relationshipLimit}`);
 	if (direction.playerStop) lines.push(`玩家停点：${direction.playerStop}`);
+	if (direction.sceneMode) lines.push(`场景模式：${direction.sceneMode}`);
+	if (direction.subtext) lines.push(`潜台词：${direction.subtext}`);
+	if (direction.rhythm) lines.push(`节奏：${direction.rhythm}`);
+	if (direction.dialogueRatio !== undefined) lines.push(`对白比例：${direction.dialogueRatio}`);
+	if (direction.sensoryFocus?.length) lines.push(`感官焦点：${direction.sensoryFocus.join("；")}`);
+	if (direction.avoid?.length) lines.push(`反八股约束：${direction.avoid.join("；")}`);
 	return lines.length ? `[拍前导演]\n${lines.join("\n")}` : "";
 }

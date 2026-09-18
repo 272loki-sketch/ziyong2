@@ -51,10 +51,12 @@ import { worldManifestFromBranch } from "../src/stage/literary-world-profile.ts"
 import { parseLegacyCalendarSource, projectPresentation, projectTavernVariables } from "../src/presentation.ts";
 import { ecologyWireView, literaryEcologyFromBranch, normalizeLiteraryEcologyState } from "../src/stage/literary-ecology.ts";
 import { loadStageMaterials } from "../src/stage/materials.ts";
-import { webResearchBatch } from "./web-research.ts";
+import { requestText, webResearchBatch } from "./web-research.ts";
 import { resolveStepModel } from "../src/model-routing.ts";
 import { OutlineEngine } from "../src/outline/engine.ts";
 import { CorpusEngine } from "../src/outline/corpus.ts";
+import { CorpusScheduler } from "../src/outline/corpus-scheduler.ts";
+import { ResearchSearchScheduler } from "../src/outline/research-scheduler.ts";
 import { workflowSkill } from "../src/stage/skill-store.ts";
 import { literaryProfileFromBranch } from "../src/stage/literary-profile.ts";
 import {
@@ -99,10 +101,17 @@ import {
 } from "../src/swipe.ts";
 import {
 	memoryArchiveCompacted,
+	memoryArcRecallForTurn,
 	memoryDeleteChunk,
-	memoryListChunks,
+	memoryEvidenceForEvent,
+	memoryListEventDigests,
 	memoryManualAdd,
+	memoryRecallForTurn,
 	memorySearch,
+	memoryUpsertEventDigest,
+	loadMemoryConfig,
+	memoryScopeId,
+	saveMemoryConfig,
 	onNarrativeTurnEnd,
 } from "../src/memory/index.ts";
 import { handleApiRequest, loadCardFrontSnapshot, type CurrentModelInfo, type RestHost } from "./rest.ts";
@@ -226,6 +235,8 @@ let session: AgentSession = runtime.session;
 let unsubscribe: (() => void) | undefined;
 let outline: OutlineEngine | undefined;
 let corpus: CorpusEngine | undefined;
+let corpusScheduler: CorpusScheduler | undefined;
+let researchSearchScheduler: ResearchSearchScheduler | undefined;
 const turnRuntimeDiagnostics = new Map<string, import("../src/stage/diagnostics.ts").TurnRuntimeDiagnostic>();
 
 // ---------- WS 广播 ----------
@@ -831,8 +842,14 @@ const regenerateSwipe = async (): Promise<void> => {
 			...(source.literaryEcology && typeof source.literaryEcology === "object" && !Array.isArray(source.literaryEcology)
 				? { literaryEcology: source.literaryEcology as NonNullable<StageRerollPrep["literaryEcology"]> }
 				: {}),
+			...(source.plotAdaptation && typeof source.plotAdaptation === "object" && !Array.isArray(source.plotAdaptation)
+				? { plotAdaptation: source.plotAdaptation as NonNullable<StageRerollPrep["plotAdaptation"]> }
+				: {}),
+			...(source.sceneConductor && typeof source.sceneConductor === "object" && !Array.isArray(source.sceneConductor)
+				? { sceneConductor: source.sceneConductor as NonNullable<StageRerollPrep["sceneConductor"]> }
+				: {}),
 		};
-		if (!prep.literaryContinuity && !prep.literaryDirection && !prep.literaryDirectionData && !prep.literaryEcology) prep = undefined;
+		if (!prep.literaryContinuity && !prep.literaryDirection && !prep.literaryDirectionData && !prep.literaryEcology && !prep.plotAdaptation && !prep.sceneConductor) prep = undefined;
 		break;
 	}
 	broadcast({ type: "notify", level: "info", text: prep ? "正文重Roll：复用上一版拍前分析，从 writer 阶段重新生成" : "正文重Roll：旧回复没有可复用工件，将重新执行完整一拍" });
@@ -1033,6 +1050,17 @@ const bindSession = async () => {
 					// 内置向量记忆：按策略把本轮助手正文入库（异步，失败不影响叙事）
 					void (async () => {
 						try {
+							const memoryConfig = loadMemoryConfig(cwd);
+							const every = memoryConfig.stores.find((store) => store.id === "narrative" && store.enabled)?.everyNTurns ?? 0;
+							const branch = session.sessionManager.getBranch() as unknown as Array<{ id?: string; type?: string; message?: { role?: string; content?: unknown } }>;
+							const assistantEntries = branch.flatMap((entry) => {
+								if (entry.type !== "message" || entry.message?.role !== "assistant" || !entry.id) return [];
+								const content = entry.message.content;
+								const text = typeof content === "string" ? content : Array.isArray(content)
+									? content.map((part) => part && typeof part === "object" && (part as { type?: string }).type === "text" ? String((part as { text?: unknown }).text ?? "") : "").join("")
+									: "";
+								return text.trim() ? [{ entryId: entry.id, entryType: "message" as const, text }] : [];
+							});
 							const msgs = branchMessages() as Array<{ role?: string; content?: unknown }>;
 							let lastText = "";
 							for (let i = msgs.length - 1; i >= 0; i--) {
@@ -1055,6 +1083,10 @@ const bindSession = async () => {
 								cwd,
 								{ sessionId: session.sessionId, card: cardPath || undefined },
 								lastText,
+								{
+									entries: every > 0 ? assistantEntries.slice(-every).map((entry, index) => ({ ...entry, turn: Math.max(1, assistantEntries.length - every + index + 1) })) : [],
+									branchLeafId: session.sessionManager.getLeafId() ?? undefined,
+								},
 							);
 							if (mem.error) {
 								broadcast({
@@ -1603,14 +1635,15 @@ const restHost: RestHost = {
 	// 预设 AI 分拣等旁路声明：调当前会话模型做一次性判断（复用 streamSimple，同 StageEngine.#sideText）
 	runSideText: async (step, systemPrompt, userText, opts) => {
 		const config = loadStageMaterials(cwd).config;
+		const availableModels = await session.modelRegistry.getAvailable();
 		const resolved = resolveStepModel(
 			step,
 			config.stepModels,
 			session.model as unknown as StageModelLike | undefined,
-			(provider, id) => session.modelRegistry.getAvailable().find((item) => item.provider === provider && item.id === id) as unknown as StageModelLike | undefined,
+			(provider, id) => availableModels.find((item) => item.provider === provider && item.id === id) as unknown as StageModelLike | undefined,
 			undefined,
-			// novelDigest 未配置插头时回退 outlineResearch 插头（研究旁路家族），再落总插头。
-			step === "novelDigest" ? ["outlineResearch"] : undefined,
+			// 研究旁路共用模型家族：全文消化和导演检索都可回退到 outlineResearch。
+			step === "novelDigest" || step === "outlineCorpusResearch" ? ["outlineResearch"] : undefined,
 		);
 		const model = resolved.model;
 		if (!model) return { error: "无可用模型" };
@@ -1620,35 +1653,61 @@ const restHost: RestHost = {
 		let auth: { apiKey?: string; headers?: Record<string, string> } = {};
 		try {
 			auth = (await session.modelRegistry.getApiKeyAndHeaders(model as never)) as typeof auth;
+			// 该 OpenAI 兼容中转会拦截 SDK 默认的 OpenAI/JS User-Agent。
+			if ((model as unknown as { baseUrl?: string }).baseUrl?.includes("fuzhan.magicv4.ltd")) auth.headers = { ...(auth.headers ?? {}), "user-agent": "undici" };
 		} catch (e) {
 			return { error: e instanceof Error ? e.message : String(e) };
 		}
 			const streamFn = streamSimple as unknown as StageStreamFn;
 			try {
 				const selectedModel = opts?.forceNonStreaming
-					? { ...(model as unknown as Record<string, unknown>), compat: { ...(((model as unknown as { compat?: Record<string, unknown> }).compat) ?? {}), streaming: false } } as unknown as StageModelLike
+					? { ...(model as unknown as Record<string, unknown>), headers: { ...(((model as unknown as { headers?: Record<string, string> }).headers) ?? {}), "user-agent": "undici" }, compat: { ...(((model as unknown as { compat?: Record<string, unknown> }).compat) ?? {}), streaming: false } } as unknown as StageModelLike
 					: model as unknown as StageModelLike;
 				const s = streamFn(
 					selectedModel,
 				{ systemPrompt, messages: [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }] },
-				{ apiKey: auth.apiKey, headers: auth.headers, maxTokens: opts?.maxTokens ?? 4096, reasoning: opts?.reasoning ?? "off", signal: opts?.signal, maxRetries: 9 },
+				{
+					apiKey: auth.apiKey, headers: auth.headers, maxTokens: opts?.maxTokens ?? 4096,
+					reasoning: opts?.reasoning ?? "off", signal: opts?.signal,
+					// CorpusEngine 已负责有限重试；避免 SDK 再隐式重试 9 次。
+					maxRetries: opts?.forceNonStreaming ? 0 : 9,
+					timeoutMs: opts?.forceNonStreaming ? 180_000 : undefined,
+				},
 			);
 			let final: AssistantMsgLike | null = null;
-			for await (const e of s) {
-				if (e.type === "done") final = e.message ?? null;
-				else if (e.type === "error") {
-					const msg = e.error?.errorMessage || `stopReason=${e.error?.stopReason ?? "?"}`;
-					opts?.onDelta?.({ kind: "error", text: msg });
-					return { error: msg };
+			if (opts?.forceNonStreaming) {
+				// 非流式响应直接走 result()，避免事件迭代器等待/丢失 done 消息。
+				final = await (s as unknown as { result: () => Promise<AssistantMsgLike> }).result.call(s);
+			} else {
+				for await (const e of s) {
+					if (e.type === "done") final = e.message ?? null;
+					else if (e.type === "error") {
+						const msg = e.error?.errorMessage || `stopReason=${e.error?.stopReason ?? "?"}`;
+						opts?.onDelta?.({ kind: "error", text: msg });
+						return { error: msg };
+					}
+					else if (e.type === "delta" && e.kind === "text" && e.delta) opts?.onDelta?.({ kind: "text", delta: e.delta });
 				}
-				else if (e.type === "delta" && e.kind === "text" && e.delta) opts?.onDelta?.({ kind: "text", delta: e.delta });
 			}
+			// 非流式分支已经直接取得 result；流式分支使用 done 事件。
 			if (!final) return { error: "流未产出最终消息" };
-			const text = final.content
-				.filter((c) => c.type === "text")
-				.map((c) => c.text ?? "")
-				.join("")
-				.trim();
+			const readAssistantText = (message: AssistantMsgLike | null): string => {
+				if (!message) return "";
+				const raw = message as unknown as Record<string, unknown>;
+				if (typeof raw.text === "string") return raw.text.trim();
+				if (typeof raw.content === "string") return raw.content.trim();
+				if (!Array.isArray(raw.content)) return "";
+				return raw.content.map((part: unknown) => {
+					if (typeof part === "string") return part;
+					if (!part || typeof part !== "object") return "";
+					const item = part as Record<string, unknown>;
+					if (typeof item.text === "string") return item.text;
+					if (typeof item.content === "string") return item.content;
+					if (typeof item.value === "string") return item.value;
+					return "";
+				}).join("").trim();
+			};
+			const text = readAssistantText(final);
 			if (text.length <= 1 && (text === "{" || text === "<")) {
 				// 部分兼容中转的 SSE 会在结构化旁路首字符后断流；与 StageEngine.#sideText
 				// 同语义做一次非流式降级，避免画像/预设声明只落一个“{”。
@@ -1659,7 +1718,7 @@ const restHost: RestHost = {
 					if (event.type === "done") retryFinal = event.message ?? null;
 					else if (event.type === "error") return { error: event.error?.errorMessage || `stopReason=${event.error?.stopReason ?? "?"}` };
 				}
-				const retryText = retryFinal?.content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("").trim() ?? "";
+				const retryText = readAssistantText(retryFinal);
 				return retryText || { error: "非流式降级仍无文本" };
 			}
 			return text || { error: "最终消息无文本" };
@@ -1707,10 +1766,18 @@ const restHost: RestHost = {
 		reject: (id, reason) => outline!.reject(id, reason),
 		researchView: () => outline!.researchView(),
 		research: (topic) => outline!.research(topic),
+		researchSearch: (topic) => outline!.researchSearch(topic),
+		researchSearchLogs: () => outline!.researchSearchLogs(),
+		researchRetrySearchExtraction: (logId) => outline!.researchRetrySearchExtraction(logId),
+		researchSearchScheduleStatus: () => researchSearchScheduler?.status() ?? { enabled: false, running: false },
+		researchSearchScheduleRunNow: () => researchSearchScheduler!.runNow(),
 		settings: (value) => outline!.settings(value),
+		clearChats: () => outline!.clearChats(),
 	},
 	corpus: {
 		create: (file) => corpus!.create(file),
+		createUrl: (url) => corpus!.createUrl(url),
+		discover: () => corpusScheduler!.runNow(new Date(), 3),
 		view: () => corpus!.view(),
 		detail: (id) => corpus!.getDetail(id),
 		pause: (id) => (corpus!.pause(id), corpus!.view()),
@@ -1758,6 +1825,12 @@ outline = new OutlineEngine({
 	onState: () => resyncAll(),
 });
 
+const researchSchedule = loadStageMaterials(cwd).config.researchSearchSchedule
+	?? { enabled: false, hour: 6, minute: 0, maxPerRun: 3, topics: ["校园恋爱中的慢热互信", "日常剧情中的关系推进", "悬疑故事的信息分配"] };
+researchSearchScheduler = new ResearchSearchScheduler(cwd, researchSchedule, (topic) => outline!.researchSearch(topic));
+researchSearchScheduler.start();
+if (researchSchedule.enabled) console.log(`[research-search-scheduler] 已启用：每天 ${String(researchSchedule.hour).padStart(2, "0")}:${String(researchSchedule.minute).padStart(2, "0")}，最多 ${researchSchedule.maxPerRun} 个主题`);
+
 corpus = new CorpusEngine({
 	cwd,
 	runSideModel: (step, systemPrompt, userText, options) => restHost.runSideText(step, systemPrompt, userText, options),
@@ -1765,9 +1838,22 @@ corpus = new CorpusEngine({
 	cardKey: () => loadStageMaterials(cwd).config.card,
 	onReady: (document, digest, extracted) => outline!.digestReady(document, digest, extracted).then(() => undefined),
 	onRemoved: (docId) => outline!.removeCorpus(docId),
+	fetchText: requestText,
 }, loadStageMaterials(cwd).config.novelDigest?.maxCallsPerDoc ?? 800);
 // 服务重启后：恢复未完成的消化任务（断点续跑）
 corpus.restore();
+const autoSchedule = loadStageMaterials(cwd).config.novelDigest?.autoSchedule
+	?? { enabled: false, hour: 5, minute: 0, maxPerRun: 3, queries: ["学園 日常", "現代 日常 社会人", "青春 日常"] };
+corpusScheduler = new CorpusScheduler({
+	engine: corpus,
+	fetchText: requestText,
+	schedule: autoSchedule,
+	log: (message) => console.log(message),
+});
+if (autoSchedule.enabled) {
+	corpusScheduler.start();
+	console.log(`[corpus-scheduler] 已启用：每天 ${String(autoSchedule.hour).padStart(2, "0")}:${String(autoSchedule.minute).padStart(2, "0")}，最多 ${autoSchedule.maxPerRun} 部`);
+}
 
 // 启动时：liyuan.agent.json → models.json，重绑模型 + 应用思考档（配置 → 当前生效）
 try {
@@ -1844,6 +1930,9 @@ const storyBridge: StoryBridge = {
 	// 向量记忆作用域（M-D3 助手侧工具用）：与 restHost.memoryScope / 台上注入同一口径——
 	// 当前剧情会话 + 当前卡**路径**（scopeId 按路径 hash，只给卡名会落到另一个空作用域）。
 	memoryScope: () => ({ sessionId: session.sessionId, card: cardPath || undefined }),
+	memoryVisibleEntryIds: () => new Set(
+		session.sessionManager.getBranch().map((entry) => entry.id).filter((id): id is string => typeof id === "string"),
+	),
 	// 世界线视图（M-D5 助手侧 worldline_list 工具用）：从剧情会话树拉存档点
 	worldlineView: () => restHost.worldlineView(),
 	// 面板（M-D5 助手侧 panel_* 工具用）：当前剧情会话的面板读写
@@ -2375,11 +2464,126 @@ const stage = new StageEngine({
 	// memory_search 工具：剧情库 + 外部资料库合并取前 6（与扩展侧同一套语义）
 	searchMemory: async (sessionId, query) => {
 		const scope = { sessionId, card: cardPath || undefined };
+		const visibleEntryIds = new Set(
+			session.sessionManager.getBranch().map((entry) => entry.id).filter((id): id is string => typeof id === "string"),
+		);
 		const [narrative, external] = await Promise.all([
-			memorySearch(cwd, scope, "narrative", query).catch(() => []),
-			memorySearch(cwd, scope, "external", query).catch(() => []),
+			memorySearch(cwd, scope, "narrative", query, undefined, visibleEntryIds).catch(() => []),
+			memorySearch(cwd, scope, "external", query, undefined, visibleEntryIds).catch(() => []),
 		]);
 		return [...narrative, ...external].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).slice(0, 6);
+	},
+	// PLAN-RP-MEMORY：拍前自动召回（两阶段）。
+	// 第一阶段 recallForTurn：合并剧情库（纪要/事件/证据）+ 额外库，按记忆策略注入【剧情记忆】。
+	recallForTurn: async (sessionId, query) => {
+		const scope = { sessionId, card: cardPath || undefined };
+		const visibleEntryIds = new Set(
+			session.sessionManager.getBranch().map((entry) => entry.id).filter((id): id is string => typeof id === "string"),
+		);
+		const hits = await memoryRecallForTurn(cwd, scope, query, visibleEntryIds).catch(() => []);
+		return hits
+			.map((h) => ({
+				text: h.text,
+				score: h.score,
+				meta: {
+					title: h.meta?.title,
+					fileName: h.meta?.fileName,
+					source: h.meta?.source,
+					kind: h.meta?.kind,
+					eventId: h.meta?.eventId,
+					evidenceLevel: h.meta?.evidenceLevel,
+				},
+			}))
+			.filter((h) => !!h.text);
+	},
+	recallArcsForTurn: async (sessionId) => {
+		const scope = { sessionId, card: cardPath || undefined };
+		const visibleEntryIds = new Set(
+			session.sessionManager.getBranch().map((entry) => entry.id).filter((id): id is string => typeof id === "string"),
+		);
+		return memoryArcRecallForTurn(cwd, scope, visibleEntryIds);
+	},
+	// 第二阶段 recallEvidence：事件卡 → 原文证据块。
+	recallEvidence: async (sessionId, eventId) => {
+		const scope = { sessionId, card: cardPath || undefined };
+		const visibleEntryIds = new Set(
+			session.sessionManager.getBranch().map((entry) => entry.id).filter((id): id is string => typeof id === "string"),
+		);
+		const event = memoryListEventDigests(cwd, scope).find((item) => item.id === eventId);
+		if (event?.sourceRefs?.length) {
+			const branchEntries = session.sessionManager.getBranch() as unknown as Array<{
+				id: string;
+				message?: { content?: unknown };
+			}>;
+			const byId = new Map(branchEntries.map((entry) => [entry.id, entry]));
+			const sourceTexts = event.sourceRefs
+				.filter((ref) => visibleEntryIds.has(ref.entryId))
+				.map((ref) => ({ ref, entry: byId.get(ref.entryId) }))
+				.map(({ ref, entry }) => {
+					const content = entry?.message?.content;
+					const text = typeof content === "string"
+						? content
+						: Array.isArray(content)
+							? content.map((part) => part && typeof part === "object" && (part as { type?: string }).type === "text" ? String((part as { text?: unknown }).text ?? "") : "").join("")
+							: "";
+					if (!text) return "";
+					return typeof ref.charFrom === "number" || typeof ref.charTo === "number"
+						? text.slice(Math.max(0, ref.charFrom ?? 0), Math.max(0, ref.charTo ?? text.length))
+						: text;
+				})
+				.filter(Boolean);
+			if (sourceTexts.length) {
+				return sourceTexts.slice(0, 2).map((text, index) => ({
+					text,
+					score: 1 - index * 0.001,
+					meta: { title: "Session Tree 原文证据", source: "session-tree", kind: "evidence" as const, eventId, evidenceLevel: "source-backed" as const },
+				}));
+			}
+		}
+		const evd = await memoryEvidenceForEvent(cwd, scope, eventId, 2, visibleEntryIds).catch(() => []);
+		return evd.map((h) => ({
+			text: h.text,
+			score: h.score,
+			meta: {
+				title: h.meta?.title,
+				source: h.meta?.source,
+				kind: "evidence" as const,
+				eventId,
+				evidenceLevel: (h.meta?.evidenceLevel ?? "source-backed") as "source-backed",
+			},
+		}));
+	},
+	// 拍前召回开关（对齐记忆配置 injectOnTurn）：宿主每次现查。
+	shouldRecallForTurn: async () => {
+		const {
+			loadMemoryConfig,
+		} = await import("../src/memory/index.ts");
+		const cfg = loadMemoryConfig(cwd);
+		return cfg.enabled === true && cfg.injectOnTurn !== false;
+	},
+	eventBook: (sessionId) => {
+		const scope = { sessionId, card: cardPath || undefined };
+		const scopeId = memoryScopeId(scope);
+		const visibleEntryIds = new Set(
+			session.sessionManager.getBranch().map((entry) => entry.id).filter((id): id is string => typeof id === "string"),
+		);
+		return {
+			everyNTurns: () => loadMemoryConfig(cwd).stores.find((store) => store.id === "narrative" && store.enabled)?.everyNTurns ?? 0,
+			getCursor: () => loadMemoryConfig(cwd).eventCursors?.[scopeId],
+			setCursor: (entryId: string) => {
+				// 游标与配置同锁：避免并发 overwrite eventCursors/turnCounters。
+				const cfg = loadMemoryConfig(cwd);
+				saveMemoryConfig(cwd, { ...cfg, eventCursors: { ...(cfg.eventCursors ?? {}), [scopeId]: entryId } });
+			},
+			listEvents: () => memoryListEventDigests(cwd, scope, visibleEntryIds).map((event) => ({
+				id: event.id,
+				title: event.title,
+				arc: event.arc,
+				status: event.status,
+				importance: event.importance,
+				summary: event.summary,
+			})),
+		};
 	},
 	// 向量库写侧三件（M-D3）：MemoryScope 一律在此绑定（当前对话 + 当前卡），**不经模型**。
 	// 写侧恒落 external——服务层 assertExtraStore 禁止手写剧情库，故工具不给 store 参数。
@@ -2387,8 +2591,11 @@ const stage = new StageEngine({
 		memoryManualAdd(cwd, { sessionId, card: cardPath || undefined }, input.text, {
 			...(input.title ? { title: input.title } : {}),
 		}),
-	listMemory: (sessionId, storeId) =>
-		memoryListChunks(cwd, { sessionId, card: cardPath || undefined }, storeId),
+	listMemory: (sessionId, storeId) => {
+		const visibleEntryIds = new Set(session.sessionManager.getBranch().map((entry) => entry.id).filter((id): id is string => typeof id === "string"));
+		return memoryVisibleChunks(cwd, { sessionId, card: cardPath || undefined }, storeId, visibleEntryIds)
+			.map((chunk) => ({ id: chunk.id, text: chunk.text, textLen: chunk.text.length, meta: chunk.meta, createdAt: chunk.createdAt }));
+	},
 	deleteMemory: (sessionId, storeId, id) =>
 		memoryDeleteChunk(cwd, { sessionId, card: cardPath || undefined }, storeId, id),
 	webResearch: async (queries, maxResults, signal) => {
@@ -2449,11 +2656,23 @@ const stage = new StageEngine({
 	// 用户中途配好 env 重启即生效；没配就不上清单（模型不会去试一个必然失败的工具）。
 	ttsAvailable: () => loadTtsConfig() !== null,
 	// M4 压缩归档：被摘要覆盖的早期正文完整入剧情库——摘要管连续性，归档管细节召回
-	archiveCompacted: async (sessionId, text) => {
-		const r = await memoryArchiveCompacted(cwd, { sessionId, card: cardPath || undefined }, text);
+	// PLAN-RP-MEMORY：归档块携带 entry 级 sourceRefs（含 charFrom/charTo），供事件→证据两阶段召回定位。
+	archiveCompacted: async (sessionId, text, opts) => {
+		const r = await memoryArchiveCompacted(
+			cwd,
+			{ sessionId, card: cardPath || undefined },
+			text,
+			{ sourceRefs: opts?.sourceRefs, perEntry: opts?.perEntry },
+		);
 		if (r.archived) {
 			broadcast({ type: "notify", level: "info", text: `向量记忆：早期剧情已归档（${r.chunks} 段，可 memory_search 召回）` });
 		}
+	},
+	// PLAN-RP-MEMORY：事件卡入库（memory workflow skill 旁路产物）。
+	upsertEventDigest: async (sessionId, event) => {
+		const scope = { sessionId, card: cardPath || undefined };
+		const mergeInto = event.op?.startsWith("merge:") ? event.op.slice("merge:".length) : undefined;
+		return memoryUpsertEventDigest(cwd, scope, event as import("../src/memory/types.ts").RpEventDigest, mergeInto ? { mergeInto, reason: "llm-merge" } : undefined);
 	},
 	// lorebook_toggle 工具（M-D2）：写 config.disabledLore 并软刷新素材。
 	// 复用 M-C2 协议禁用的同一条指纹通道（PLAN-RP-TOOLING M-D2 明示不得另起一套）。
@@ -3004,8 +3223,7 @@ wss.on("connection", (ws, req) => {
 						// 强制停止：按下即收敛 UI/选择卡，再撕掉本拍（台上引擎 + 旧循环 + 委托中的助手）
 						for (const id of [...pendingChoices.keys()]) settleChoice(id, { stop: true });
 						const wasStreaming = storyStreaming() || (assistantHost?.isStreaming() ?? false);
-						if (session.isStreaming) broadcast({ type: "agent", state: "end" });
-						if (assistantHost?.isStreaming()) broadcast({ type: "assistant_state", state: "end" });
+						// 不在这里乐观广播 end；等待各自 onTurnEnd，避免 UI 显示已停止而后台仍在产出。
 						stage.abort(); // 引擎自会以 aborted 谢幕（半拍正文保留）
 						void session.abort().catch((err) => {
 							console.error(`[liyuan] abort 失败：${err instanceof Error ? err.message : String(err)}`);

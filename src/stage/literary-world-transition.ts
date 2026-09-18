@@ -182,8 +182,18 @@ export function normalizeBeatFactEnvelope(value: unknown, sources: { userText: s
 		const normalizeQuote = (text: string) => text.normalize("NFKC").replace(/[“”]/g, '"').replace(/[‘’]/g, "'").replace(/\s+/g, "").replace(/[，。！？；：、,.!?;:]/g, "").toLowerCase();
 		const sourceText = evidenceSource === "latest-user" ? sources.userText : evidenceSource === "narrative" ? sources.narrativeText : "";
 		if (sourceText && !sourceText.includes(quote) && !normalizeQuote(sourceText).includes(normalizeQuote(quote))) {
-			errors.push(`证据 ${id} 的引文不在对应原文中`);
-			return [];
+			const normalizedSource = normalizeQuote(sourceText);
+			const normalizedQuote = normalizeQuote(quote);
+			const grams = new Set(Array.from({ length: Math.max(0, normalizedQuote.length - 2) }, (_, i) => normalizedQuote.slice(i, i + 3)));
+			const overlap = grams.size ? [...grams].filter((gram) => normalizedSource.includes(gram)).length / grams.size : 0;
+			if (overlap >= 0.2) {
+				// 模型常会把原文引文做轻微同义改写。保留这条候选证据并记录不确定性，
+				// 不让软性引文误差连带丢弃事实/时间；最终世界提案仍经过独立审计。
+				errors.push(`证据 ${id} 的引文不在对应原文（轻微改写，已保留为候选证据）`);
+			} else {
+				errors.push(`证据 ${id} 的引文不在对应原文`);
+				return [];
+			}
 		}
 		evidenceIds.add(id);
 		return [{ id, source: evidenceSource, locator: clean(item.locator, 160), quote }];

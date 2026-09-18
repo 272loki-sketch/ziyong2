@@ -51,6 +51,7 @@ import {
 import {
 	MANUAL_MIN_COMPACT_CHARS,
 	runCompaction,
+	serializeForSummary,
 	SUMMARY_ENTRY_TYPE,
 	type CompactOutcome,
 	type RpSummaryData,
@@ -78,6 +79,19 @@ import {
 	shouldRunContinuity,
 	type LiteraryContinuity,
 } from "./literary-continuity.ts";
+import { buildPlanFactPrompt, parsePlanFact, type PlanFactComparison } from "./plan-fact.ts";
+import {
+	buildPlotAdaptationPrompt,
+	formatPlotAdaptation,
+	parsePlotAdaptation,
+	type PlotAdaptation,
+} from "./plot-adaptation.ts";
+import {
+	buildSceneConductorPrompt,
+	formatSceneConductor,
+	parseSceneConductor,
+	type SceneConductor,
+} from "./scene-conductor.ts";
 import {
 	LITERARY_WORLD_ENTRY_TYPE,
 	literaryWorldFromBranch,
@@ -103,6 +117,7 @@ import {
 	type LiteraryEcologyState,
 } from "./literary-ecology.ts";
 import {
+	MAX_LOOKUPS,
 	MAX_ROUNDS,
 	runStageTool,
 	skillReadTool,
@@ -189,6 +204,8 @@ export interface StageSessionManager {
 	appendCustomEntry(customType: string, data?: unknown): string;
 	getSessionId(): string;
 	flush(): void;
+	/** 将下一条回复明确挂到目标父节点；用于 reroll 保持 assistant sibling 结构。 */
+	branch?(entryId: string): void;
 }
 
 export interface StageModelLike {
@@ -236,6 +253,13 @@ export interface StageTurnEndInfo {
 	error?: string;
 	/** 落树的 assistant 条目 id（错误/空拍时无） */
 	entryId?: string;
+}
+
+export interface StageEventBook {
+	everyNTurns: () => number;
+	getCursor: () => string | undefined;
+	setCursor: (entryId: string) => void;
+	listEvents: () => Array<{ id: string; title: string; arc?: string; status?: string; importance?: string; summary?: string }>;
 }
 
 export interface StageEvents {
@@ -286,6 +310,8 @@ export interface StageEngineDeps {
 	 * 未注入 = 主演无【剧情记忆】注入（退化为旧行为）。调用方承诺内部做 budget/topK。
 	 */
 	recallForTurn?: (sessionId: string, query: string) => Promise<MemoryRecallHitLike[]>;
+	/** 扫荡型召回：按弧线聚合事件卡为有限骨架块，不加载原文。 */
+	recallArcsForTurn?: (sessionId: string) => Promise<Array<{ arc: string; text: string; events: number }>>;
 	/**
 	 * PLAN-RP-MEMORY：按事件 id 回读原文证据（第二阶段：事件 → sourceRefs → 证据块）。
 	 * 未注入 = 事件召回不附带证据；主演只拿到事件定位。
@@ -296,6 +322,8 @@ export interface StageEngineDeps {
 	 * 未注入 = 只要宿主有 recallForTurn 就召。
 	 */
 	shouldRecallForTurn?: (sessionId: string) => Promise<boolean>;
+	/** 滚动事件提取的游标与既有事件预览。 */
+	eventBook?: (sessionId: string) => StageEventBook | undefined;
 	/**
 	 * 向量库写侧三件（M-D3）。均由宿主按「当前对话 + 当前卡」绑定 MemoryScope 后注入——
 	 * **作用域不经模型**（PLAN-RP-TOOLING M-D3：scope 全隐藏），引擎只透传 sessionId。
@@ -320,7 +348,10 @@ export interface StageEngineDeps {
 	archiveCompacted?: (
 		sessionId: string,
 		text: string,
-		opts?: { sourceRefs?: Array<{ entryId: string; entryType?: string; turn?: number; charFrom?: number; charTo?: number }> },
+		opts?: {
+			sourceRefs?: Array<{ entryId: string; entryType?: string; turn?: number; charFrom?: number; charTo?: number }>;
+			perEntry?: Array<{ entryId: string; entryType?: string; turn?: number; text: string }>;
+		},
 	) => Promise<void>;
 	/**
 	 * PLAN-RP-MEMORY：事件卡入库（旁路产物）。未注入 = 无事件索引（不影响摘要与归档）。
@@ -382,18 +413,23 @@ const textOfAssistant = (m: AssistantMsgLike | null): string => {
 /** 规划卡：每拍第 1 轮随末端注入送达（工作区新建必空） */
 export const PLAN_CARD =
 	"【第 1 步·规划】本拍还没有计划。读题、探索（工具自取）；用户这句输入引出的未定变量——" +
-	"取不同值这拍走向会分岔、且设定里查不到的——先 `ask` 请用户定，再用 `beat_plan` 列路标。" +
+	"取不同值这拍走向会分岔、且设定里查不到的——若清单中有 `ask`，先请用户定夺；否则由你依据人物动机和已有事实自行选择，再用 `beat_plan` 列路标。" +
 	"你的任务是列出抽象的路标的同时为路标的具体内容留下充分的可发挥余地，" +
 	"让下面每个剧情轮次扮演路标时拥有极大的发挥空间以给用户带来更多的剧情可能性。" +
-	"没有戏的拍可 `draft_write` 一次交完；用户本轮在求方向/递笔的，直接 `ask`。";
+	"没有戏的拍可 `draft_write` 一次交完；有戏时按路标分段演出，只有清单中有 `ask` 且确实无法继续时才询问。";
 
 /** 记账注入：seal（含兜底封笔）之后第一件事；本拍已有落账（结构信号）时跳过 */
+export const CREATIVE_REVIEW_INJECTION =
+	"【分段回看】回看刚落下的稿段和导演约束，检查人物声音、潜台词、信息交换、节奏变化与模板化表达。" +
+	"只在 thinking 中记录简短判断，不复述正文，不预写下一段；需要修正用 draft_edit，继续只写一个自然段，到了玩家接话处用 draft_seal。";
+
 export const LEDGER_INJECTION =
 	"【记账】已封笔。核对本拍变动并落账：世界状态用 `world_state_update`（物品/时间/位置/关系），" +
 	"表格与面板用 `panel_write` 同步。没有变动就直接停。";
 
-export const DEFAULT_MAIN_MAX_TOKENS = 8192;
-export const FIRST_CALL_MAX_TOKENS = 4096;
+// 不人为压缩单次交付；正文 Agent 的分段/轮次控制负责边界，供应商自身上限负责容量。
+export const DEFAULT_MAIN_MAX_TOKENS = 32768;
+export const FIRST_CALL_MAX_TOKENS = 32768;
 /** 格式收尾沿用主演本拍上下文，只放宽输出容量，不再重复送料完整卡与预设。 */
 export const CURTAIN_MAX_TOKENS = 32768;
 
@@ -403,7 +439,7 @@ export function mainStageMaxTokens(
 	wordRange?: { min: number; max: number },
 ): number {
 	const wanted = wordRange
-		? Math.max(4096, Math.min(16384, Math.ceil(wordRange.max * 2) + 2048))
+		? Math.max(4096, Math.min(32768, Math.ceil(wordRange.max * 2) + 2048))
 		: DEFAULT_MAIN_MAX_TOKENS;
 	const modelCap = typeof model.maxTokens === "number" && model.maxTokens > 0 ? model.maxTokens : wanted;
 	return Math.min(wanted, modelCap);
@@ -414,6 +450,9 @@ export interface StageRerollPrep {
 	literaryDirection?: string;
 	literaryDirectionData?: LiteraryDirection;
 	literaryEcology?: LiteraryEcologyState;
+	plotAdaptation?: PlotAdaptation;
+	planFact?: PlanFactComparison;
+	sceneConductor?: SceneConductor;
 }
 
 /** 主演格式收尾的独立容量：触顶收场同样必须使用，不能退回正文轮的 8k。 */
@@ -428,6 +467,8 @@ const draftBodyCharsOf = (ws: TurnWorkspace): number =>
 	ws.draft.trim() ? extractDraftBody(ws.draft).replace(/\s+/g, "").length : 0;
 /** 初次请求之外的自动重试次数；429、短暂网关错误和网络错误由 provider 按退避处理。 */
 const MODEL_MAX_RETRIES = 9;
+/** provider 已负责退避重试；引擎层只额外做一次流式→非流式恢复，避免重试乘法。 */
+const WRITER_OUTER_RETRIES = 1;
 
 /** 中转错用 tokenizer 时会把模型控制 token 和占位符直接作为正文返回。 */
 export function looksLikeCorruptedModelText(text: string): boolean {
@@ -471,7 +512,95 @@ export function progressLine(ws: TurnWorkspace, packNames?: string[], forcedSkil
 
 /** 轻量历史回照预判：普通拍不发云端 embedding，明确过去/旧账信号才进入召回。 */
 export function shouldRecallHistory(userText: string): boolean {
-	return /还记得|记得吗|第一次|初次|初遇|当年|以前|过去|那天|那次|之前|曾经|旧事|回想|回忆|再次提到|又提到|那把|那封|那个约定|你说过|我说过/u.test(userText);
+	return /还记得|记得吗|第一次|初次|初遇|当年|以前|过去|那天|那次|之前|曾经|旧事|回想|回忆|再次提到|又提到|那把|那封|那个约定|你说过|我说过|从头(讲|说|聊|回忆|梳理)|一路走来|这一路|这些年|往事|来龙去脉|经历了(什么|哪些)|整个过程|怎么(走到|变成|发展到)/u.test(userText);
+}
+
+export function classifyRecallIntent(userText: string): "point" | "sweep" {
+	return /从头(讲|说|聊|回忆|梳理)|一路走来|这一路|这些年|往事|来龙去脉|经历了(什么|哪些)|整个过程|怎么(走到|变成|发展到)|从(相识|初遇|第一次见面)(讲|说|聊|回忆|起)/u.test(userText)
+		? "sweep"
+		: "point";
+}
+
+/** 用户本拍明确要求推进时间或移动场景时，放开单拍边界。 */
+export function userAuthorizesTransition(userText: string): boolean {
+	return /(?:跳到|推进到|切到|转到|等到|来到|前往|赶往|去往|回到|离开|出发去|带我去).{0,24}|(?:^|[我你他她它咱们，。！？!?\s])到(?:了)?[^，。！？!?]{0,24}|(?:^|[，。！？!?\s])(?:次日|翌日|第二天|几天后|数日后|数小时后|稍后|片刻后|放学后|傍晚|夜晚|深夜)(?:[，。！？!?\s]|$).{0,20}(?:继续|开始|去|到|见|找|做|发生)/u.test(userText);
+}
+
+export function isToolUnsupportedError(error: string): boolean {
+	return /(?:tools?|functions?|function[_ -]?calling).{0,80}(?:unsupported|not supported|not allowed|unknown|unrecognized|invalid|禁用|不支持|不允许)|(?:unsupported|not supported|unknown|unrecognized|invalid).{0,80}(?:tools?|functions?|function[_ -]?calling)/i.test(error);
+}
+
+export function looksLikeTextualToolProtocol(text: string): boolean {
+	const source = text.trim();
+	if (!source) return false;
+	if (/<[｜|]{0,2}DSML[｜|]{0,2}(?:tool_calls|invoke)|<\/?(?:tool_call|function_call|invoke)\b/i.test(source)) return true;
+	return /^(?:```(?:json)?\s*)?(?:beat_plan|beat_step_done|draft_append|draft_write|draft_edit|draft_seal|world_state_update|lorebook_search|memory_search)\s*\(/i.test(source);
+}
+
+const WRITER_STREAM_TIMEOUT_MS = 900_000;
+const ASK_TIMEOUT_MS = 30 * 60_000;
+
+async function* streamWithTimeout(
+	stream: AsyncIterable<StageStreamEvent>,
+	timeoutMs = WRITER_STREAM_TIMEOUT_MS,
+	signal?: AbortSignal,
+): AsyncGenerator<StageStreamEvent> {
+	const iterator = stream[Symbol.asyncIterator]();
+	const deadline = Date.now() + timeoutMs;
+	try {
+		while (true) {
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) throw new Error(`主演请求超时（${timeoutMs}ms）`);
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			let onAbort: (() => void) | undefined;
+			try {
+				const stopped = new Promise<never>((_resolve, reject) => {
+					onAbort = () => reject(new Error("主演请求已取消"));
+					if (signal?.aborted) onAbort();
+					else signal?.addEventListener("abort", onAbort, { once: true });
+				});
+				const result = await Promise.race([
+					iterator.next(),
+					stopped,
+					new Promise<never>((_resolve, reject) => {
+						timer = setTimeout(() => reject(new Error(`主演请求超时（${timeoutMs}ms）`)), remaining);
+					}),
+				]);
+				if (result.done) return;
+				yield result.value;
+			} finally {
+				if (timer) clearTimeout(timer);
+				if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+			}
+		}
+	} finally {
+		// 某些坏网关不响应 abort/return；不能再 await 它，否则超时保护本身也会卡住。
+		void iterator.return?.();
+	}
+}
+
+async function waitForUserChoice(
+	promise: Promise<string | undefined>,
+	signal: AbortSignal | undefined,
+	timeoutMs = ASK_TIMEOUT_MS,
+): Promise<string | undefined> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	let onAbort: (() => void) | undefined;
+	const stop = new Promise<undefined>((resolve) => {
+		timer = setTimeout(() => resolve(undefined), timeoutMs);
+		if (signal) {
+			onAbort = () => resolve(undefined);
+			if (signal.aborted) onAbort();
+			else signal.addEventListener("abort", onAbort, { once: true });
+		}
+	});
+	try {
+		return await Promise.race([promise, stop]);
+	} finally {
+		if (timer) clearTimeout(timer);
+		if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+		void promise.catch(() => undefined);
+	}
 }
 
 export function sideTextTimeoutMs(step: SideModelStep): number {
@@ -487,9 +616,9 @@ export function sideTextRetryLimit(step: SideModelStep): number {
 	return Math.min(3, MODEL_MAX_RETRIES);
 }
 
-/** 判定注入：收笔前一次性；不回报篇幅，续写/ask/收笔归模型判断。 */
-export function verdictInjection(userName: string): string {
-	return `【判定】继续写、必要时 \`ask\`，或 \`draft_seal\` 收笔——你判断；一般走向自行决定，只有用户主权未定且此刻不定就无法继续时才询问。`;
+/** 判定注入：收笔前一次性；不回报篇幅，续写/收笔归模型判断。 */
+export function verdictInjection(userName: string, allowAsk = true): string {
+	return `【判定】继续写${allowAsk ? "、必要时 `ask`" : ""}，或 \`draft_seal\` 收笔——你判断；剧情走向由你依据人物动机和已有事实自行决定${allowAsk ? "；只有用户主权未定且此刻不定就无法继续时才询问" : "，不要中途询问用户"}。`;
 }
 
 /**
@@ -564,6 +693,7 @@ function parseMemoryEventPayload(text: string, allowedRefs: Array<{ entryId: str
 				out.push({
 					kind: "rp-event-digest",
 					id: o.id,
+					...(o.op === "create" || o.op === "skip" || (typeof o.op === "string" && o.op.startsWith("merge:")) ? { op: o.op as import("../memory/types.ts").RpEventDigest["op"] } : {}),
 					...(typeof o.sourceKey === "string" && o.sourceKey ? { sourceKey: o.sourceKey } : {}),
 					title: String(o.title),
 					status: o.status === "active" || o.status === "candidate" || o.status === "resolved" || o.status === "retired" ? o.status : "active",
@@ -575,6 +705,13 @@ function parseMemoryEventPayload(text: string, allowedRefs: Array<{ entryId: str
 					...(typeof o.time === "string" && o.time ? { time: o.time } : {}),
 					...(typeof o.location === "string" && o.location ? { location: o.location } : {}),
 					...(Array.isArray(o.participants) ? { participants: o.participants.map(String).filter(Boolean) } : {}),
+					...(typeof o.arc === "string" && o.arc.trim() ? { arc: o.arc.trim() } : {}),
+					...(Array.isArray(o.links) ? {
+						links: o.links
+							.filter((link): link is Record<string, unknown> => !!link && typeof link === "object" && typeof (link as Record<string, unknown>).to === "string")
+							.filter((link) => ["caused_by", "evolved_from", "resolved_the", "contradicts"].includes(String(link.type)))
+							.map((link) => ({ to: String(link.to), type: String(link.type) as import("../memory/types.ts").RpEventLinkType, ...(typeof link.note === "string" ? { note: link.note } : {}) }))
+					} : {}),
 					sourceRefs: Array.isArray(o.sourceRefs)
 						? o.sourceRefs
 							.filter((ref): ref is Record<string, unknown> => !!ref && typeof ref === "object" && typeof (ref as Record<string, unknown>).entryId === "string")
@@ -781,6 +918,7 @@ export class StageEngine {
 	#ecologyPoolPrep: Promise<{ cardPath: string; cardName: string; pools: ReturnType<typeof loadEcologyPools>; warnings: string[] }> | null = null;
 	#ecologyPoolReady: { cardPath: string; cardName: string; pools: ReturnType<typeof loadEcologyPools>; warnings: string[] } | null = null;
 	#ecologyPoolWrite = Promise.resolve();
+	#memoryEventWrite = Promise.resolve();
 	/** 非关键路径候选：本拍开始后台算，下一拍只在原分支后代上采用；永不阻塞当前正文。 */
 	#literaryProfilePrepRunning = false;
 	#literaryProfileReady: { sessionId: string; cardPath: string; sourceLeafId: string; data: LiteraryProfileData } | null = null;
@@ -1110,7 +1248,7 @@ export class StageEngine {
 		const materials = loadStageMaterials(cwd);
 		const { config, card } = materials;
 		// 非关键候选只消费已经完成的结果；尚未完成就沿用旧工件，绝不等它们出正文。
-		if (!rerollPrep) {
+		if (userText !== null && !rerollPrep) {
 			this.#consumeWorldProfileReady(materials);
 			this.#consumeLiteraryProfileReady(config.card);
 			// 生态双池同样不等待：后台尚未完成时，本拍继续用磁盘现有池。
@@ -1138,7 +1276,7 @@ export class StageEngine {
 			(provider, id) => this.#deps.findModel?.(provider, id),
 			(id) => this.#deps.findModelById?.(id),
 		);
-		const model = resolved.model ?? baseModel;
+		let model = resolved.model ?? baseModel;
 		if (resolved.fallback && resolved.requested) {
 			const key = `writer:${resolved.requested.provider}/${resolved.requested.id}`;
 			if (!this.#warnedSideModelFallbacks.has(key)) {
@@ -1148,23 +1286,22 @@ export class StageEngine {
 		}
 		this.#abort = new AbortController();
 
-		let expectedTurnLeafId = sm.getLeafId();
-		if (userText !== null) {
-			expectedTurnLeafId = sm.appendMessage(nowMsg(userText));
-		}
-		// 上下文 = f(分支)
 		let branch = sm.getBranch() as BranchEntryLike[];
-		// 卡级画像已存在但当前分支尚无 Manifest 时，直接播种；这不是模型分析，不应依赖 ready 候选。
+		// 卡级画像已存在但当前分支尚无 Manifest 时，在新 user 落树之前播种。
+		// assistant 必须保持为 user 的直接子节点，否则 reroll/swipe 无法识别 sibling 变体。
 		const profileFingerprint = worldProfileFingerprint({ card, entries: materials.entries, preset: materials.preset, greetingIndex: config.greetingIndex });
 		const existingWorldProfile = loadCardWorldProfile(cwd, config.card, card.name, profileFingerprint, card);
-		if (config.literaryWorldEnabled === true && existingWorldProfile && !worldManifestFromBranch(branch, existingWorldProfile.cardKey)) {
+		if (userText !== null && config.literaryWorldEnabled === true && existingWorldProfile && !worldManifestFromBranch(branch, existingWorldProfile.cardKey)) {
 			sm.appendCustomEntry(WORLD_MANIFEST_ENTRY_TYPE, manifestFromProfile(existingWorldProfile));
 			sm.flush();
 			branch = sm.getBranch() as BranchEntryLike[];
-			expectedTurnLeafId = sm.getLeafId();
 			ev.onActivity?.("角色卡世界画像：已为当前分支采用现有画像");
 		}
-		if (!rerollPrep) {
+		let expectedTurnLeafId = sm.getLeafId();
+		if (userText !== null) expectedTurnLeafId = sm.appendMessage(nowMsg(userText));
+		// 上下文 = f(分支)
+		branch = sm.getBranch() as BranchEntryLike[];
+		if (userText !== null && !rerollPrep) {
 			this.#startWorldProfilePrep(materials, branch);
 			this.#startLiteraryProfilePrep(materials, branch);
 		}
@@ -1177,6 +1314,9 @@ export class StageEngine {
 		const adaptiveWorldEnabled = config.literaryWorldEnabled === true && !!worldManifest;
 		let literaryDirectionData = rerollPrep?.literaryDirectionData;
 		let literaryDirection = rerollPrep?.literaryDirection;
+		let plotAdaptation = rerollPrep?.plotAdaptation;
+		let sceneConductor = rerollPrep?.sceneConductor;
+		let planFact: PlanFactComparison | undefined;
 		const directorRequested = !rerollPrep && config.literaryQuality === "guided" && !isBackstageText(lastUserText);
 		if (!history.some((m) => m.role === "user")) {
 			ev.onNotify?.("error", "没有可开演的用户输入。");
@@ -1257,13 +1397,22 @@ export class StageEngine {
 		}
 		let literaryContinuity: LiteraryContinuity | undefined = rerollPrep?.literaryContinuity;
 		const prepLeafId = sm.getLeafId();
+		// 拍前旁路共享总预算；建议工件超时只会降级，不得阻塞正文入口。
+		const prepController = new AbortController();
+		// 停止按钮必须同时取消拍前旁路；否则导演/排演/生态请求仍会继续跑完。
+		this.#abort.signal.addEventListener("abort", () => prepController.abort(), { once: true });
+		const prepBudgetMs = 120_000;
+		const prepTimer = setTimeout(() => {
+			prepController.abort();
+			ev.onActivity?.(`拍前准备达到总预算（${Math.round(prepBudgetMs / 1000)}秒），正文按已有材料继续`);
+		}, prepBudgetMs);
 		const arrivalRequested = !rerollPrep && config.literaryEcologyEnabled === true && !legacyBackstage && !!ecologyRuntimeSkill;
 		const continuityRequested = !rerollPrep && config.literaryQuality === "guided" && !legacyBackstage && shouldRunContinuity({ state, history, summary, userText: lastUserText });
 		const arrivalPromise: Promise<LiteraryEcologyState | undefined> = arrivalRequested
 			? Promise.resolve().then(async () => {
 				ev.onActivity?.("鲜活世界：匹配当前人物与场所");
 				const prompt = buildEcologyRuntimePrompt(ecologyRuntimeSkill.body, { phase: "arrival", ecology: literaryEcology, global: ecologyPools.global, cardPool: ecologyPools.card, state, history, userText: lastUserText });
-				const result = await this.#sideText("ecologyRuntime", prompt.systemPrompt, prompt.userText, 16384);
+				const result = await this.#sideText("ecologyRuntime", prompt.systemPrompt, prompt.userText, 16384, "off", prepController.signal);
 				if (typeof result !== "string") { ev.onActivity?.(`鲜活世界：拍前生态失败（${result.error}），沿用上一快照`); return undefined; }
 				const parsed = normalizeLiteraryEcologyState(result, literaryEcology);
 				if (!parsed) { ev.onActivity?.("鲜活世界：拍前生态输出不可解析，沿用上一快照"); return undefined; }
@@ -1289,6 +1438,8 @@ export class StageEngine {
 					`${prompt.systemPrompt}\n\n# 工作流 skill：文学连续性\n${workflowSkill(materials.skillFiles, "continuity")?.body ?? ""}`,
 					prompt.userText,
 					2048,
+					"off",
+					prepController.signal,
 				);
 				if (typeof result !== "string") { ev.onActivity?.(`文学连续性：生成失败（${result.error}），本拍无补充工件`); return undefined; }
 				const parsed = parseLiteraryContinuity(result);
@@ -1299,6 +1450,7 @@ export class StageEngine {
 		// PLAN-RP-MEMORY：拍前自动召回——受 injectOnTurn 配置与宿主依赖双重门控；不进正文关键路径（缺失即降级）。
 		const memoryRecallRequested =
 			!rerollPrep && !legacyBackstage && !!this.#deps.recallForTurn && shouldRecallHistory(lastUserText);
+		const memoryRecallMode = classifyRecallIntent(lastUserText);
 		const memoryRecallPromise: Promise<MemoryRecallHitLike[] | undefined> =
 			memoryRecallRequested
 				? Promise.resolve().then(async () => {
@@ -1321,10 +1473,18 @@ export class StageEngine {
 					return withEvidence;
 				}).catch(() => undefined)
 				: Promise.resolve(undefined);
-		const [arrivalCandidate, continuityCandidate, memoryHits] = await Promise.all([
+		const memoryArcPromise =
+			memoryRecallRequested && memoryRecallMode === "sweep" && this.#deps.recallArcsForTurn
+				? Promise.race([
+					this.#deps.recallArcsForTurn(sm.getSessionId()).catch(() => []),
+					new Promise<Array<{ arc: string; text: string; events: number }>>((resolve) => setTimeout(() => resolve([]), 5_000)),
+				])
+				: Promise.resolve([]);
+		const [arrivalCandidate, continuityCandidate, memoryHits, memoryArcs] = await Promise.all([
 			arrivalPromise,
 			continuityPromise,
 			memoryRecallPromise,
+			memoryArcPromise,
 		]);
 		if (sm.getLeafId() === prepLeafId) {
 			if (arrivalCandidate) literaryEcology = arrivalCandidate;
@@ -1333,10 +1493,10 @@ export class StageEngine {
 			ev.onActivity?.("拍前生态/连续性结果已丢弃（期间切换了分支）");
 		}
 		// 记忆回照注入块（叶守卫：只在当前分支仍相同时采用）
-		let memoryRecallBlocks: Array<{ tag: string; kind: "event" | "digest" | "evidence"; text: string }> | undefined;
-		if (memoryHits && sm.getLeafId() === prepLeafId) {
+		let memoryRecallBlocks: Array<{ tag: string; kind: "event" | "digest" | "evidence" | "arc"; text: string }> | undefined;
+		if ((memoryHits || memoryArcs.length) && sm.getLeafId() === prepLeafId) {
 			const seenRecall = new Set<string>();
-			memoryRecallBlocks = (memoryHits as MemoryRecallHitLike[])
+			const points = ((memoryHits ?? []) as MemoryRecallHitLike[])
 				.map((h, i) =>
 					formatMemoryRecallHit(h, i),
 				)
@@ -1348,7 +1508,18 @@ export class StageEngine {
 					return true;
 				})
 				.slice(0, 6);
-		} else if (memoryHits && sm.getLeafId() !== prepLeafId) {
+			const arcs = memoryArcs.map((arc) => ({ tag: arc.arc, kind: "arc" as const, text: arc.text }));
+			const combined = [...arcs, ...points];
+			memoryRecallBlocks = [];
+			let recallChars = 0;
+			for (const block of combined) {
+				const remaining = 2_500 - recallChars;
+				if (remaining < 80) break;
+				const next = block.text.length > remaining ? { ...block, text: `${block.text.slice(0, remaining - 1)}…` } : block;
+				memoryRecallBlocks.push(next);
+				recallChars += next.text.length;
+			}
+		} else if ((memoryHits || memoryArcs.length) && sm.getLeafId() !== prepLeafId) {
 			ev.onActivity?.("剧情记忆召回已丢弃（期间切换了分支）");
 		}
 		if (!rerollPrep && config.literaryEcologyEnabled === true && !legacyBackstage && ecologyGlobalSkill && ecologyCardSkill) {
@@ -1356,6 +1527,26 @@ export class StageEngine {
 			this.#startEcologyPoolPrep({ cardPath: config.card, card, entries: materials.entries, state, history, userText: lastUserText, userName: config.userName, globalSkill: ecologyGlobalSkill, cardSkill: ecologyCardSkill, pools: ecologyPools, signal: poolSignal.signal });
 			ev.onActivity?.("鲜活世界：已在后台搜索并准备下一拍素材");
 		}
+		// 剧情卡—生态适配：卡池是长期卡级语法，运行态给出眼前人物/地点；本步骤把抽象模板
+		// 变形成当前故事可用的因果候选。候选不落事实，正文实际发生后才由场记/大纲校准。
+		const plotAdaptationRequested = !rerollPrep && config.literaryEcologyEnabled === true && !legacyBackstage;
+		if (plotAdaptationRequested) {
+			ev.onActivity?.("生态剧情适配：按当前剧情卡编排事件候选");
+			const sourceLeafId = sm.getLeafId();
+			const prompt = buildPlotAdaptationPrompt({
+				card, cardPool: ecologyPools.card, globalPool: ecologyPools.global, ecology: literaryEcology,
+				outline: projectOutline(outlineFromBranch(branch), "director"), state, history, summary,
+				userText: lastUserText, userName: config.userName,
+			});
+			const result = await this.#sideText("plotAdaptation", prompt.systemPrompt, prompt.userText, 8192, undefined, prepController.signal);
+			if (typeof result === "string" && sm.getLeafId() === sourceLeafId) {
+				plotAdaptation = parsePlotAdaptation(result);
+				if (!plotAdaptation) ev.onActivity?.("生态剧情适配：输出不可解析，本拍不采用候选");
+			} else if (typeof result !== "string") {
+				ev.onActivity?.(`生态剧情适配：生成失败（${result.error}），正文按原流程继续`);
+			}
+		}
+		const directorPromise = (async () => {
 		if (directorRequested) {
 			ev.onActivity?.("文学导演：规划当前单拍边界");
 			const sourceLeafId = sm.getLeafId();
@@ -1366,6 +1557,7 @@ export class StageEngine {
 				literaryProfile,
 				continuity: literaryContinuity,
 				ecology: config.literaryEcologyEnabled === true ? formatLiteraryEcologyInjection(literaryEcology) : undefined,
+				plotAdaptation: formatPlotAdaptation(plotAdaptation),
 				activatedLore: activated,
 				userText: lastUserText,
 				charName: card.name,
@@ -1377,6 +1569,8 @@ export class StageEngine {
 				`${prompt.systemPrompt}\n\n# 工作流 skill：拍前导演\n${workflowSkill(materials.skillFiles, "director")?.body ?? ""}`,
 				prompt.userText,
 				2048,
+				undefined,
+				prepController.signal,
 			);
 			if (sm.getLeafId() === sourceLeafId && typeof result === "string") {
 				literaryDirectionData = parseLiteraryDirection(result) ?? undefined;
@@ -1385,6 +1579,24 @@ export class StageEngine {
 				ev.onActivity?.(`文学导演：生成失败（${result.error}），主演将无导演工件继续`);
 			}
 		}
+		})();
+		// 场面编排只吸收导演与生态适配候选。角色动机已经由导演统一处理，
+		// 不再按出场人数额外调用模型做逐角色排演。
+		await directorPromise;
+		// 排演后的场面编排：把各角色的独立动机变成可见动作链。它不写正文，也不创造事实，
+		// 只把本拍事件的因果、信息差和玩家停点交给主演。
+		const sceneConductorRequested = !rerollPrep && !legacyBackstage && (!!plotAdaptation || !!literaryDirectionData);
+		if (sceneConductorRequested) {
+			ev.onActivity?.("场面编排：组织角色行动与信息差");
+			const sourceLeafId = sm.getLeafId();
+			const prompt = buildSceneConductorPrompt({ plot: plotAdaptation, direction: literaryDirectionData, outline: projectOutline(outlineFromBranch(branch), "director") });
+			const result = await this.#sideText("sceneConductor", prompt.systemPrompt, prompt.userText, 4096, undefined, prepController.signal);
+			if (typeof result === "string" && sm.getLeafId() === sourceLeafId) {
+				sceneConductor = parseSceneConductor(result);
+				if (!sceneConductor) ev.onActivity?.("场面编排：输出不可解析，主演按导演方向继续");
+			} else if (typeof result !== "string") ev.onActivity?.(`场面编排：生成失败（${result.error}），主演按现有材料继续`);
+		}
+		clearTimeout(prepTimer);
 
 		// 历史后段每拍重装（{{lastusermessage}} 在此生效）：原文原序直通末端，不再拆层。
 		const phAll = legacyBackstage ? [] : (assemblePresetAfter(materials, lastUserText) ?? []);
@@ -1420,8 +1632,9 @@ export class StageEngine {
 		const mediaTools = this.#deps.media ? mediaStageTools(config.language, mediaOpts) : [];
 		// 助手委托（8/06 重接）：runner 未注册时不上清单
 		const assistantTool = assistantStageTool();
-		// P7：ask 工具依赖宿主注入 askUser（选择卡通道）；未注入则从清单剔除
-		const askEnabled = !!this.#deps.askUser;
+		// 剧情连续演出：不在中途把叙事决定抛回用户，避免选择卡打断节奏。
+		// askUser 保留在宿主接口中供其他场景使用，但台上工具清单永久剔除 ask。
+		const askEnabled = config.creationMode === "ask" && !!this.#deps.askUser;
 		const ws = createWorkspace();
 		const wsDeps: WorkspaceDeps = {
 			rules: extractDraftRules([...materials.presetRuleTexts, ...phAll.map((b) => b.text)]),
@@ -1429,8 +1642,9 @@ export class StageEngine {
 			charName: card.name,
 			baseState: state,
 			loreEntries: materials.entries,
+			transitionAuthorized: userAuthorizesTransition(lastUserText),
 		};
-		const tools = [
+		const allTools = [
 			...stageTools(config.language, readDeps),
 			...(skillNames.length > 0 ? [skillReadTool(config.language, skillNames)] : []),
 			...writeTools(config.language, planStepBudget(wsDeps.rules.wordRange)).filter((t) => t.name !== "ask" || askEnabled),
@@ -1438,6 +1652,9 @@ export class StageEngine {
 			...(assistantTool ? [assistantTool] : []),
 			...mcpTools,
 		];
+		const configuredToolSupport = (model.compat as { supportsTools?: boolean } | undefined)?.supportsTools !== false;
+		const tools = configuredToolSupport ? allTools : [];
+		if (!configuredToolSupport) ev.onActivity?.("主演 API 已配置为不支持工具，本拍使用纯文本模式");
 
 		const systemPrompt = buildStageSystemPrompt({
 			card,
@@ -1449,6 +1666,7 @@ export class StageEngine {
 			// skill 素材位（M-R2）：常驻包全文 + 拉取包 L1 索引，无包零痕迹
 			skills: materials.skillFiles,
 			tools: tools.length > 0,
+			allowAsk: askEnabled && tools.some((tool) => tool.name === "ask"),
 			// MCP 外设索引进 system（不进每拍注入）：会话内字节稳定，不破前缀缓存。
 			// 与旧 director.ts 同一位置——工具清单里有 mcp__ 工具，这里说明它们是什么。
 			mcpTools: mcpTools.map((t) => ({ name: t.name, description: t.description })),
@@ -1467,6 +1685,8 @@ export class StageEngine {
 			literaryCharacterProfile: literaryProfile?.character,
 			literaryPersonaProfile: literaryProfile?.persona,
 			literaryDirection,
+			plotAdaptation: formatPlotAdaptation(plotAdaptation),
+			sceneConductor: formatSceneConductor(sceneConductor),
 			literaryWorld: adaptiveWorldEnabled ? formatModularWorldInjection(modularWorld, worldManifest) : undefined,
 			literaryEcology: config.literaryEcologyEnabled === true ? formatLiteraryEcologyInjection(literaryEcology) : undefined,
 			memoryRecall: memoryRecallBlocks,
@@ -1480,7 +1700,7 @@ export class StageEngine {
 		const curtainSkill = workflowSkill(materials.skillFiles, "curtain");
 		const curtainMaterials = buildCurtainRerollMaterials({ card, entries: materials.entries, preset: materials.preset, statusBarFormats: materials.statusBarFormats });
 		const curtain = curtainMaterials.formatPlan.modelTags.length || curtainMaterials.formatPlan.deterministicTags.length
-			? `【主演·格式收尾】正文已在稿纸中。只生成 formatPlan.modelTags；deterministicTags 由代码补齐；nativeTags 由梨园权威状态投影；forbiddenTags 禁止输出。不得复述正文。\n\n# 工作流 skill\n${curtainSkill?.body ?? "依据当前卡材料生成非正文格式。"}\n\n# formatPlan\n${JSON.stringify(curtainMaterials, null, 2)}`
+			? `【主演·最终状态栏与图片交付】正文已经完成并封笔。现在仍由你本人完成本拍最终交付：先保证正文已经完整落稿，再按 formatPlan 输出状态栏等格式区块。当前卡要求图片交付，因此必须至少输出一份完整的 <image>... </image>（或兼容的 <imageTag>... </imageTag>）块；块内按 NAI4 规则写出 image### 场景与分角色提示词 ### 的内容。图片块应根据本拍刚写的正文和最终状态生成，不能凭空补写事件；格式轻微偏离不影响交付。只生成 formatPlan.modelTags；deterministicTags 由代码补齐；nativeTags 由梨园权威状态投影；forbiddenTags 禁止输出。不要复述、改写或压缩正文。\n\n# 工作流 skill\n${curtainSkill?.body ?? "依据当前卡材料生成非正文格式。"}\n\n# formatPlan\n${JSON.stringify(curtainMaterials, null, 2)}`
 			: undefined;
 
 		// 末端消息 = 动态注入 + 本拍用户原话。
@@ -1493,7 +1713,7 @@ export class StageEngine {
 		const injWithCard = tools.length > 0 ? `${injection}\n\n${PLAN_CARD}` : injection;
 		const tailText = endsWithUser ? `${injWithCard}\n\n${history[history.length - 1].text}` : injWithCard;
 
-		const messages: unknown[] = [
+		const buildWriterMessages = (tail: string): unknown[] => [
 			// M4 前情提要：被 rp-summary 覆盖的早期剧情在此回读（历史里那段已整体不存在）。
 			// 以 user 角色打头，措辞与 system「消息流约定」里的【前情提要】对上。
 			...(summary
@@ -1522,10 +1742,36 @@ export class StageEngine {
 							timestamp: 0,
 						},
 			),
-			{ role: "user", content: [{ type: "text", text: tailText }], timestamp: Date.now() },
+			{ role: "user", content: [{ type: "text", text: tail }], timestamp: Date.now() },
 		];
+		const messages = buildWriterMessages(tailText);
+		const writerInput = {
+			systemChars: systemPrompt.length,
+			summaryChars: summary?.length ?? 0,
+			historyChars: past.reduce((total, message) => total + message.text.length, 0),
+			injectionChars: injection.length,
+			latestUserChars: endsWithUser ? history[history.length - 1].text.length : 0,
+			toolSchemaChars: JSON.stringify(tools).length,
+		};
+		const writerInitialChars = Object.values(writerInput).reduce((total, chars) => total + chars, 0);
+		const pureTextSystemPrompt = tools.length === 0
+			? systemPrompt
+			: buildStageSystemPrompt({
+				card,
+				config,
+				constantLore: constantLoreOf(materials),
+				presetBefore: materials.presetBefore.map((p) => p.text),
+				declaredMarkers: materials.declaredMarkers,
+				skills: materials.skillFiles,
+				tools: false,
+				mcpTools: [],
+			});
+		const pureTextTail = endsWithUser ? `${injection}\n\n${history[history.length - 1].text}` : injection;
+		const pureTextMessages = buildWriterMessages(pureTextTail);
 
 		const { apiKey, headers } = await this.#deps.getAuth(model);
+		// 部分兼容中转会拦截 SDK 默认的 OpenAI/Node User-Agent；与 server/main.ts 旁路保持一致。
+		const requestHeaders = model.baseUrl?.includes("magicv4.ltd") ? { ...(headers ?? {}), "user-agent": "undici" } : headers;
 		const mainCallMaxTokens = mainStageMaxTokens(model, wsDeps.rules.wordRange);
 		const firstCallMaxTokens = Math.min(
 			FIRST_CALL_MAX_TOKENS,
@@ -1533,14 +1779,18 @@ export class StageEngine {
 		);
 		const options: Record<string, unknown> = {
 			apiKey,
-			headers,
+			headers: requestHeaders,
 			signal: this.#abort.signal,
 			sessionId: sm.getSessionId(),
 			maxTokens: firstCallMaxTokens,
 			maxRetries: MODEL_MAX_RETRIES,
 		};
 		const thinking = this.#deps.getThinking?.();
-		if (thinking) options.reasoning = thinking;
+		// Some OpenAI-compatible chat/completions gateways reject function tools
+		// whenever reasoning_effort is present. Respect the model compatibility
+		// declaration instead of forwarding the session thinking level blindly.
+		const supportsReasoningEffort = (model.compat as { supportsReasoningEffort?: boolean } | undefined)?.supportsReasoningEffort;
+		if (thinking && !(tools.length > 0 && supportsReasoningEffort !== true)) options.reasoning = thinking;
 		const samplers = materials.presetDoc?.samplers;
 		if (samplers && Object.keys(samplers).length > 0) {
 			options.onPayload = (payload: unknown, m: StageModelLike) => {
@@ -1554,7 +1804,11 @@ export class StageEngine {
 			};
 		}
 
-		let s = this.#deps.streamFn(model, { systemPrompt, messages, tools }, options);
+		let writerSystemPrompt = systemPrompt;
+		let writerMessages = messages;
+		let writerTools = tools;
+		let toolFallbackUsed = tools.length === 0;
+		let s = this.#deps.streamFn(model, { systemPrompt: writerSystemPrompt, messages: writerMessages, ...(writerTools.length ? { tools: writerTools } : {}) }, options);
 		let final: AssistantMsgLike | null = null;
 		let errored: string | undefined;
 		let text = "";
@@ -1562,17 +1816,26 @@ export class StageEngine {
 		let loopTail = "";
 		let curtainText = "";
 		let interruptedDraft = "";
+		let enteredAgentLoop = false;
+		let stoppedByUser = false;
 		let corruptOutput = false;
 		// 首轮 writer 若在中途断流（未落任何稿段），自动重发整个请求，避免一次上游故障毁掉整拍。
 		// 一旦已有稿段（ws.draft）则保留现有行为（交由 abort 收敛，不无脑重发）。
-		for (let writerAttempt = 0; writerAttempt <= MODEL_MAX_RETRIES; writerAttempt++) {
+		for (let writerAttempt = 0; writerAttempt <= WRITER_OUTER_RETRIES; writerAttempt++) {
 			let eroded = false;
-			for await (const e of s) {
+			try {
+			for await (const e of streamWithTimeout(s, WRITER_STREAM_TIMEOUT_MS, this.#abort?.signal)) {
+				// provider 可能不会因 AbortSignal 立即结束 async iterator；在事件入口丢弃迟到事件并主动关闭迭代器。
+				if (this.#abort?.signal.aborted) {
+					try { await s.return?.(); } catch { /* provider 已关闭 */ }
+					break;
+				}
 				if (e.type === "done") {
 					final = e.message ?? null;
 				} else if (e.type === "error") {
 					final = e.error ?? null;
 					errored = final?.errorMessage || "provider error";
+					_blog("provider_error", errored);
 					eroded = true;
 					break;
 				} else if (e.type === "text_delta" && e.delta) {
@@ -1585,6 +1848,12 @@ export class StageEngine {
 					fwd.forward(e);
 				}
 			}
+			} catch (error) {
+				if (this.#abort?.signal.aborted) break;
+				errored = error instanceof Error ? error.message : String(error);
+				_blog("provider_error", errored);
+				eroded = true;
+			}
 			const receivedText = [text, textOfAssistant(final)].filter(Boolean).join("\n");
 			if (looksLikeCorruptedModelText(receivedText)) {
 				corruptOutput = true;
@@ -1593,31 +1862,65 @@ export class StageEngine {
 				ev.onStreamClear?.();
 				break;
 			}
+			const textualToolProtocol = looksLikeTextualToolProtocol(receivedText);
+			if (textualToolProtocol && writerTools.length > 0) {
+				eroded = true;
+				errored = "API 未返回原生工具调用，而是输出了文本化 tool protocol";
+				final = null;
+				ev.onStreamClear?.();
+			}
 			// 用户取消：立即停止，不再重发（aborted 半拍仍走既有收敛落树）。
 			if (this.#abort?.signal.aborted) break;
-			if (!eroded || ws.draft.trim() || writerAttempt >= MODEL_MAX_RETRIES) break;
+			if (eroded && !ws.draft.trim() && writerTools.length > 0 && !toolFallbackUsed && (textualToolProtocol || isToolUnsupportedError(errored ?? ""))) {
+				toolFallbackUsed = true;
+				writerTools = [];
+				writerSystemPrompt = pureTextSystemPrompt;
+				writerMessages = pureTextMessages;
+				model = { ...model, compat: { ...((model.compat as Record<string, unknown> | undefined) ?? {}), streaming: false } };
+				ev.onNotify?.("warning", "主演 API 不支持工具调用，本拍已自动切换为纯文本小说模式。分段、主动检索和主演记账将由系统降级处理。");
+				s = this.#deps.streamFn(model, { systemPrompt: writerSystemPrompt, messages: writerMessages }, { ...options, maxRetries: 1 });
+				text = "";
+				final = null;
+				errored = undefined;
+				continue;
+			}
+			if (!eroded || ws.draft.trim() || writerAttempt >= WRITER_OUTER_RETRIES) break;
 			// 尚未落稿且断流：带退避重发同一个请求。
-			ev.onActivity?.(`主演首次生成中途断流，自动重发（第 ${writerAttempt + 1}/${MODEL_MAX_RETRIES} 次）`);
+			ev.onActivity?.(`主演首次生成中途断流，切换非流式重发（第 ${writerAttempt + 1}/${WRITER_OUTER_RETRIES} 次）`);
 			await new Promise((r) => setTimeout(r, 400 * Math.min(2 ** writerAttempt, 8)));
-			s = this.#deps.streamFn(model, { systemPrompt, messages, tools }, options);
+			model = { ...model, compat: { ...((model.compat as Record<string, unknown> | undefined) ?? {}), streaming: false } };
+			s = this.#deps.streamFn(model, { systemPrompt: writerSystemPrompt, messages: writerMessages, ...(writerTools.length ? { tools: writerTools } : {}) }, options);
 			text = "";
+		}
+		if (!final && !this.#abort?.signal.aborted) {
+			_blog("provider_error", "主演请求未返回最终消息");
 		}
 
 		// 尾巴口径（8/09）：稿落地后的 text 通道产出。稿落地前工具轮的旁白（读题/计划）
 		// 不算——旁白曾被 mergeFinalText 当尾巴拼到正文尾部（实弹：读题文字跑进正文）。
 		// M-A agent 循环（PLAN-RP-AGENT-EXEC §2.3）：思考→工具→看结果→再思考，直到交稿定稿。
 		// 首轮无论 stopReason 都进循环——模型直出正文不调工具时由循环做宽进严出代收（D2）。
-		if (final && final.stopReason !== "aborted" && !corruptOutput) {
+		if (final && final.stopReason !== "aborted" && !corruptOutput && writerTools.length === 0) {
+			const direct = (text || textOfAssistant(final)).trim();
+			if (direct) {
+				const received = runWriteTool(ws, wsDeps, "draft_write", { content: direct }, true);
+				if (received.ok) {
+					for (let attempt = 0; attempt < 3 && !ws.sealed; attempt++) runWriteTool(ws, wsDeps, "draft_seal", {});
+					ev.onActivity?.("纯文本正文已收稿");
+				} else errored = received.text;
+			} else errored = "纯文本主演未返回正文";
+		} else if (final && final.stopReason !== "aborted" && !corruptOutput) {
+			enteredAgentLoop = true;
 			// 首次请求即使异常结束，也让开放循环获得一次催稿/恢复机会；后续错误会由 turn 重新写回。
 			errored = undefined;
 			const loopOptions = { ...options, maxTokens: mainCallMaxTokens };
 			const turn = await this.#agentLoop({
 				model,
 				options: loopOptions,
-				systemPrompt,
-				messages,
+				systemPrompt: writerSystemPrompt,
+				messages: writerMessages,
 				first: final,
-				tools,
+				tools: writerTools,
 				ws,
 				wsDeps,
 				language: config.language,
@@ -1627,10 +1930,11 @@ export class StageEngine {
 				skillNames,
 				forcedSkills,
 				_blog,
-				...(curtain ? { curtain } : {}),
+				allowAsk: askEnabled,
 			});
 			if (turn.final) final = turn.final;
 			if (turn.errored) errored = turn.errored;
+			stoppedByUser = turn.stoppedByUser === true;
 			text += turn.text;
 			loopTail = turn.tailText ?? turn.text;
 			curtainText = turn.curtainText ?? "";
@@ -1647,7 +1951,7 @@ export class StageEngine {
 		// M-E 兜底封笔：分段续写完但模型始终没调 draft_seal（催告已给过一轮）。
 		// 8/10 起封笔只是状态切换（验收已整体退役），此处仅补齐工件状态。
 		if (ws.appends > 0 && !ws.sealed && ws.draft.trim()) {
-			runWriteTool(ws, wsDeps, "draft_seal", {});
+			for (let attempt = 0; attempt < 3 && !ws.sealed; attempt++) runWriteTool(ws, wsDeps, "draft_seal", {});
 		}
 
 		// 定稿 = 工作区稿（工件）；工作区空（中断半拍/循环认栽）退回直出正文
@@ -1663,18 +1967,27 @@ export class StageEngine {
 				curtainText = merged.startsWith(ws.draft.trim()) ? merged.slice(ws.draft.trim().length).trim() : "";
 			}
 		} else curtainText = curtainText.trim();
-		if (looksLikeCorruptedModelText(ws.draft) || looksLikeCorruptedModelText(interruptedDraft) || looksLikeCorruptedModelText(fwd.pendingText())) {
+		if (looksLikeCorruptedModelText(ws.draft) || looksLikeCorruptedModelText(interruptedDraft) || looksLikeCorruptedModelText(fwd.pendingText()) || looksLikeCorruptedModelText(text) || looksLikeCorruptedModelText(curtainText)) {
 			corruptOutput = true;
 			errored = "模型返回了异常解码文本，请切换主演模型或稍后重试";
 			curtainText = "";
 			ev.onDraftResync?.([]);
 			ev.onStreamClear?.();
 		}
-		const pendingDraft = aborted && !corruptOutput ? interruptedDraft || fwd.pendingText() : "";
+		const pendingDraft = aborted && !corruptOutput
+			? interruptedDraft || (!enteredAgentLoop ? fwd.pendingText() : "")
+			: "";
 		const narrativeText = aborted
 			? [corruptOutput ? "" : ws.draft.trim(), pendingDraft.trim(), ws.draft.trim() || corruptOutput ? "" : mergeFinalText("", text)].filter(Boolean).join("\n\n")
 			: corruptOutput ? "" : ws.draft.trim() || mergeFinalText("", text);
 		const finalText = [narrativeText, curtainText].filter(Boolean).join("\n\n");
+		// 正文是唯一事实源；对照工件只总结兑现程度，随后由既有 OutlineEngine 读取 rpPrep 校准。
+		if (!aborted && narrativeText && (plotAdaptation || sceneConductor)) {
+			const prompt = buildPlanFactPrompt({ plot: plotAdaptation, scene: sceneConductor, narrative: narrativeText });
+			const result = await this.#sideText("scribe", prompt.systemPrompt, prompt.userText, 2048);
+			if (typeof result === "string") planFact = parsePlanFact(result);
+			else ev.onActivity?.(`计划—事实对照：生成失败（${result.error}），大纲将仅依据正文校准`);
+		}
 
 		// 全流程文字留档：beatLog 时序 + merge 四件全部落进 session JSONL
 		_blog("merge_input_draft", ws.draft);
@@ -1708,14 +2021,19 @@ export class StageEngine {
 				...(narrativeTimeline.length ? { rpTimeline: narrativeTimeline } : {}),
 				...(narrativeText ? { rpNarrative: narrativeText } : {}),
 				...(curtainText.trim() ? { rpCurtain: curtainText.trim() } : {}),
-				rpPrep: {
+					rpPrep: {
 					...(literaryContinuity ? { literaryContinuity } : {}),
 					...(literaryDirection ? { literaryDirection } : {}),
 					...(literaryDirectionData ? { literaryDirectionData } : {}),
+					...(plotAdaptation ? { plotAdaptation } : {}),
+					...(planFact ? { planFact } : {}),
+					...(sceneConductor ? { sceneConductor } : {}),
 					...(config.literaryEcologyEnabled === true ? { literaryEcology } : {}),
 					workflowStatus: {
 						continuity: rerollPrep?.literaryContinuity ? "reused" : continuityRequested ? (literaryContinuity ? "success" : "degraded") : "skipped",
 						director: rerollPrep && (rerollPrep.literaryDirection || rerollPrep.literaryDirectionData) ? "reused" : directorRequested ? (literaryDirection ? "success" : "degraded") : "skipped",
+					plotAdaptation: rerollPrep?.plotAdaptation ? "reused" : plotAdaptationRequested ? (plotAdaptation ? "success" : "degraded") : "skipped",
+					sceneConductor: rerollPrep?.sceneConductor ? "reused" : sceneConductorRequested ? (sceneConductor ? "success" : "degraded") : "skipped",
 						ecologyArrival: rerollPrep?.literaryEcology ? "reused" : arrivalRequested ? (arrivalCandidate ? "success" : "degraded") : "skipped",
 						memoryRecall: memoryRecallRequested ? (memoryRecallBlocks?.length ? "success" : "degraded") : "skipped",
 					},
@@ -1724,6 +2042,8 @@ export class StageEngine {
 							triggered: true,
 							results: memoryRecallBlocks?.length ?? 0,
 							queryChars: lastUserText.length,
+							mode: memoryRecallMode,
+							arcs: memoryArcs.length,
 						},
 					} : {}),
 				},
@@ -1746,8 +2066,12 @@ export class StageEngine {
 					thinkingChars,
 					narrativeChars: draftBodyCharsOf(ws),
 				},
+				rpInputComposition: { ...writerInput, initialChars: writerInitialChars },
 				...(ws.patchAudit.length ? { rpPatchAudit: ws.patchAudit } : {}),
 			};
+			if (userText === null) {
+				if (expectedTurnLeafId && sm.branch) sm.branch(expectedTurnLeafId);
+			}
 			entryId = sm.appendMessage({
 				...final,
 				content: [...keep, { type: "text", text: finalText }],
@@ -1793,6 +2117,9 @@ export class StageEngine {
 		}
 
 		// 空手认栽（循环逼稿一次仍无产出）：明说，不再静默丢拍（实弹三拍 0 字正文的教训）
+		if (stoppedByUser && !finalText) {
+			return { aborted: false };
+		}
 		if (!errored && !aborted && !finalText) {
 			ev.onNotify?.("warning", "本拍模型未交出任何正文（已催稿一次仍空手）——请重试或更换模型。");
 			return { aborted: false, error: "no-draft" };
@@ -1945,13 +2272,132 @@ export class StageEngine {
 			}
 		}
 
+		// 独立谢幕必须读取场记、世界与生态已经提交后的最终分支状态，不在 writer 循环里提前猜。
+		if (entryId && !aborted && narrativeText && curtain) {
+			const curtainLeaf = sm.getLeafId();
+			const settledBranch = sm.getBranch() as BranchEntryLike[];
+			let nextCurtain = finalizeCurtainText("", curtainMaterials.formatPlan);
+			if (curtainMaterials.formatPlan.modelTags.length > 0) {
+				ev.onActivity?.("主演格式收尾：读取拍后最终状态生成非正文格式");
+				const result = await this.#sideText(
+					"writer",
+					`你在执行梨园的独立格式收尾。正文已经冻结；只能生成当前卡 formatPlan 要求的非正文格式。\n\n${curtain}`,
+					JSON.stringify({
+						materials: curtainMaterials,
+						frozen_narrative: narrativeText,
+						current_state: stateFromBranch(settledBranch),
+						current_world: literaryWorldFromBranch(settledBranch),
+						current_ecology: literaryEcologyFromBranch(settledBranch),
+					}, null, 2),
+					curtainMaxTokens(model),
+					undefined,
+				);
+				if (typeof result === "string") nextCurtain = finalizeCurtainText(result, curtainMaterials.formatPlan);
+				else ev.onActivity?.(`主演格式收尾失败（${result.error}），仅保留确定性格式`);
+			}
+			if (sm.getLeafId() === curtainLeaf && nextCurtain.trim()) {
+				sm.appendCustomEntry("rp-curtain-override", {
+					targetEntryId: entryId,
+					curtain: nextCurtain.trim(),
+					createdAt: Date.now(),
+				});
+				sm.flush();
+			} else if (sm.getLeafId() !== curtainLeaf) {
+				ev.onActivity?.("主演格式收尾结果已丢弃（期间切换了分支）");
+			}
+		}
+
 		// M4 长局压缩：攒够拍数就把早期剧情摘要成 rp-summary（装配时回读为【前情提要】）。
 		// 放在谢幕前的最后一步——记账已落，摘要能读到最新账本；叶守卫在 runCompaction 内。
 		// 压缩失败/未到期都只是跳过，下一拍会再判一次。
 		if (entryId && !aborted && finalText) {
 			await this.#compact(config.compactEveryNTurns ?? 30, undefined, entryId);
+			this.#memoryEventWrite = this.#memoryEventWrite
+				.then(() => this.#rollMemoryEvents(entryId))
+				.catch((error) => console.error(`[stage-memory-events] 滚动提取失败：${error instanceof Error ? error.message : String(error)}`));
 		}
 		return { aborted, entryId };
+	}
+
+	/** 每剧情库 N 拍提取一次事件账本；失败不推进游标，下一拍自动扩大窗口重试。 */
+	async #rollMemoryEvents(sourceEntryId: string): Promise<void> {
+		const sm = this.#deps.getSessionManager();
+		const book = this.#deps.eventBook?.(sm.getSessionId());
+		if (!book || !this.#deps.upsertEventDigest) return;
+		const every = Math.max(0, Math.floor(book.everyNTurns()));
+		if (every <= 0) return;
+		const materials = loadStageMaterials(this.#deps.cwd);
+		const skill = workflowSkill(materials.skillFiles, "memory");
+		if (!skill) return;
+		const branch = sm.getBranch() as BranchEntryLike[];
+		const sourceIndex = branch.findIndex((entry) => entry.id === sourceEntryId);
+		if (sourceIndex < 0) return;
+		const bounded = branch.slice(0, sourceIndex + 1);
+		const cursor = book.getCursor();
+		const cursorIndex = cursor ? bounded.findIndex((entry) => entry.id === cursor) : -1;
+		const beatStarts = bounded.map((entry, index) => entry.type === "message" && entry.message?.role === "user" ? index : -1).filter((index) => index >= 0);
+		if (beatStarts.length < every) return;
+		let starts = cursorIndex >= 0 ? beatStarts.filter((index) => index > cursorIndex) : beatStarts.slice(-every);
+		if (starts.length < every) return;
+		starts = starts.slice(-Math.max(every, every * 4));
+		const window = bounded.slice(starts[0]!);
+		let narrative = serializeForSummary(window, materials.config.userName, materials.card.name);
+		if (narrative.length < 20) return;
+		if (narrative.length > 24_000) narrative = narrative.slice(-24_000);
+		const refs: Array<{ entryId: string; entryType?: string; turn?: number }> = [];
+		let turn = 0;
+		for (const entry of window) {
+			if (entry.type === "message" && entry.message?.role === "user") turn++;
+			if (entry.id) refs.push({ entryId: entry.id, entryType: entry.type, ...(turn ? { turn } : {}) });
+		}
+		const existingAll = book.listEvents();
+		const preferred = existingAll.filter((event) => event.importance === "core" || event.importance === "major");
+		const existing = [...preferred, ...existingAll.slice(-30)].filter((event, index, list) => list.findIndex((item) => item.id === event.id) === index).slice(0, 12);
+		const arcs = [...new Set(existingAll.map((event) => event.arc).filter((arc): arc is string => !!arc))].slice(-10);
+		const sys = `你是梨园的记忆整理旁路。遵守工作流 skill 的规则。\n\n# 工作流 skill：剧情记忆摘要\n${skill.body ?? ""}`;
+		const user = `<narrative>\n${narrative}\n</narrative>\n\n<sourceRefs>\n${JSON.stringify(refs)}\n</sourceRefs>\n\n<existing-events>\n${JSON.stringify(existing)}\n</existing-events>\n\n<existing-arcs>\n${JSON.stringify(arcs)}\n</existing-arcs>\n\n请提取事件卡（仅 JSON）。`;
+		const expectedLeaf = sm.getLeafId();
+		const result = await this.#sideText("memoryEvents", sys, user, 4096);
+		if (typeof result !== "string" || sm.getLeafId() !== expectedLeaf) return;
+		const events = parseMemoryEventPayload(result, refs);
+		if (!events) return;
+		const knownIds = new Set(existingAll.map((event) => event.id));
+		const finalIds = new Map<string, string>();
+		let storedCount = 0;
+		let failedCount = 0;
+		for (const event of events) {
+			const mergeTarget = event.op?.startsWith("merge:") ? event.op.slice("merge:".length) : undefined;
+			const finalId = mergeTarget && knownIds.has(mergeTarget)
+				? mergeTarget
+				: canonicalEventId({ sessionId: sm.getSessionId(), card: materials.config.card }, { ...event, sourceRefs: event.sourceRefs.length ? event.sourceRefs : refs });
+			for (const key of [event.id, event.sourceKey].filter((value): value is string => !!value)) finalIds.set(key, finalId);
+		}
+		for (const event of events) {
+			if (event.op === "skip") continue;
+			const sourceRefs = event.sourceRefs.length ? event.sourceRefs : refs;
+			const normalized = {
+				...event,
+				sourceRefs,
+				branchLeafId: expectedLeaf ?? undefined,
+				links: event.links?.map((link) => ({ ...link, to: finalIds.get(link.to) ?? link.to })),
+			};
+			const result = await this.#deps.upsertEventDigest(sm.getSessionId(), normalized).catch(() => ({ stored: false }));
+			if (result?.stored) {
+				storedCount++;
+			} else {
+				failedCount++;
+				this.#deps.events?.onActivity?.(`剧情记忆：事件「${event.title}」入库失败（${(result as { error?: string })?.error ?? "unknown"}）`);
+			}
+		}
+		if (sm.getLeafId() !== expectedLeaf) return;
+		// 游标只在「无事件」或「全部非 skip 事件保存成功」时推进；
+		// 任一失败都不推进，下一拍窗口自动扩大重试（upsert 幂等，不会重复建卡）。
+		if (failedCount === 0) {
+			book.setCursor(sourceEntryId);
+			this.#deps.events?.onActivity?.(events.length ? `剧情记忆：滚动登记/更新 ${storedCount} 条事件` : "剧情记忆：本窗口无高价值事件");
+		} else {
+			this.#deps.events?.onActivity?.(`剧情记忆：${failedCount} 条事件写入失败，游标未推进，下窗口将重试`);
+		}
 	}
 
 	/**
@@ -1993,16 +2439,15 @@ export class StageEngine {
 					// 4096：摘要要装下前情/人物/伏笔/事实账五节，且要合并上一份摘要
 					sideText: (sp, ut) => this.#sideText("compaction", sp, ut, 4096),
 					appendSummaryEntry: (data: RpSummaryData) => sm.appendCustomEntry(SUMMARY_ENTRY_TYPE, data),
-					normalizeSummary: (summary, events) => {
-						const refs = branch
-							.filter((entry) => typeof entry.id === "string")
-							.map((entry) => ({ entryId: entry.id!, entryType: entry.type }));
+					normalizeSummary: (summary, events, refs) => {
+						// refs 来自被压缩区间（compact.ts 统一传入）：摘要别名与事件卡 canonical 种子保持一致。
+						const candidateRefs: Array<{ entryId: string; entryType?: string }> = refs.map((ref) => ({ entryId: ref.entryId, entryType: ref.entryType }));
 						let normalized = summary;
 						for (const event of events) {
-							const eventRefs = event.sourceRefs.filter((ref) => refs.some((candidate) => candidate.entryId === ref.entryId));
+							const eventRefs = event.sourceRefs.filter((ref) => candidateRefs.some((candidate) => candidate.entryId === ref.entryId));
 							const canonical = canonicalEventId(
 								{ sessionId: sm.getSessionId(), card: config.card },
-								{ ...event, sourceRefs: eventRefs.length ? eventRefs : refs },
+								{ ...event, sourceRefs: eventRefs.length ? eventRefs : candidateRefs },
 							);
 							for (const alias of [event.id, event.sourceKey].filter((value): value is string => !!value)) {
 								const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -2015,7 +2460,7 @@ export class StageEngine {
 					archive: this.#deps.archiveCompacted
 						? (text, opts) =>
 									sm.getLeafId() === memoryExpectedLeaf
-									? this.#deps.archiveCompacted!(sm.getSessionId(), text, opts && { sourceRefs: opts.sourceRefs })
+									? this.#deps.archiveCompacted!(sm.getSessionId(), text, opts && { sourceRefs: opts.sourceRefs, perEntry: opts.perEntry })
 									: Promise.resolve()
 						: undefined,
 					// PLAN-RP-MEMORY：事件候选提取（memory workflow skill + 旁路模型）
@@ -2131,7 +2576,9 @@ ${skill.body ?? ""}`;
 		_blog?: (event: string, data: string) => void;
 		/** 有界的独立谢幕格式指令。 */
 		curtain?: string;
-	}): Promise<{ final: AssistantMsgLike | null; errored?: string; text: string; tailText?: string; curtainText?: string; pendingDraft?: string }> {
+		/** 是否向主演暴露 ask 工具。 */
+		allowAsk?: boolean;
+	}): Promise<{ final: AssistantMsgLike | null; errored?: string; text: string; tailText?: string; curtainText?: string; pendingDraft?: string; stoppedByUser?: boolean }> {
 		const rawEv2 = this.#deps.events ?? {};
 		const blog = o._blog ?? (() => {});
 		const ev: typeof rawEv2 = {
@@ -2183,6 +2630,7 @@ ${skill.body ?? ""}`;
 		let curtainInjected = false;
 		let curtainText = "";
 		let loopExhausted = false;
+		let interruptedPending = "";
 		const inject = (text: string) => { blog("injection", text); return nowMsg(text); };
 		// 稿首次落地时的 text 长度：之前的 text 是读题/计划旁白（工具轮的 text 通道产出），
 		// 不算正文也不算尾巴；之后的 text 才是尾巴候选（状态栏等）。-1 = 稿未落地。
@@ -2195,6 +2643,9 @@ ${skill.body ?? ""}`;
 		let directConsumed = false; // o.directText 已被代收进稿
 		let strayFrom = 0; // 代收已消费的 text 前缀长度
 
+		let appendedThisRound = false;
+		let draftMutatedThisRound = false;
+		let planAcceptedThisRound = false;
 		for (let round = 0; round < MAX_ROUNDS; round++) {
 			o.ws.rounds = round + 1;
 			lastConsumed = text.length; // 本轮之前的累计文本
@@ -2218,10 +2669,16 @@ ${skill.body ?? ""}`;
 						// ask 裁决席位同样消失。兜底封笔前补一次（verdictInjected 守卫防循环）。
 						if (!verdictInjected && o.ws.plan.length > 0 && draftBodyCharsOf(o.ws) > 0) {
 							verdictInjected = true;
-							convo.push(nowMsg(verdictInjection(o.wsDeps.userName)));
+							convo.push(nowMsg(verdictInjection(o.wsDeps.userName, o.allowAsk)));
 						} else {
 							// 兜底封笔（催告已给过/全量稿天然封笔）→ 记账：停手不越站
-							if (!o.ws.sealed) runWriteTool(o.ws, o.wsDeps, "draft_seal", {});
+							if (!o.ws.sealed) {
+								const seal = runWriteTool(o.ws, o.wsDeps, "draft_seal", {});
+								if (!seal.ok) {
+									convo.push(nowMsg(seal.text));
+									continue;
+								}
+							}
 							if (!ledgerDone && !ledgerInjected && o.ws.patches.length === 0 && o.ws.panelWrites === 0) {
 								ledgerInjected = true;
 								convo.push(inject(LEDGER_INJECTION));
@@ -2243,7 +2700,7 @@ ${skill.body ?? ""}`;
 							if (nudged) break;
 							nudged = true;
 							convo.push(last);
-							convo.push(nowMsg("工作区仍无正文；请用 draft_append 或 draft_write 提交正文。"));
+							convo.push(nowMsg("工作区仍无正文；请用 draft_append 演出，或 draft_write 一次交完正文。"));
 							continue;
 						}
 						// 宽进严出：直出正文代收为 draft_write（已流式外发过，不重复上屏）。
@@ -2258,7 +2715,7 @@ ${skill.body ?? ""}`;
 						convo.push(last);
 						convo.push(nowMsg(r.ok ? "正文已代收为 draft_write。需要改就重交，不需要就结束。" : r.text));
 					} else {
-						// 空手停笔（实弹三拍 0 字正文的病灶）：逼稿一次，仍空手才认栽
+						// 空手停笔：给一次恢复轮，第二次仍无稿才认栽。
 						if (nudged) break;
 						nudged = true;
 						convo.push(last);
@@ -2267,7 +2724,9 @@ ${skill.body ?? ""}`;
 				}
 			} else {
 				convo.push(last);
-				let appendedThisRound = false;
+				appendedThisRound = false;
+				draftMutatedThisRound = false;
+				planAcceptedThisRound = false;
 				for (const call of calls) {
 					const name = call.name ?? "";
 					let r: ToolRunResult | MediaStageResult;
@@ -2280,7 +2739,7 @@ ${skill.body ?? ""}`;
 							? raw.map((s) => String(s).trim()).filter(Boolean)
 							: [];
 						// 停下来等用户：回合制共创，不设超时；abort 信号透传（用户点停止即收敛）
-						const answer = await this.#deps.askUser(q, options, this.#abort?.signal);
+						const answer = await waitForUserChoice(this.#deps.askUser(q, options, this.#abort?.signal), this.#abort?.signal);
 						o.ws.lookups++; // 用户参与选择＝这一拍有戏（draft_write 门禁判据）
 						if (answer === undefined) {
 							// 用户停止：笔还给用户，本拍收束——标记后跳出循环
@@ -2320,11 +2779,18 @@ ${skill.body ?? ""}`;
 						name === "skill_read" ? (call.arguments as { name?: string } | undefined)?.name : undefined;
 					if (skillReadName && o.forcedSkills.includes(skillReadName)) readThisStep.add(skillReadName);
 					const unreadForced = o.forcedSkills.filter((n) => !readThisStep.has(n));
-					if (name === "draft_append" && appendedThisRound) {
+					if (["draft_append", "draft_write", "draft_edit"].includes(name) && planAcceptedThisRound) {
+						r = {
+							text: "本次写作操作未受理：计划刚刚建立，先读取计划回执并在下一轮构思第一个路标。",
+							activity: "规划与落笔被强制分轮",
+							ok: false,
+						};
+						ev.onDraftResync?.(splitDraftSegments(o.ws.draft));
+					} else if (["draft_append", "draft_write", "draft_edit"].includes(name) && draftMutatedThisRound) {
 						o.ws.appendRejects++;
 						r = {
-							text: "本段未受理：一次模型生成只接收一个稿段。先回看刚写下的上文，判断剩余路标是否仍成立；需要时重拟计划，再在下一轮提交下一段。",
-							activity: "同轮第二段被拦下——先回看重评估",
+							text: "本次写作操作未受理：一次模型生成只接收一次正文写入或修改。先回看权威现稿，再在下一轮继续。",
+							activity: "同轮第二次正文修改被拦下",
 							ok: false,
 						};
 						// 工具参数已经流式上屏；拒收后用权威工作区重同步，撤掉未受理段。
@@ -2350,7 +2816,7 @@ ${skill.body ?? ""}`;
 					) {
 						verdictInjected = true;
 						r = {
-							text: verdictInjection(o.wsDeps.userName),
+							text: verdictInjection(o.wsDeps.userName, o.allowAsk),
 							activity: "封笔暂缓——先判定",
 							ok: false,
 						};
@@ -2378,7 +2844,12 @@ ${skill.body ?? ""}`;
 									? await this.#runReadTool(o, readDeps, name, call.arguments ?? {})
 									: runWriteTool(o.ws, o.wsDeps, name, call.arguments ?? {});
 						}
+					if (name === "beat_plan" && r.ok !== false) planAcceptedThisRound = true;
+					if (["draft_append", "draft_write", "draft_edit"].includes(name) && r.ok !== false) draftMutatedThisRound = true;
 					if (name === "draft_append" && r.ok !== false) appendedThisRound = true;
+					if (r.ok === false && !o.ws.draft.trim() && ["beat_plan", "draft_write", "draft_append"].includes(name)) {
+						convo.push(nowMsg("刚才的写作操作未受理。收缩到用户最新输入的当前场景，不要预写后续；下一轮直接用 draft_append 交出一段眼前正文。"));
+					}
 					// 媒体交付要落成 toolResult 条目（wire 只认树上的 toolResult 出媒体帧）——
 					// 台上引擎默认剥离工具轨迹，故在此单独收集，谢幕后随正文一起落树。
 					const mediaDetails = (r as MediaStageResult).details;
@@ -2442,7 +2913,13 @@ ${skill.body ?? ""}`;
 				)}`.trim();
 			}
 
-			// 五注入日程（工具轮后半程）：seal 之后记账→谢幕；未封笔注进度/判定（§2.3）。
+			// 每次成功落下一段后固定回看一次；回看是内部控制信号，不会进入正文稿纸。
+			if (appendedThisRound && !o.ws.sealed) {
+				convo.push(nowMsg(CREATIVE_REVIEW_INJECTION));
+				ev.onActivity?.("主演分段回看：检查声音、潜台词、节奏与模板化表达");
+			}
+
+			// 五注入日程（工具轮后半程）：seal 之后记账→谢幕；未封笔注进度/判定（§2\.3）。
 			// 停手轮的日程已在上方分支处理；这里只管模型还在干活的轮。
 			if (calls.length > 0) {
 				if (o.ws.sealed) {
@@ -2468,7 +2945,7 @@ ${skill.body ?? ""}`;
 					// 勾完但没落笔 → 继续进度行，判定等正文真出现
 					if (allDone && !verdictInjected && draftBodyCharsOf(o.ws) > 0) {
 						verdictInjected = true;
-						convo.push(nowMsg(verdictInjection(o.wsDeps.userName)));
+						convo.push(nowMsg(verdictInjection(o.wsDeps.userName, o.allowAsk)));
 					} else {
 						replaceProgressLine(convo, progressLine(o.ws));
 					}
@@ -2509,10 +2986,11 @@ ${skill.body ?? ""}`;
 			let final: AssistantMsgLike | null = null;
 			const fwd = this.#draftForwarder(ev);
 			// thinking_delta 入时间线（思考→工具→正文全链）
-			for await (const e of s) {
+			try {
+			for await (const e of streamWithTimeout(s, WRITER_STREAM_TIMEOUT_MS, this.#abort?.signal)) {
 				if (e.type === "done") final = e.message ?? null;
 				else if (e.type === "error") {
-					return { final: e.error ?? null, errored: e.error?.errorMessage || "provider error", text, tailText: tailOf(), pendingDraft: fwd.pendingText() };
+					return { final: e.error ?? null, errored: e.error?.errorMessage || "provider error", text, tailText: tailOf(), pendingDraft: fwd.pendingText() || textOfAssistant(e.error ?? null) || text.slice(lastConsumed) };
 				} else if (e.type === "text_delta" && e.delta) {
 					text += e.delta;
 					if (curtainCall) curtainText += e.delta;
@@ -2527,15 +3005,23 @@ ${skill.body ?? ""}`;
 					fwd.forward(e);
 				}
 			}
+			} catch (error) {
+				return { final: last, errored: error instanceof Error ? error.message : String(error), text, tailText: tailOf(), pendingDraft: fwd.pendingText() || text.slice(lastConsumed) };
+			}
 			if (!final) return { final: last, text, tailText: tailOf() };
 			last = final;
-			if (final.stopReason === "aborted") break;
+			if (final.stopReason === "aborted") {
+				interruptedPending = fwd.pendingText() || textOfAssistant(final) || text.slice(lastConsumed);
+				break;
+			}
 		}
 		// 工具循环触阀时，模型可能已在 reasoning 中完成格式，却尚未产生 text。
 		// 谢幕是正文之外的独立席位：额外给一次无工具交付机会，不受 MAX_ROUNDS 挤占。
-		if (loopExhausted && o.curtain && o.ws.draft.trim() && !curtainText.trim() && last.stopReason !== "aborted") {
+		const imageRequired = Boolean(o.curtain?.includes("当前卡要求图片交付"));
+		const imageDelivered = /<image(?:Tag)?\s*>[\s\S]*?<\/image(?:Tag)?\s*>/i.test(curtainText);
+		if (loopExhausted && o.curtain && o.ws.draft.trim() && (!curtainText.trim() || (imageRequired && !imageDelivered)) && last.stopReason !== "aborted") {
 			convo.push(last);
-			convo.push(nowMsg(`${o.curtain}\n\n【独立交付】上一轮没有产生可见格式。请完成思考后把全部非正文格式输出到正文通道；不要调用工具。\n\n【最终投影状态】\n${JSON.stringify(projectedState(o.ws, o.wsDeps.baseState), null, 2)}`));
+			convo.push(nowMsg(`${o.curtain}\n\n【补交交付】上一轮${curtainText.trim() ? "已生成格式但缺少必需的 NAI 图片块" : "没有产生可见格式"}。请完成思考后把缺失的非正文格式输出到正文通道；至少补交一份完整 <image>... </image> 图片块，不要调用工具。\n\n【最终投影状态】\n${JSON.stringify(projectedState(o.ws, o.wsDeps.baseState), null, 2)}`));
 			ev.onActivity?.("主演格式收尾：独立交付席位");
 			const s = this.#deps.streamFn(
 				o.model,
@@ -2543,7 +3029,8 @@ ${skill.body ?? ""}`;
 				{ ...o.options, maxTokens: curtainMaxTokens(o.model) },
 			);
 			let final: AssistantMsgLike | null = null;
-			for await (const e of s) {
+			try {
+			for await (const e of streamWithTimeout(s, WRITER_STREAM_TIMEOUT_MS, this.#abort?.signal)) {
 				if (e.type === "done") final = e.message ?? null;
 				else if (e.type === "error") {
 					return { final: e.error ?? last, errored: e.error?.errorMessage || "provider error", text, tailText: tailOf(), curtainText };
@@ -2557,9 +3044,12 @@ ${skill.body ?? ""}`;
 					ev.onDelta?.("thinking", e.delta);
 				}
 			}
+			} catch (error) {
+				return { final: last, errored: error instanceof Error ? error.message : String(error), text, tailText: tailOf(), curtainText };
+			}
 			if (final) last = final;
 		}
-		return { final: last, text, tailText: tailOf(), curtainText };
+		return { final: last, text, tailText: tailOf(), curtainText, ...(interruptedPending ? { pendingDraft: interruptedPending } : {}), ...(userStopped ? { stoppedByUser: true } : {}) };
 	}
 
 	/**
@@ -2574,7 +3064,14 @@ ${skill.body ?? ""}`;
 		name: string,
 		args: Record<string, unknown>,
 	): Promise<ToolRunResult> {
-		o.ws.lookups++;
+		const countsAsLookup = name === "world_state_get" || name.startsWith("lorebook_") || name.startsWith("memory_") || name.startsWith("card_") || name.startsWith("worldline_");
+		if (countsAsLookup && o.ws.lookups >= MAX_LOOKUPS) {
+			return {
+				text: `本拍检索已达 ${MAX_LOOKUPS} 次上限。请依据已有结果落笔；查不到的细节应模糊处理，不得臆造。`,
+				activity: `检索达到上限（${MAX_LOOKUPS} 次）`,
+			};
+		}
+		if (countsAsLookup) o.ws.lookups++;
 		return runStageTool(readDeps, name, args, o.language);
 	}
 
@@ -2785,6 +3282,7 @@ ${skill.body ?? ""}`;
 		let auth: { apiKey?: string; headers?: Record<string, string> };
 		try {
 			auth = await this.#deps.getAuth(model);
+			if (model.baseUrl?.includes("magicv4.ltd")) auth.headers = { ...(auth.headers ?? {}), "user-agent": "undici" };
 		} catch (error) {
 			return { error: error instanceof Error ? error.message : String(error) };
 		}
@@ -2807,13 +3305,15 @@ ${skill.body ?? ""}`;
 			...(reasoning !== undefined ? { reasoning } : {}),
 		};
 		const call = async (attempt: number): Promise<string | { error: string }> => {
+			// 每次尝试独立计时；超时也必须走与显式 provider error 相同的重试路径。
+			const attemptSignal = AbortSignal.any([requestController.signal, AbortSignal.timeout(timeoutMs)]);
 			// 旁路是结构化窄任务。第一次优先非流式；若返回空文本，再用原模型形态补试。
 			// 每次底层请求自身最多重试九次，并遵守 provider 退避；流式中途错误同样按退避重试。
 			const callModel = attempt === 0
 				? { ...model, compat: { ...((model.compat as Record<string, unknown> | undefined) ?? {}), streaming: false } }
 				: model;
 			// 限流与瞬时网络错误交给 provider 的退避策略，避免本层无间隔连打形成请求风暴。
-			const callOptions = { ...options, maxRetries: MODEL_MAX_RETRIES };
+			const callOptions = { ...options, signal: attemptSignal, maxRetries: attempt === 0 ? MODEL_MAX_RETRIES : 0 };
 			try {
 			const s = this.#deps.streamFn(
 				callModel,
@@ -2828,7 +3328,10 @@ ${skill.body ?? ""}`;
 				if (e.type === "done") final = e.message ?? null;
 				else if (e.type === "error") {
 					const error = e.error?.errorMessage || `stopReason=${e.error?.stopReason ?? "?"}`;
-					if (requestController.signal.aborted) return { error: "旁路请求已取消或超时" };
+					if (attemptSignal.aborted) {
+						if (!requestController.signal.aborted && attempt < maxRetries) return call(attempt + 1);
+						return { error: "旁路请求已取消或超时" };
+					}
 					// 流式中途失败（如上游 worker 断流）也应退避重试；耗尽后才如实失败。
 					if (attempt < maxRetries) {
 						await new Promise((r) => setTimeout(r, 600 * Math.min(2 ** attempt, 8)));
@@ -2838,7 +3341,10 @@ ${skill.body ?? ""}`;
 				}
 			}
 			if (!final) {
-				if (requestController.signal.aborted) return { error: "旁路请求已取消或超时" };
+				if (attemptSignal.aborted) {
+					if (!requestController.signal.aborted && attempt < maxRetries) return call(attempt + 1);
+					return { error: "旁路请求已取消或超时" };
+				}
 				if (attempt < maxRetries) {
 					await new Promise((r) => setTimeout(r, 500));
 					return call(attempt + 1);
@@ -2852,7 +3358,10 @@ ${skill.body ?? ""}`;
 			// 原 model + response-format 倾向的非流式兼容再试一次，仍失败才如实停链。
 			return { error: "最终消息无文本" };
 		} catch (err) {
-			if (requestController.signal.aborted) return { error: "旁路请求已取消或超时" };
+			if (attemptSignal.aborted) {
+				if (!requestController.signal.aborted && attempt < maxRetries) return call(attempt + 1);
+				return { error: "旁路请求已取消或超时" };
+			}
 			return attempt < maxRetries ? call(attempt + 1) : { error: err instanceof Error ? err.message : String(err) };
 		}
 		};
@@ -2865,7 +3374,8 @@ ${skill.body ?? ""}`;
 			}, timeoutMs);
 		});
 		try {
-			return await Promise.race([request, timeout]);
+			const result = await Promise.race([request, timeout]);
+			return result;
 		} finally {
 			if (timer) clearTimeout(timer);
 			if (signal) signal.removeEventListener("abort", abortRequest);

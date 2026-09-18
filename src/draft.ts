@@ -544,8 +544,9 @@ export function extractDraftRules(blockContents: string[]): DraftRules {
 
 	for (const text of blockContents) {
 		if (!text) continue;
-		// 字数区间：限定在明确谈正文字数的块里（含 摘要 的 200-300 等不取）
-		if (!rules.wordRange && /(正文|response_length|字数限制|字数设定|word_count)/.test(text)) {
+		// 字数目标：兼容社区预设常见的“约 3000 字 / 3000 字左右 / 至少 3000 字”。
+		// 纯摘要块不参与，除非同块明确说的是正文或续写。
+		if (!rules.wordRange && /字|response_length|word_count/i.test(text) && (!/摘要/.test(text) || /(正文|续写)/.test(text))) {
 			const m =
 				/(\d{2,4})\s*(?:[-–—~～]|到|至)\s*(\d{2,4})\s*字/.exec(text) ??
 				/[大]于\s*(\d{2,4})\D{0,14}?[小]于\s*(\d{2,4})/.exec(text);
@@ -554,6 +555,20 @@ export function extractDraftRules(blockContents: string[]): DraftRules {
 				const max = Number(m[2]);
 				if (Number.isFinite(min) && Number.isFinite(max) && min < max && min >= 50) {
 					rules.wordRange = { min, max };
+				}
+				continue;
+			}
+			const atLeast = /(?:至少|不少于|不低于|超过)\s*(\d{2,4})\s*字/.exec(text);
+			if (atLeast) {
+				const min = Number(atLeast[1]);
+				if (Number.isFinite(min) && min >= 50) rules.wordRange = { min, max: Math.round(min * 1.3) };
+				continue;
+			}
+			const approximate = /(?:大概|大约|约|差不多)?\s*(\d{2,4})\s*字(?:左右|上下|附近)?/.exec(text);
+			if (approximate) {
+				const target = Number(approximate[1]);
+				if (Number.isFinite(target) && target >= 50) {
+					rules.wordRange = { min: Math.max(50, Math.round(target * 0.9)), max: Math.round(target * 1.1) };
 				}
 			}
 		}
@@ -595,4 +610,3 @@ export function extractDraftBody(turnText: string): string {
 	t = t.replace(/^\s*<\/?[A-Za-z_一-鿿][\w一-鿿.-]*(\s[^>]*)?>\s*$/gm, "");
 	return t.trim();
 }
-

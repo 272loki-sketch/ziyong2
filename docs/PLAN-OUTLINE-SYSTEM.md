@@ -1,6 +1,6 @@
 # PLAN-OUTLINE-SYSTEM：动态大纲系统
 
-> 2026-08-19。本文描述当前已实现的大纲核心契约。运行代码中的 collection patch 是唯一协议；Skill、审计、持久化与后续 API 接线不得另建 operations 协议。
+> 2026-08-24。本文描述当前已实现的大纲核心契约。运行代码中的 collection patch 是唯一协议；Skill、审计、持久化与后续 API 接线不得另建 operations 协议。
 
 ## 1. 边界与原则
 
@@ -12,17 +12,38 @@
 
 ## 1.1 故事导演讨论室
 
-前端“导演室”是 OutlineEngine 的讨论入口，不是第二个 Writer。它提供五种即时讨论重心：
+前端“导演室”是 OutlineEngine 的讨论入口，不是第二个 Writer。它提供六种即时讨论重心：
 
 - `open` 综合编剧：长期路线与当前场景一起讨论；
 - `next-beat` 下一拍：从当前已提交正文往下，给起手动作、角色主动性、压力、玩家空间和自然停点；
-- `dialogue` 下一段对白：给对话意图、潜台词、信息交换和少量语气参考，不生成需要直接落树的正文；
+- `dialogue` 下一段对白：给对话意图、潜台词、信息交换和少量语气参考；
 - `character` 角色反应：说明当前人物最自然的反应、主动行动、顾虑和行为上限；
-- `diagnose` 节奏诊断：检查拖沓、跳跃、重复、失焦和关系推进过快，并给修正建议。
+- `diagnose` 节奏诊断：检查拖沓、跳跃、重复、失焦和关系推进过快；
+- `daily` 日常剧情：策划可直接拿来演的小剧情卡，含活动、发糖、摩擦、误会、关系变化和停点，禁止写定稿正文和复刻原作专名。
 
-即时建议通过 `sceneAdvice` 返回，包含推荐下一拍、起手、角色动作、建议聊天对象、切入话题、风险、对白线索、玩家空间、混合路线和停点。如果当前不宜直接找人，导演必须给出“先观察/先做事/等待条件变化，再找谁”的混合路线。
+即时建议通过 `sceneAdvice` 返回；日常剧情模式还可通过 `dailyPlan` 返回结构化剧情卡。
+
+`sceneAdvice` 在原有方向建议的基础上，新增了 Goal/Objective 分离的三个字段：
+- `playerObjective` — 用户从此刻处境出发、凭自己看得见的理由会去做的具体动作（只能是用户亲手做的动作，不是 NPC 动作、不是「看着某事发生」）
+- `naturalReason` — 用户凭什么愿意做这个动作（从当前剧情里找得到的自然理由）
+- `intendedConsequence` — 这个动作期望推动什么变化（不需要保证必然发生）
+
+这与 `recommendedBeat`（导演看到的幕后方向）互补——导演看到的是「希望哪条关系/线索/压力发生变化」，用户看到的是「我可以亲手做什么」。
+
+```text
+title genre duration location participants initiator
+surfaceActivity privateIntent
+sweetBeats[] friction misunderstanding characterBoundaries[]
+relationshipChange playerChoices[] stopPoint followUpSeeds[] researchRefs[]
+```
 
 讨论消息以 `rp-outline-chat` 作为当前分支条目保存，随回档、变体和世界线恢复；它不进入主演正文历史，也不改变 `rp-state`、世界或生态权威。只有大纲 `proposal` 经用户在建议箱确认后才写入 `rp-outline`。
+
+日常剧情模式返回 `dailyPlans` 三张机制明显不同的候选，并保留推荐项 `dailyPlan` 兼容字段；三张均随 `rp-outline-chat` 保存。研究机制的标题、适用条件、失败警告与来源分栏展示，小说来源解析为作品名/原始 URL/系统确定性定位，不再把“出处”拼进机制正文。
+
+日常卡确定性门禁要求三张完整候选，并以 `initiativeType/pressureType/choiceType/relationshipEffect` 检查明显换皮；不足或过近时自动重试一次，仍失败则明确报错。每张必须提供 `entryCondition/continuityHook/whyNow`，并覆盖 light/medium/strong 强度，确保方案能从当前已提交剧情自然接起而非随机点子。
+
+讨论历史可通过「清空讨论」按钮重置：追加一条 `rp-outline-chat-clear` 标记条目，`#chats()` 只返回标记之后的聊天记录。清空不影响 `rp-outline`、`rp-outline-proposal` 和任何已提交事实。
 
 ## 2. 当前数据模型
 
@@ -52,6 +73,35 @@ conceived → prepared → planted → reinforced/activated → partially-reveal
 ```
 
 `abandoned|invalidated` 是终止出口。终态不可重开，不能从 conceived 直达 resolved，也不能从 resolved 回退。
+
+## 2.1 弧线形状与拍生命周期
+
+arcs 的 beats 序列构成一条弧线。活跃 beats（状态非 `bypassed|abandoned|contradicted`）按顺序承担不同弧线角色，由 `src/outline/projection.ts` 的纯函数确定性派生：
+
+```text
+computeArcShapeRole(liveWaypoints, currentWaypointId) → { role, index, total }
+
+前 ~1/4：setup  — 低赌注铺垫与埋线
+中间段：rising   — 赌注与张力渐升
+倒数第二：hardest — 全弧最艰难的抉择
+最后一拍：climax — 高潮收束，贯穿线在此落地
+```
+
+角色由活跃 beats 序列**末端锚定**派生：跳过或重构中间 beats 不会让高潮漂移。当 ID 不在活跃序列中或索引越界时返回 `index: -1` 作为明确错误信号。
+
+每个 arc beat 的兑现状态由五种 `OutlineArcBeatOutcome` 区分，而非二元「完成/未完成」：
+
+```text
+progressing — 已有有效迹象，但还不足以标记 fulfilled
+uncertain   — 可能接近但证据不足，保留 active，不提前揭晓
+fulfilled   — 已有可信提交证据，可标记完成并推进下一 beat
+failed      — 剧情朝反方向走；失败是下一拍的输入素材，不是删除剧情的理由。
+              ─ 已发生的后果保留；未执行的后续 soft beats 可标记 bypassed。
+rerouted    — 当前路径不自然或更好的偏航出现；退役剩余 soft beats（标记
+              abandoned 或 bypassed），追加新尾段，新 ID、不复用旧 ID。
+```
+
+用户可通过 `OutlinePaceIntent` 表达短期节奏意图：`seed`（只铺垫）、`normal`（自然推进）、`push`（尽快引爆）、`building`（还想继续）、`climaxing`（开始收束）。它只影响未来编译，不改变既有事实，不直接推进 `rp-state`。
 
 ## 3. 唯一 Proposal 协议
 
@@ -121,7 +171,10 @@ Engine 提交依次 append `rp-outline-proposal(status=approved)` 和 `rp-outlin
 | 剧情自动校准 | `outline-reconcile` | `outlineReconcile` |
 | 伏笔编织 | `outline-foreshadowing` | `outlineForeshadowing`（协议已定义，编排接线可后续补） |
 | 叙事研究提炼 | `outline-research` | `outlineResearch` |
+| 小说研究检索 | `outline-corpus-research` | `outlineCorpusResearch` |
 | 大纲转移审计 | `outline-audit` | `outlineAudit` |
+
+`outlineCorpusResearch` 是导演室的研究子 agent：每次 `chat()` 之前自动运行，读取角色卡绑定的全部 ready 小说研究索引（文档/机制/素材/日常卡），结合当前剧情和大纲，返回本次讨论真正适用的 <=12 条材料。失败或 Skill 缺失时回退到 `projectCorpusWorkspace` 安全投影，不阻塞主导演回复。模型插头走 `outlineCorpusResearch`，未配置时继承 `outlineResearch` → 总插头。
 
 当前路径是 `src/outline/schema.ts|runtime.ts|state.ts|validation.ts|projection.ts|store.ts|research.ts|engine.ts`。模型通过 `OutlineEngineDeps.runSideModel(step, systemPrompt, userText)` 插入，不在 outline 模块自行选模型。
 
@@ -130,27 +183,28 @@ Engine 提交依次 append `rp-outline-proposal(status=approved)` 和 `rp-outlin
 当前已由 `server/main.ts` 将 OutlineEngine 作为 StageEngine 的平级服务接入，并由 `server/rest.ts` 暴露独立 API：
 
 ```text
-GET  /api/outline
-GET  /api/outline/versions
-POST /api/outline/chat
-POST /api/outline/bootstrap
-POST /api/outline/reconcile
-POST /api/outline/proposals/:id/confirm  { proposalHash }
-POST /api/outline/proposals/:id/reject   { reason? }
-GET  /api/outline/research
-POST /api/outline/research/refresh
-PUT  /api/outline/settings               { mode, researchMode }
+GET    /api/outline
+GET    /api/outline/versions
+POST   /api/outline/chat
+POST   /api/outline/bootstrap
+POST   /api/outline/reconcile
+POST   /api/outline/proposals/:id/confirm  { proposalHash }
+POST   /api/outline/proposals/:id/reject   { reason? }
+GET    /api/outline/research
+POST   /api/outline/research/refresh
+PUT    /api/outline/settings               { mode, researchMode }
+DELETE /api/outline/chats                   → { ok, chats: [] }
 ```
 
 confirm 必须查当前 pending，严格匹配 `proposalHash`；Engine 再检查 `baseRevision/baseHash/baseLeafId` 与当前分支。不得让 REST 自行 apply patch、cast proposal 或写 `rp-outline`。
 
 拍后自动校准只在成功定稿、账本/世界/生态结算完成后的 `onTurnEnd` 由宿主异步触发；不进入 writer loop、不阻塞正文。`manual` 不触发，`suggest` 生成 pending，`auto` 只提交确定性低风险提案。下一拍导演只读取最近已提交 revision 的安全投影。
 
-研究资料位于 `.liyuan/outline/research/`：`sources.json` 保存 URL 与来源元数据，`mechanisms.json` 保存抽象机制、适用条件和失败警告，`cards/` 保存卡级引用。它与 ecology global/card pool 相邻但不共写：前者服务长线结构、伏笔和受众经验，后者服务局部可运行事件。查询使用脱敏类别词，不发送角色名、卡全文或用户原话。
+研究资料位于 `.liyuan/outline/research/`：`sources.json` 保存 URL 与来源元数据，`mechanisms.json` 保存抽象机制、适用条件和失败警告，`cards/` 保存卡级引用，`corpus/` 保存小说文档、清洗文本、digest 与结构化素材。小说研究支持用户上传、Kakuyomu 作品 URL 以及显式开启的每日自动发现；文档级最多 3 部并行，研究库写入仍串行。它与 ecology global/card pool 相邻但不共写：前者服务长线结构、伏笔和受众经验，后者服务局部可运行事件。查询使用脱敏类别词，不发送角色名、卡全文或用户原话。
 
 ## 9. 独立前端工作台
 
-`web/src/planning/` 是独立“故事导演”工作台，入口是主输入框右侧的显式「导演室」按钮（也保留在面板菜单与欢迎页），桌面使用宽弹窗并可全屏，移动端全屏。七个页面：综合编剧室、本拍诊断、故事地图、人物弧线、伏笔板、建议箱、版本/研究。主输入框上方是五种讨论模式（综合编剧 / 下一拍 / 下一段对白 / 角色反应 / 节奏诊断）；讨论消息以 `rp-outline-chat` 存入当前分支并随分支恢复。即时回答整理为 `sceneAdvice` 建议卡（推荐下一拍、起手、角色动作、建议聊天对象与切入话题、对白线索、压力、玩家空间、停点、混合路线、备选走法）。讨论结果与 proposal 分离；接受提案时携带 proposal hash，secret 伏笔默认遮挡并需本地明确揭示。
+`web/src/planning/` 是独立“故事导演”工作台，入口是主输入框右侧的显式「导演室」按钮（也保留在面板菜单与欢迎页），桌面使用宽弹窗并可全屏，移动端全屏。九个功能按分组侧栏组织：**创作**（创作对谈 / 提案审阅）、**故事**（故事脉络 / 人物成长 / 伏笔追踪）、**资料**（藏书消化 / 创作素材库）、**系统**（演出回放 / 版本与设置）。主输入框上方是七种讨论模式（综合编剧 / 下一拍 / 下一段对白 / 角色反应 / 节奏诊断 / 日常剧情）；讨论消息以 `rp-outline-chat` 存入当前分支并随分支恢复。即时回答整理为 `sceneAdvice` 或 `dailyPlan` 建议卡。讨论结果与 proposal 分离；接受提案时携带 proposal hash，secret 伏笔默认遮挡并需本地明确揭示。藏书消化页支持上传 txt/epub、Kakuyomu URL 抓取、以及手动触发自动选书（`POST /api/outline/corpus/discover`）；全文消化在 planning 后台进行，不改变 `StageEngine` writer loop。
 
 “本拍诊断”通过 `GET /api/turn-diagnostics` 从当前 Session Tree 动态构造只读投影，不持久化第二套状态。它按拍关联 assistant `details` 与后续已提交条目，展示连续性、Stitches 导演、生态 arrival、主演工作流、账本、事实信封、世界 Proposal/Audit/Commit、生态 aftermath、独立谢幕格式和大纲校准；失败、降级、复用、跳过、待确认与提交状态必须明确区分。投影只发送安全结构化字段和用户已可见的 `rpCurtain`，不发送 prompt、生态秘密或隐藏 reasoning。用户参考见 `docs/DIRECTOR-ROOM.md`。
 
@@ -164,3 +218,17 @@ confirm 必须查当前 pending，严格匹配 `proposalHash`；Engine 再检查
 ## 11. 与 PLAN-ROUND-FLOW 的距离
 
 当前实现把“计划是假设、实弹优先”扩展到跨拍方向，并用严格 patch、证据注册、确认绑定和消费者裁剪避免长期大纲晋升为事实。它没有改变 `beat_plan → draft_append → 回看重评估 → draft_seal`、StageEngine writer loop、模型路由或世界/生态事实链，因此是在不改演出骨架的前提下更接近目标流程。
+
+2026-08-24 的新增（整合自 story-oracle 的弧线机制）：
+- sceneAdvice 新增 `playerObjective / naturalReason / intendedConsequence` 三个字段，把导演建议拆成「幕后方向」与「玩家可见动作」两层
+- `computeArcShapeRole()` 纯函数提供弧线 setup/rising/hardest/climax 的末端锚定派生——跳过中间 beat 不漂移高潮
+- `OutlineArcBeatOutcome` 五态替代二元完成/未完成，区分 progressing/uncertain/fulfilled/failed/rerouted
+- `OutlinePaceIntent` 提供用户可表达的短期节奏意图（只影响未来编译，不改变既有事实）
+- 剧情自动校准 Skill 新增弧线角色与失败吸收指引——失败不是删除，旧尾段退役、新尾段追加新 ID
+
+这些扩展同样没有引入第二套 Writer、绕过 Session Tree 权威或改变 Proposal → Audit → Commit 的唯一协议——它们只增强了大纲的方向精度和导演建议的可执行性。
+
+
+## 研究搜索质量边界（2026-09-01）
+
+研究搜索不是“搜索引擎返回什么就收什么”。原始主题必须保留，中文主题需要片段化匹配，来源至少通过主题相关性门槛；零相关结果必须丢弃。搜索源异常时允许返回空结果，不得用导航页、字典页或产品帮助页填充素材库。历史污染与实战证据见 [`docs/INCIDENT-20260901-RESEARCH-SEARCH.md`](INCIDENT-20260901-RESEARCH-SEARCH.md)。

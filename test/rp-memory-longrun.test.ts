@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { memoryArchiveCompacted, memoryRecallForTurn, memoryUpsertEventDigest, updateMemoryConfig, updateStoreConfig } from "../src/memory/service.ts";
+import { memoryArchiveCompacted, memoryArcRecallForTurn, memoryListEventDigests, memoryRecallForTurn, memoryUpsertEventDigest, updateMemoryConfig, updateStoreConfig } from "../src/memory/service.ts";
 import type { RpEventDigest } from "../src/memory/types.ts";
 
 test("rp-memory 1000-floor simulation: core event remains recallable after normal evidence churn", async () => {
@@ -45,6 +45,33 @@ test("rp-memory 1000-floor simulation: core event remains recallable after norma
 
 		const hidden = await memoryRecallForTurn(cwd, scope, "第一次见面 那把伞", new Set(["entry-turn-1000"]));
 		assert.equal(hidden.length, 0, "兄弟分支/不可见来源不得召回初遇证据");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("rp-memory arc evolution: 同一误会线多次提取→去重合并不超过2张卡 + 线召回弧线完整", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "liyuan-rpmem-arc-evol-"));
+	try {
+		updateMemoryConfig(cwd, { enabled: true, injectOnTurn: true, embedMode: "local", searchTopK: 5 });
+		const scope_ = { sessionId: "arc-evol", card: "assets/cards/test.png" };
+		const makeEvent = (id: string, arc: string, turn: number, title: string, summary: string, importance: RpEventDigest["importance"] = "normal"): RpEventDigest => ({
+			kind: "rp-event-digest", id, sourceKey: id, title, status: "active", importance,
+			tags: [], recallAnchors: [], summary, evidenceLevel: "source-backed",
+			sourceRefs: [{ entryId: `entry-${turn}`, entryType: "message", turn }],
+			turnRange: { from: turn, to: turn }, arc,
+		});
+		await memoryUpsertEventDigest(cwd, scope_, makeEvent("ev01", "初遇误会线", 1, "初遇递伞误会", "男主递伞，女主误认为催债人。", "core"));
+		await memoryUpsertEventDigest(cwd, scope_, makeEvent("ev02", "初遇误会线", 23, "关系恶化", "两人冷战数周。"));
+		await memoryUpsertEventDigest(cwd, scope_, makeEvent("ev03", "初遇误会线", 87, "误会澄清", "女主得知真相，误会解除。", "major"));
+		const events = memoryListEventDigests(cwd, scope_);
+		assert.equal(events.length, 3, "三张不同标题的卡各自独立，未越线合并");
+
+		const arcs = memoryArcRecallForTurn(cwd, scope_, new Set(["entry-1", "entry-23", "entry-87"]));
+		assert.equal(arcs.length, 1, "三张卡同弧→一个弧线块");
+		assert.match(arcs[0].text, /初遇误会线/);
+		assert.match(arcs[0].text, /拍1|拍23|拍87/);
+	assert.match(arcs[0].text, /误会/);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}

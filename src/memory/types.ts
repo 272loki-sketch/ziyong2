@@ -62,6 +62,8 @@ export interface MemoryConfig {
 	stores: MemoryStoreConfig[];
 	/** 作用域维度计数：scopeId → 累计 agent_end 次数 */
 	turnCounters?: Record<string, number>;
+	/** 滚动事件提取游标：scopeId → 上次成功处理到的分支条目 id */
+	eventCursors?: Record<string, string>;
 }
 
 export interface MemoryChunkMeta {
@@ -84,6 +86,8 @@ export interface MemoryChunkMeta {
 	evidenceLevel?: MemoryEvidenceLevel;
 	/** 生成时分支叶（后代分支可继承；兄弟分支不可见） */
 	branchLeafId?: string;
+	/** 事件所属剧情弧线，供扫荡型召回按线聚合。 */
+	arc?: string;
 	/** 导入文件名 */
 	fileName?: string;
 	/** 写入时的嵌入模式，检索时混用会质量差 */
@@ -131,6 +135,15 @@ export interface MemoryStoreStats {
 	maxChunks: number;
 }
 
+export interface MemoryDiffRecord {
+	ts: string;
+	op: "create" | "merge" | "update" | "skip";
+	eventId: string;
+	title: string;
+	arc?: string;
+	reason: string;
+}
+
 export const DEFAULT_CLOUD_EMBED: MemoryCloudEmbed = {
 	baseUrl: "https://api.openai.com/v1",
 	apiKey: "",
@@ -152,6 +165,16 @@ export type MemoryImportance = "core" | "major" | "normal" | "minor";
 
 /** 证据锚定级别：source-backed=有原文可用；summary-only=只有纪要 */
 export type MemoryEvidenceLevel = "source-backed" | "summary-only";
+
+/** 事件之间的显式关系；用于构造因果/演进链，不成为事实权威。 */
+export type RpEventLinkType = "caused_by" | "evolved_from" | "resolved_the" | "contradicts";
+
+export interface RpEventLink {
+	/** 目标事件 canonical id；提取阶段可暂用同批 sourceKey，入库前会重写。 */
+	to: string;
+	type: RpEventLinkType;
+	note?: string;
+}
 
 /** 原文锚点的可定位坐标（PLAN-RP-MEMORY §2.1） */
 export interface MemorySourceRef {
@@ -188,6 +211,12 @@ export interface RpEventDigest {
 	summary: string;
 	evidenceLevel: MemoryEvidenceLevel;
 	branchLeafId?: string;
+	/** 同一长期剧情线的稳定名称（如“初遇误会线”）。 */
+	arc?: string;
+	/** 与其他事件的因果、演进、化解或冲突关系。 */
+	links?: RpEventLink[];
+	/** 提取旁路的去重意图；入库前由编排层消费，不持久化为事实字段。 */
+	op?: "create" | "skip" | `merge:${string}`;
 }
 
 export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
@@ -204,7 +233,7 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
 			kind: "narrative",
 			enabled: true,
 			everyNTurns: 3,
-			maxChunks: 200,
+			maxChunks: 300,
 		},
 		{
 			id: "external",
@@ -216,4 +245,5 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
 		},
 	],
 	turnCounters: {},
+	eventCursors: {},
 };

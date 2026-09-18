@@ -286,6 +286,8 @@ export interface StageSystemOptions {
 	skills?: Array<{ name: string; description: string; resident: boolean; body: string }>;
 	/** false = 不声明工具协议（M1 前过渡形态；M3 起默认开） */
 	tools?: boolean;
+	/** 当前主演是否真的可调用 ask。 */
+	allowAsk?: boolean;
 	/**
 	 * MCP 外设工具（8/06 重接）：本会话已连接的 mcp__ 工具，空/省略＝只字不提。
 	 * 进 system 而非每拍注入——会话内字节稳定，不破前缀缓存（与旧 director.ts 同位置）。
@@ -301,6 +303,7 @@ export function buildStageSystemPrompt({
 	declaredMarkers,
 	skills,
 	tools,
+	allowAsk,
 	mcpTools,
 }: StageSystemOptions): string {
 	const macro: MacroContext = { charName: card.name, userName: config.userName };
@@ -311,13 +314,14 @@ export function buildStageSystemPrompt({
 	// 0) 梨园架构段：讲清脚下的机器怎么转（轮次、思考/扮演/写作三活动的位置、注入帧），供预设自行适配。
 	//    只写架构，不写角色（碰破限）、不教写作（那是预设的教导权）、不举写作细节（工具描述里已有）。
 	//    先于预设装配段：模型最先读到梨园怎么运转，再读预设教它演什么。
-	sections.push(
-		`# 梨园运行架构
+	sections.push(tools === false
+		? `# 梨园运行架构
+当前 API 不支持原生工具调用。本拍使用纯文本主演模式：依据角色卡、当前分支事实和末端材料，直接输出完整的本拍剧情正文。不要输出工具名、JSON、函数调用、计划说明、状态栏或系统解释。`
+		: `# 梨园运行架构
 每拍按轮次推进，你会有多次输出，思考、扮演、写作在轮次中分开进行。
 - 首轮只规划：读题、探索、请用户定夺、列路标。路标是这一步的剧情走向，只到这一步为止。
 - 扮演轮逐路标推进：思考本路标剧情 → 构思怎么落笔 → 产出正文段落 → 推进路标。
-- 每轮出现的【进度】【判定】【记账】是当前状态，以它为准。`,
-	);
+- 每轮出现的【进度】【判定】【记账】是当前状态，以它为准。`);
 
 	// 1) 预设装配段：原文原序，零 harness 引导语。卡/世界书/人设已在预设作者指定的槽位里。
 	if (presetBefore && presetBefore.length > 0) sections.push(presetBefore.join("\n\n"));
@@ -354,9 +358,12 @@ export function buildStageSystemPrompt({
 
 	// M-R1（PLAN-RECTIFY §2.1-5）：纯协议，零扮演词。扮演的每个字都有署名主人（P1）。
 	if (tools !== false) {
+		const askRule = allowAsk
+			? "用户主权未定且此刻不定就无法继续时可调用 `ask`；其余剧情走向由主演依据人物动机和已有事实自行决定。"
+			: "剧情走向由主演依据人物动机和已有事实自行决定，不在中途调用 `ask`，不弹出选择卡。";
 		sections.push(
 			`# 工作方式
-每拍第 1 轮用 \`beat_plan\` 列路标（没有戏的拍可 \`draft_write\` 一次交完）；正文用 \`draft_append\` 逐路标写在稿纸上，写完 \`draft_seal\` 收笔。剧情走向要用户拍板时随时 \`ask\`。每轮注入的【进度】【判定】【记账】【谢幕】是当前状态，以它为准。`,
+每拍第 1 轮用 \`beat_plan\` 列路标（没有戏的拍可 \`draft_write\` 一次交完）；正文用 \`draft_append\` 逐路标写在稿纸上，写完 \`draft_seal\` 收笔。${askRule}每轮注入的【进度】【判定】【记账】【谢幕】是当前状态，以它为准。`,
 		);
 	}
 
@@ -378,6 +385,8 @@ ${index}`,
 
 	sections.push(
 		`# 消息流约定
+- 权威优先级：用户本拍明确输入 ＞ 当前分支已提交正文 ＞【世界状态】/【活跃面板】等已确认动态状态 ＞ 角色卡稳定事实 ＞【前情提要】。这些内容发生冲突时，不得用建议类材料覆盖。
+- 建议类材料：文学画像、用户历史偏好画像、文学导演、生态候选、研究材料和【剧情记忆】中的事件/归档；它们只帮助写得更自然，不能制造事实、覆盖权威或替用户决定。
 - 标注【开场】的消息是 ${card.name} 的既定开场白，剧情从那一刻继续。
 - 标注【前情提要】的消息是更早剧情的接力摘要，是既定事实。
 - 标注【世界状态】的消息是当前事实基准：剧情记忆与它冲突时，以状态为准并在叙事内自然圆回，绝不跳出剧情解释。
@@ -385,11 +394,11 @@ ${index}`,
 - 标注【活跃面板】的消息是各面板的当前内容（用户可能手改过），其中事实为准。
 - 标注【相关设定】的消息是自动附上的世界书参考，按需取用。
 - 标注【设定集索引】的消息是设定条目的标题索引${tools !== false ? "，内容未出现在【相关设定】时可用 `lorebook_search` 取原文" : ""}。
-- 标注【剧情记忆】的消息是历史纪要与原文证据的检索片段：〔事件〕是历史定位、可概括回忆；〔早期归档〕是原文证据、可准确回忆动作/物品/关键对白，但勿整段照抄并按角色当拍能合理知道的范围表达。与当前分支事实冲突以当前为准。`,
+- 标注【剧情记忆】的消息是分层历史：剧情脉络是弧线骨架，只用于把握关系/因果演变；〔事件〕是历史定位、可概括回忆；〔早期归档〕是原文证据、可准确回忆动作/物品/关键对白，但勿整段照抄并按角色当拍能合理知道的范围表达。与当前分支事实冲突以当前为准。`,
 	);
 
 	if (card.systemPrompt) {
-		sections.push(`# 卡作者附加指令（优先级最高）\n${m(card.systemPrompt)}`);
+		sections.push(`# 卡作者附加指令（角色卡权威规则；不得覆盖用户本拍明确输入）\n${m(card.systemPrompt)}`);
 	}
 
 	return sections.join("\n\n");
@@ -444,6 +453,10 @@ export interface StageInjectionOptions {
 	literaryPersonaProfile?: string;
 	/** 拍前 Director 的瞬时候选，只定义叙事压力和玩家停点 */
 	literaryDirection?: string;
+	/** 生态原型按当前剧情卡变形后的本拍事件候选，不是事实。 */
+	plotAdaptation?: string;
+	/** 导演与生态候选汇总后的当前场面行动顺序，不是事实或正文。 */
+	sceneConductor?: string;
 	/** 分支化后台世界状态的裁剪投影；完整状态不直接占用主演上下文。 */
 	literaryWorld?: string;
 	/** 人物、地点、日程与可错过事件的拍前可见投影；秘密只露边界。 */
@@ -454,7 +467,7 @@ export interface StageInjectionOptions {
 	 * PLAN-RP-MEMORY：拍前自动召回的历史纪要与证据（两阶段召回产物）。
 	 * 由装配侧确定性注入；未命中/超时 = 缺省（主演按摘要+状态照常演）。
 	 */
-	memoryRecall?: Array<{ tag: string; kind: "event" | "digest" | "evidence"; text: string }>;
+	memoryRecall?: Array<{ tag: string; kind: "event" | "digest" | "evidence" | "arc"; text: string }>;
 }
 
 /**
@@ -478,6 +491,8 @@ export function buildStageInjection({
 	literaryCharacterProfile,
 	literaryPersonaProfile,
 	literaryDirection,
+	plotAdaptation,
+	sceneConductor,
 	literaryWorld,
 	literaryEcology,
 	writerGuidance,
@@ -509,7 +524,7 @@ export function buildStageInjection({
 
 	if (literaryCharacterProfile) {
 		blocks.push(
-			`【角色校准参考】\n以下内容是基于此前剧情的可修订候选指导，不是已发生事实；角色卡、世界状态和最近正文优先。\n${literaryCharacterProfile}`,
+			`【角色校准参考】\n以下内容是建议层：基于此前剧情的可修订候选指导，不是已发生事实；角色卡、当前分支正文和动态状态优先。\n${literaryCharacterProfile}`,
 		);
 	}
 
@@ -521,9 +536,12 @@ export function buildStageInjection({
 
 	if (literaryDirection) {
 		blocks.push(
-			`【本拍文学导演候选】\n这是拍前决策边界，不是正文、事实、事件清单或 beat_plan。它只约束角色主动性、个人线、幕后线和玩家停点；具体事件、顺序、动作、对白、镜头与段落由随后 beat_plan 决定，不得照抄本块为正文。\n${literaryDirection}`,
+			`【本拍文学导演候选】\n这是建议层的拍前方向，不是正文、事实、事件清单或 beat_plan。它只约束角色主动性、个人线、幕后线和玩家停点；具体事件、顺序、动作、对白、镜头与段落由随后 beat_plan 决定，不得照抄本块为正文。\n${literaryDirection}`,
 		);
 	}
+
+	if (plotAdaptation) blocks.push(plotAdaptation);
+	if (sceneConductor) blocks.push(sceneConductor);
 
 	if (literaryWorld) {
 		blocks.push(
@@ -544,10 +562,13 @@ export function buildStageInjection({
 	}
 
 	if (memoryRecall?.length) {
+		const arcs = memoryRecall.filter((item) => item.kind === "arc");
+		const points = memoryRecall.filter((item) => item.kind !== "arc");
+		const sections: string[] = [];
+		if (arcs.length) sections.push(`— 剧情脉络 —\n${arcs.map((item) => item.text).join("\n")}`);
+		if (points.length) sections.push(`— 相关片段 —\n${points.map((item) => `- 〔${item.tag}〕${item.text}`).join("\n")}`);
 		blocks.push(
-			`【剧情记忆】\n本拍可能触及以下历史（按需自然融入，勿逐字照抄；与当前已提交事实冲突时以当前事实为准）：\n${memoryRecall
-				.map((r) => `- 〔${r.tag}〕${r.text}`)
-				.join("\n")}`,
+			`【剧情记忆】\n本拍可能触及以下历史（按需自然融入，勿逐字照抄；与当前已提交事实冲突时以当前事实为准）：\n${sections.join("\n\n")}`,
 		);
 	}
 

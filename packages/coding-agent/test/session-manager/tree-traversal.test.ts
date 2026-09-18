@@ -28,6 +28,23 @@ describe("SessionManager append and tree traversal", () => {
 			expect(entries[2].parentId).toBe(id2);
 		});
 
+		it("an explicit branch keeps the requested parent even when the JSONL tail is newer", () => {
+			const dir = join(tmpdir(), `session-explicit-branch-${Date.now()}`);
+			mkdirSync(dir, { recursive: true });
+			try {
+				const session = SessionManager.create(dir, join(dir, "sessions"));
+				const userId = session.appendMessage(userMsg("prompt"));
+				session.appendMessage(assistantMsg("first"));
+				session.flush();
+				session.branch(userId);
+				const secondId = session.appendMessage(assistantMsg("second"));
+				const second = session.getEntries().find((entry) => entry.id === secondId);
+				expect(second?.parentId).toBe(userId);
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+
 		it("appendThinkingLevelChange integrates into tree", () => {
 			const session = SessionManager.inMemory();
 

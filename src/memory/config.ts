@@ -47,6 +47,10 @@ export function memoryScopeRoot(cwd: string, scope: MemoryScope): string {
 	return join(memoryRoot(cwd), "scopes", memoryScopeId(scope));
 }
 
+export function memoryDiffPath(cwd: string, scope: MemoryScope): string {
+	return join(memoryScopeRoot(cwd, scope), "memory-diff.jsonl");
+}
+
 function ensureDir(cwd: string): void {
 	const root = memoryRoot(cwd);
 	if (!existsSync(root)) mkdirSync(root, { recursive: true });
@@ -121,6 +125,13 @@ export function normalizeMemoryConfig(raw: unknown): MemoryConfig {
 		o.turnCounters && typeof o.turnCounters === "object" && o.turnCounters
 			? (o.turnCounters as Record<string, number>)
 			: {};
+	const eventCursors =
+		o.eventCursors && typeof o.eventCursors === "object" && o.eventCursors
+			? Object.fromEntries(
+				Object.entries(o.eventCursors as Record<string, unknown>)
+					.filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0),
+			)
+			: {};
 	const embedMode = o.embedMode === "cloud" ? "cloud" : "local";
 	return {
 		version: 1,
@@ -131,6 +142,7 @@ export function normalizeMemoryConfig(raw: unknown): MemoryConfig {
 		cloudEmbed: normalizeCloud(o.cloudEmbed),
 		stores,
 		turnCounters,
+		eventCursors,
 	};
 }
 

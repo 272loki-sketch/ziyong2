@@ -1,5 +1,7 @@
 # 梨园（Liyuan）架构总览
 
+> 当前实现基线：2026-09-18。本文描述已经落地的运行时；早期 PLAN 文档中的待办、旧实验数字和旧状态机不覆盖本文。
+
 > 面向 AI 助手与后续维护者的第一手结构说明：先读本文件，再按需深入各 PLAN 权威文档。
 > 更新准则：任何引擎/提示词改动都要能回答「离 `docs/PLAN-ROUND-FLOW.md` 近了多少」、
 > 「离 `docs/PLAN-RP-MEMORY.md` 近了多少」，并保持「状态进分支树、规则进 Skill、
@@ -26,7 +28,7 @@ rp-summary               = 长局压缩接力摘要（**第二套事实权威**�
 rp-curtain-override      = 状态栏重 Roll 覆盖工件（只改展示）
 rp-turn-diagnostic       = 只读结算留痕（场记结果、不成为第二套账本权威）
 .liyuan/outline/research/corpus/ = 小说消化产物（documents.json / texts / digests；`documents` 入 OutlineResearchView，机制进 mechanisms.json）
-.liyuan-memory           = 检索记忆（向量）：narrative 剧情库（滚动纪要 digest / 事件卡 event / 归档证据 evidence）+ external 额外库；事件卡带原文锚点 sourceRefs，两阶段召回（事件→证据）
+.liyuan-memory           = 检索记忆（SQLite `memory.sqlite`，首访自动迁入旧 jsonl）：narrative 剧情库（事件卡 event / 滚动纪要 digest / 归档证据 evidence）+ external 额外库；事件卡带原文锚点 sourceRefs（逐 entry、精确到 char 区间），两阶段召回（事件→证据），可见性一律「sourceRefs 全落当前祖先链」
 .liyuan/world/cards/<key>/profile.json = 卡级长期世界画像（跨会话）
 StageEngine              = 唯一正文所有者 + 独立谢幕格式轮唯一时机
 ```
@@ -48,12 +50,12 @@ StageEngine              = 唯一正文所有者 + 独立谢幕格式轮唯一�
 | `src/stage/tools.ts` | 台上工具 schema 与执行路由（读侧检索 / 写侧稿纸 / ask） |
 | `src/stage/scribe-run.ts` | 场记兜底记账（主演未记账时） |
 | `src/stage/compact.ts` | 长局压缩（rp-summary v2 两段式增量 + 事件卡提取 + 证据归档） |
-| `src/memory/*` | **记忆服务**（PLAN-RP-MEMORY）：`types.ts` 事件卡/证据类型与分级保活；`store.ts` evictByPriority；`service.ts` 事件卡读写、两阶段召回、归档 sourceRefs、`memoryRecallForTurn` |
+| `src/memory/*` | **记忆服务**（PLAN-RP-MEMORY）：`types.ts` 事件卡/证据类型与分级保活；`store.ts` **SQLite 存储**（`memory.sqlite`，事务/WAL/索引，首访迁入旧 jsonl）与 `evictByPriority`；`service.ts` 事件卡读写、两阶段召回、归档 sourceRefs（逐 entry + char 区间）、`memoryRecallForTurn`、keyed 写锁防并发丢写 |
 | `src/scribe.ts` | 场记提示词 + **接力摘要两段式**（初建 `RP_SUMMARY_SECTIONS` / 增量带 `<previous-summary>`） |
 | `src/stage/diagnostics.ts` | **本拍诊断只读投影**：从 Session Tree 动态构造回合诊断（关联、状态判定、安全裁剪、超大型截断与来源校验） |
 | `src/stage/literary-*.ts` | 文学工作流各步：连续性、Sogon/Sigon、director、world-profile、world-modular、world-transition、world-signals、ecology |
 | `src/outline/` | 独立大纲系统：Schema/runtime parser、分支恢复、Proposal/Audit/Commit、研究库、消费者安全投影与 OutlineEngine |
-| `src/outline/corpus.ts` | **小说长文消化管道**（PLAN-NOVEL-DIGEST）：解码/清洗/分章/分块纯函数 + 文档级最多 3 并行的 CorpusEngine（断点续跑、暂停/恢复/删除、独立取消、预算闸门、docId 幂等、模型层 9 次退避重试 + 文档级自动重试） |
+| `src/outline/corpus.ts` | **小说长文消化管道**（PLAN-NOVEL-DIGEST）：解码/清洗/分章/分块纯函数 + 文档级最多 3 并行的 CorpusEngine（断点续跑、暂停/恢复/删除、独立取消、预算闸门、docId 幂等、单次调用最多 4 次、文档级最多 3 次重入队；研究旁路不叠加 SDK 隐式重试） |
 | `src/outline/corpus-scheduler.ts` | 小说研究自动任务：按本地时间每日调度 Kakuyomu 搜索，候选去重后最多 3 部入 CorpusEngine；不进入正文关键路径 |
 | `src/outline/kakuyomu.ts` | Kakuyomu 作品页与搜索适配器：URL 校验、候选发现、Episode 列表提取、章节正文解析（Apollo State / ruby / 连续段落），用于手动 URL 与每日自动任务 |
 | `src/stage/calendar.ts` | 确定性历法/日期/跨月区间/年度重复投影（纯函数） |
@@ -63,7 +65,7 @@ StageEngine              = 唯一正文所有者 + 独立谢幕格式轮唯一�
 | `server/rest.ts` | REST API（card/config/world-profile/world-state/skills/diagnostics…） |
 | `server/wire.ts` | 会话树 → 前端 wire 协议翻译；`workflowView` 安全投影导演/连续性工件 |
 | `web/src/` | React 前端；`Messages.tsx` 渲染消息、世界/生态卡、本拍工作流卡 |
-| `web/src/planning/` | 独立导演工作台（梨园导演室）：分组侧栏（创作对谈 / 提案审阅 / 故事脉络 / 人物成长 / 伏笔追踪 / 藏书消化 / 创作素材库 / 演出回放 / 版本与设置），七种讨论模式，每 5 秒自动刷新诊断页；支持手动选书与 Kakuyomu URL 抓取 |
+| `web/src/planning/` | 独立导演工作台（梨园导演室）：分组侧栏（创作对谈 / 提案审阅 / 故事脉络 / 人物成长 / 伏笔追踪 / 藏书消化 / 研究搜索 / 创作素材库 / 演出回放 / 版本与设置），七种讨论模式，每 5 秒自动刷新诊断页；支持手动选书与 Kakuyomu URL 抓取、公开资料研究搜索（`POST /api/outline/research/search`） |
 | `skills/` | 内置工作流 Skill（随版本更新） |
 | `.liyuan-stage-skills/` | Skill 用户覆盖（gitignore，不随版本覆盖） |
 | `packages/` | `@liyuan/*` agent 内核（pi fork，file: 依赖）；`packages/ai` 含 provider 请求与重试 |
@@ -80,14 +82,14 @@ StageEngine              = 唯一正文所有者 + 独立谢幕格式轮唯一�
   ├─ 并行：
   │   生态 arrival  ─┐
   │   文学连续性      ─┴→ Promise.all（条件触发）
-  ├─ Stitches 导演（吸收 arrival + continuity + profile）
-  ├─ writer 分轮：beat_plan → draft_append（硬件级门禁：每轮只受理一段，同轮第二个被拒收并计入 appendRejects）→ 回看/重拟 → draft_seal
+  ├─ Stitches 导演（吸收 arrival + continuity + profile，统一处理人物主动性）
+   ├─ writer 分轮：beat_plan（与落笔强制分轮）→ draft_append（每轮只受理一次正文写入）→ 回看/重拟 → draft_seal
   ├─ 主演记账（world_state_update → rp-state）；未记则由场记兜底
   │   └─ 场记结算留痕（rp-turn-diagnostic，记录跳过/失败/丢弃原因）
   ├─ 拍后（并行计算、顺序落树）：
   │   世界链：事实信封 → 到期模块提案 → 独立审计 → TS 门禁 → 原子 commit → rp-world-audit
   │   生态 aftermath → rp-ecology-state
-  ├─ 独立谢幕格式轮 → rpCurtain（格式卡在 agent loop 内生成）
+   ├─ 独立谢幕格式轮 → rpCurtain（场记/世界/生态结算后读取最终分支状态生成）
   ├─ agent end 后：OutlineEngine 按 manual/suggest/auto 异步校准（不阻塞正文；下一拍生效）
   │   └─ 异步校准状态：pending → stable / committed / proposal / failed
   ├─ 压缩（按 everyNTurns，0=关闭自动）
@@ -97,38 +99,31 @@ StageEngine              = 唯一正文所有者 + 独立谢幕格式轮唯一�
 关键设计：
 
 - **正文唯一入口是稿纸**；`draft_append` 一次模型生成轮只接一段（硬门禁）。
-- **计划是假设，不是剧本**：每段后重新评估，可重拟。
+- API 声明或实际表明不支持工具调用时，主演自动切换为纯文本模式：不发送工具清单，第一份完整文本直接收稿；该模式不提供分段工具、主演主动检索或主演主动记账。
+- **计划是假设，不是剧本**：每段后重新评估，可重拟；明确长篇目标时计划上限按 `wordRange` 动态放宽至最多 8 条。
+- 字数目标支持区间、约数和“不少于”表达；正文明显低于目标时前两次 `draft_seal` 会软拒绝，要求继续当前场景。
 - **单拍边界**：默认只能推进当前场景；用户明确要求时间跳转才放行（`transitionAuthorized`）。
+- `transitionAuthorized` 由用户本拍明确的推进/移动意图确定性提取，并同时作用于计划、追加、全量收稿和局部改稿；内部纯文本兜底也不能绕过边界。
 - 正文 `rpNarrative` 与格式 `rpCurtain` 分工件落树；历史只回读正文。
 - 拍后世界/生态在 `agent end` 前完成，保证下拍读到完整分支。
 - 诊断数据只从已落树的 assistant `details`、`rp-turn-diagnostic` 和拍后 custom 条目读取，不新增权威状态。
+- **人物主动性由导演统一分析**；正文关键路径不再按在场角色逐个调用排演模型。
+- 主 writer 每个流请求有 15 分钟硬超时；`ask` 等待有 30 分钟上限。超时、取消或坏网关不能永久占住回合锁。
 
 ---
 
 ## 4. 关键机制的当前形态
 
-### 4.0 记忆系统（PLAN-RP-MEMORY，2026-08-26）
-- **两级纪要 + 原文证据**：一级事件卡（检索投影 + sourceRefs 原文锚定）、二级长期纪要（rp-summary v2）。
-- **数据库式两段提示词**（对齐 pi harness compaction）：初建 / 增量两套固定结构；
-  增量显式「PRESERVE 旧有效信息 / ADD 新事件 / UPDATE 状态 / MOVE 已兑现 → 历史结果」，
-  传 `<previous-summary>` 回读，杜绝「摘要的摘要」漂白。
-- **拍前自动召回**：先用轻量历史触发预判，命中后按用户输入经 `recallForTurn` → 事件 →
-  `recallEvidence` 两阶段召回，注入【剧情记忆】（事件/纪要/证据分标）；不依赖主演主动调
-  `memory_search`。召回有 15 秒预算；缺失/超时/叶切换 → 整块丢弃（降级为摘要+状态照常演）。
-- **分级保活**：`evictByPriority` 替代纯 FIFO——core/major 事件卡保活；原文 evidence 是可回源缓存，
-  允许在容量不足时淘汰，命中事件后优先按 sourceRefs 回 Session Tree，避免数据库无限增长。
-- **摘要 = 第二套事实权威**：早期正文被压缩后不再进上下文，角色记忆/早期事实以
-  rp-summary v2 为准；细节以 .liyuan-memory 归档证据为准（两阶段召回 sourceRefs）。
-- **事件候选提取**：统一摘要 envelope 优先一次生成 `summaryMarkdown + events`；旧 Markdown 才
-  走兼容事件提取。统一事件 ID 由代码生成，压缩/事件旁路 fire-and-forget，不阻塞正文；规则在 Skill，不在 TS。
-- **旁路超时与分级重试**：主演 writer 15 分钟、压缩 120s、事件提取 60s、其余旁路 90s；
-  memoryEvents 只重试 1 次，避免旁路拖死 `agent end`。
-- **可观测性**：本拍诊断新增「剧情记忆召回」「记忆压缩与事件索引」节点；`GET /api/memory/events`
-  暴露事件卡数据面。普通拍不再发云端 embedding 查询（`shouldRecallHistory` 预判门控）。
-- **实弹验证（2026-08-26，实教二年级篇）**：`zhuzhan` 渠道（magicv4.ltd，`deepseek-v4-pro`，见
-  `liyuan-profiles/zhuzhan.json`）演正文稳定（流式不断流），拍前自动召回命中滚动入库记忆、
-  记账/世界链/生态/诊断/滚动入库全链路落树正常。选用正文渠道时优先流式稳定的 provider——hajimi
-  流式端点为概率性 `all cf workers failed to stream`（实测 2/5~4/8），旁路非流式可用。
+### 4.0 记忆系统（PLAN-RP-MEMORY，2026-08-28 迭代）
+- **SQLite 存储后端**：`better-sqlite3` 单文件 `memory.sqlite`（事务 + WAL + 索引）；首访幂等迁入旧 `scopes/**/chunks.jsonl` 与 `memory-diff.jsonl`；写作只读 `searchStore` 过滤 embedding 模型兼容块。
+- **三级金字塔**：弧线骨架（L1 确定性聚合 → 线召回） / 事件卡（L0 检索投影 + sourceRefs） / 原文证据（L2 回源 Session Tree）。每个事件卡带 `arc`（弧线名）、`links`（caused_by / evolved_from / resolved_the / contradicts）与 `op`（提取旁路去重意图）。
+- **滚动事件提取**：每 `everyNTurns` 拍 engine 在正文关键路径外按最老待处理窗口旁路提取（memoryEvents 60s / 重试 1），完整窗口 + `<existing-events>` 去重上下文 → 产出事件卡含 merge/evolved_from 链路 → 入库经代码级 cosine 去重兜底 + 字段合并 + `memory-diff.jsonl` 审计日志。**游标只在全部非 skip 事件保存成功后推进**，失败恢复不跳过旧窗口。
+- **拍前召回分档**：`classifyRecallIntent` 判定 sweep（线召回：弧线骨架块，零模型）vs point（锚词直通 + embedding）；注入 `— 剧情脉络 —` / `— 相关片段 —`，整块 ≤2500 字。
+- **分支隔离收紧**：带 sourceRefs 的内容须**全部 refs 落在当前祖先链**才可见（`every`），并统一应用到自动召回、`memory_search`、事件列表与显式 merge（跨分支 merge 目标无共享来源即拒）。
+- **逐 entry 证据锚点**：压缩归档 perEntry 切块，sourceRefs 精确到 `entryId + charFrom/charTo`；事件→证据两阶段召回优先返回同 entry 且区间重叠的原文块。
+- **摘要严格校验 + canonical 统一**：新生成摘要须通过 `wasEnvelope`/10 节结构校验（纯 Markdown 兜底需 ≥3 标题）；摘要与事件卡共用被压缩区间 refs 作为 canonical 种子，id 不分叉。
+- **分级保活**：event core/major 永不被自动淘汰；event normal 优先级高于 evidence 缓存（可回源 session tree）。
+- **语义去重**：canonical id 命中 → 字段合并非替换（sourceRefs 累积、importance 取高、旧 title 优先）；id 不匹配 → cosine ≥ threshold(local 0.75 / cloud 0.92) → 并入最像旧卡。
 
 ### 4.1 中断 / 错误降级（8/19 实测修复）
 - `#draftForwarder` 记录已实际送显的 `draft_write/append` 参数片段，返回 `pendingText()`。
@@ -139,7 +134,7 @@ StageEngine              = 唯一正文所有者 + 独立谢幕格式轮唯一�
 - 没有 provider final 时，只要有稿，也会合成 aborted assistant 记录。
 
 ### 4.2 请求重试
-- 主演与所有旁路调用：provider 层自动重试，初次之外最多 9 次，遵循退避与 `Retry-After`。
+- 主演与普通旁路调用：provider 层自动重试，初次之外最多 9 次，遵循退避与 `Retry-After`；小说研究旁路关闭该隐式重试，由 CorpusEngine 统一控制。
 - abort signal 立即停止；耗尽重试后已写正文不丢。
 
 ### 4.3 ask 决策门禁
@@ -198,6 +193,42 @@ StageEngine              = 唯一正文所有者 + 独立谢幕格式轮唯一�
 - `Cache-Control: no-store`，非法/浮点/超限 limit 均规范化。
 - 安全性：在实例配置了 access password 时受全局 /api 鉴权保护。
 
+### 4.8 真实渠道验证边界（2026-08-28）
+- 当前正文 writer 使用 `new/gpt-5.6-luna`；该模型带函数工具时不发送未声明支持的 `reasoning_effort` 参数。
+- 真实实教卡回合已确认能进入 StageEngine，并出现计划、路标、选择卡、Skill、面板、
+  记账和拍后世界处理等阶段信号。
+- 该次测试在最终完整收束前中止，故不能宣称真实端到端记忆结算已验收；完整验收必须
+  同时确认 `agent:end`、assistant 正文落树、记忆 settlement 和事件卡 API 结果。
+- 旁路超时会产生降级快照；活动日志本身不代表主流程仍在推进，watchdog 需以正文增量、
+  工具受理、终态和落树结果共同判定。
+
+### 4.9 2026-09-14 演出链与运行时修订
+
+- 预设自然语言篇幅目标已结构化提取：区间、约数和“至少/不少于”均可识别；约 3000 字目标生成最多 6 条路标，最高 8 条。
+- 明确篇幅目标时，正文低于下限的前两次 `draft_seal` 会软拒绝并要求继续当前场景；第三次允许收束，避免无限循环。
+- 正文关键路径移除逐角色模型排演；导演一次性处理人物主动性，`sceneConductor` 只读取导演与生态适配候选。
+- 连接面板选择模型时同步 `stepModels.writer`；设置页保存主演正文插头时同步当前会话模型。两者均为热切换，不要求重启。
+- 带函数工具的 OpenAI 兼容请求仅向明确声明支持 `reasoning_effort` 的模型透传该参数；Luna 等未声明模型按最低公分母发送。
+- 实教二年级篇回归：修复前正文为 642–1085 字；篇幅门禁修复后单回合正文约 2289 字、净正文约 2229 字，稿段 7 段，逐角色排演调用为 0。
+
+### 4.10 2026-09-17 正文稳定性与 API 兼容修订
+
+- 正文在封笔后被追加、重写或编辑时会重新打开封笔，并废弃基于旧稿提交的账本 patch；编辑再次经过格式、段落和单拍边界门禁。
+- `beat_step_done` 必须有正文证据并按未完成路标顺序推进；同一生成轮禁止计划后立即落笔，也禁止第二次正文写入或修改。
+- `MAX_LOOKUPS=3` 由引擎实际执行。主 writer 流有 15 分钟硬超时，`ask` 等待有 30 分钟上限。
+- API 明确不支持工具，或返回文本化 DSML/pseudo-tool 协议时，最多自动降级一次到纯文本主演模式；该模式不伪造工具调用，但仍执行场记和拍后旁路。
+- OpenAI Chat 旧式 `delta.function_call` 会归一为统一 `toolCall`；SessionManager 显式 `branch()` 保留指定父节点，重 Roll 回复保持 sibling。
+- 独立谢幕读取场记、世界和生态结算后的最终分支状态；图片要求由 format plan 推导，诊断读取 `rp-curtain-override`。
+
+### 4.11 2026-09-18 正文输入诊断与记忆可靠性修订
+
+- 正文输入保持既有叙事语义：压缩前使用当前分支活跃历史，压缩后使用 `rp-summary` 加最近保留正文，需要时再注入有限剧情记忆；不把原始角色卡 JSON、小说全文或全部世界书直接全量作为正文输入。
+- 正常正文历史不做额外硬裁剪；每条定稿 assistant 在 `details.rpInputComposition` 记录初次 writer 请求的 `systemChars`、`summaryChars`、`historyChars`、`injectionChars`、`latestUserChars`、`toolSchemaChars` 和 `initialChars`，用于区分正常历史增长与异常素材膨胀。
+- 压缩归档和 envelope 事件写入在 `rp-summary` 追加前完成，避免摘要推进 Session Tree 叶后被叶守卫自行取消。
+- 周期剧情记忆按完整 `everyNTurns` 窗口写入，携带 entry 级 `sourceRefs`、字符区间、拍序和 `branchLeafId`；事件游标从最老待处理窗口推进。
+- narrative digest、event、evidence 共用 keyed lock；SQLite chunk 主键为 `(scope_id, store_id, id)`，避免跨作用域覆盖。
+- 台上与助手的 `memory_search` 命中事件后均可继续获取 evidence；列表与搜索均按当前分支祖先链过滤。旧数据缺少来源锚点时只能按兼容规则处理。
+
 ---
 
 ## 5. 权威文档导航
@@ -211,11 +242,13 @@ StageEngine              = 唯一正文所有者 + 独立谢幕格式轮唯一�
 | `docs/PLAN-LIVING-ECOLOGY.md` | 鲜活世界：三层权威 + running/ready 双池 + 跨域信号 + 失败语义 |
 | `docs/PLAN-OUTLINE-SYSTEM.md` | 动态大纲系统：Proposal/Audit/Commit、伏笔状态机、安全投影、导演室工作台（含本拍诊断） |
 | `docs/PLAN-NOVEL-DIGEST.md` | 小说长文消化与研究库扩容：上传→分块摘要→套路库（§17 含实现状态与未做事项） |
+| `docs/INCIDENT-20260901-NOVEL-DIGEST.md` | 小说研究故障复盘、根因、修复和生产验证 |
 | `docs/STANDALONE-INTEGRATION-BASELINE.md` | 脱离 Luker 的整合基线：权威边界 + Skill 化 + 配置 + REST |
 | `docs/DIRECTOR-ROOM.md` | 导演室用户参考：七种讨论模式、小说研究、即时建议卡、本拍诊断、建议如何转大纲 |
 | `docs/LOCAL-UPSTREAM-UPDATES.md` | VPS 的 `master`/`local` 双分支、安全更新、冲突处理与恢复 |
 | `docs/PRESET-SPLIT-TAXONOMY.md` | 预设拆层：A–I 类去留 |
 | `docs/PLAN-RP-AGENT-EXEC.md` / `docs/PLAN-RP-AGENT.md` | RP agent 编排 |
+| `docs/WRITER-API-COMPATIBILITY.md` | 主演 API 能力矩阵、纯文本降级与运行时保护 |
 | `docs/PLAN-RP-TOOLING.md` | 工具 schema 与写入门禁 |
 | `docs/READING-THINKING.md` | 读思考记录的正确方法（先读再碰会话文件） |
 | `docs/THIRD-PARTY-INSPIRATION.md` | 参考过 ST-SevenDaysCal 与 world-backstage 的能力与来源说明 |
@@ -236,6 +269,9 @@ npm --prefix web run build           # 前端构建
 - 写测试优先断言「正文在树上 + 不记账」，避免把中断误标成成功定稿。
 - 诊断投影测试用伪造分支条目离线验证关联、状态判定、安全裁剪与边界。
 - 新增 `test/diagnostics.test.ts` 覆盖：阶段投影、世界失败、生态降级、limit 解析、旧消息排除、手动操作误归属、预审/审计区分、场记跳过/失败、超大型截断与异步大纲状态。
+- 2026-09-17 回归覆盖：纯文本主演、工具拒绝降级、文本化伪工具识别、旧式 function_call、封笔后稿件变更、重 Roll sibling、结算后谢幕诊断。
+- 2026-09-18 专项回归：压缩真实叶推进、完整 N 拍周期窗口、重复段落字符锚点、混合并发写入、复合主键隔离、长期事件最新来源、正文输入构成诊断。
+- 当前专项结果：相关测试 `147 passed`，前端 typecheck/build 通过；完整套件剩余的 NovelAI UI 和 Outline research 失败不属于正文/记忆主链。
 
 ---
 
@@ -248,4 +284,8 @@ npm --prefix web run build           # 前端构建
 5. **`stream:clear` 语义**：工具轮流出的计划旁白应清屏，不能误当正文保存。
 6. **`transitionAuthorized`**：明确用户推进时间才关闭单拍边界；不要在提示词里放宽或收紧正则导致误伤当前场景地点词。
 7. **诊断归属不求位置**：世界链依赖 `narrativeEntryId`，状态/世界/生态依赖来源标识；不因条目紧邻某一拍就默认归属。
-8. **诊断不展示原始模型输出**：安全投影字段白名单 + 明文裁剪 + 谢幕长度上限 + 提交记录数量上限；不新增不限长度的透传通道。
+8. **主演 API 能力要分级**：禁止生成代码不等于不支持小说；拒绝 `tools` 才触发纯文本降级。完整矩阵和配置示例见 `WRITER-API-COMPATIBILITY.md`。
+9. **诊断不展示原始模型输出**：安全投影字段白名单 + 明文裁剪 + 谢幕长度上限 + 提交记录数量上限；不新增不限长度的透传通道。
+
+> 当前正文剧情链详细实现见：
+> [ARCHITECTURE-RP-PIPELINE-20260902.md](ARCHITECTURE-RP-PIPELINE-20260902.md)

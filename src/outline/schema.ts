@@ -1,12 +1,19 @@
 export const OUTLINE_ENTRY_TYPE = "rp-outline";
 export const OUTLINE_PROPOSAL_ENTRY_TYPE = "rp-outline-proposal";
 export const OUTLINE_CHAT_ENTRY_TYPE = "rp-outline-chat";
+export const OUTLINE_CHAT_CLEAR_TYPE = "rp-outline-chat-clear";
 
-export type OutlineDiscussionFocus = "open" | "next-beat" | "dialogue" | "character" | "diagnose";
+export type OutlineDiscussionFocus = "open" | "next-beat" | "dialogue" | "character" | "diagnose" | "daily";
+export type ArcShapeRole = "setup" | "rising" | "hardest" | "climax";
+export type OutlinePaceIntent = "seed" | "normal" | "push" | "building" | "climaxing";
+export type OutlineArcBeatOutcome = "progressing" | "uncertain" | "fulfilled" | "failed" | "rerouted";
 
 export interface OutlineSceneAdvice {
 	recommendedBeat: string;
 	openingMove: string;
+	playerObjective: string;
+	naturalReason: string;
+	intendedConsequence: string;
 	characterMoves: string[];
 	conversationTargets: Array<{ character: string; reason: string; openingTopic: string; risk: string }>;
 	dialogueCues: string[];
@@ -15,6 +22,16 @@ export interface OutlineSceneAdvice {
 	stopPoint: string;
 	alternatives: string[];
 	mixedRoute: string;
+}
+
+export interface OutlineDailyPlan {
+	title: string; genre: string; duration: string; location: string; participants: string[]; initiator: string;
+	surfaceActivity: string; privateIntent: string; sweetBeats: string[]; friction: string; misunderstanding: string;
+	characterBoundaries: string[]; relationshipChange: string; playerChoices: string[]; stopPoint: string;
+	followUpSeeds: string[]; researchRefs: string[];
+	entryCondition: string; continuityHook: string; whyNow: string;
+	intensity: "light" | "medium" | "strong";
+	initiativeType: string; pressureType: string; choiceType: string; relationshipEffect: string;
 }
 
 export type OutlineNodeStatus = "candidate" | "active" | "blocked" | "fulfilled" | "bypassed" | "abandoned" | "contradicted";
@@ -145,6 +162,8 @@ export interface OutlineChatResult {
 	warnings: string[];
 	focus?: OutlineDiscussionFocus;
 	sceneAdvice?: OutlineSceneAdvice;
+	dailyPlan?: OutlineDailyPlan;
+	dailyPlans?: OutlineDailyPlan[];
 }
 
 export interface OutlineChatEntry {
@@ -157,6 +176,8 @@ export interface OutlineChatEntry {
 	options: unknown[];
 	warnings: string[];
 	sceneAdvice?: OutlineSceneAdvice;
+	dailyPlan?: OutlineDailyPlan;
+	dailyPlans?: OutlineDailyPlan[];
 	createdAt: string;
 }
 

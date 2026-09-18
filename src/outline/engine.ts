@@ -6,11 +6,11 @@ import type { StageMaterials } from "../stage/materials.ts";
 import { workflowSkill } from "../stage/skill-store.ts";
 import type { WebResearchItem } from "../tools/web-research.ts";
 import { buildOutlineAuditPrompt, buildOutlineChatPrompt } from "./prompts.ts";
-import { projectOutline, projectCorpusWorkspace } from "./projection.ts";
+import { projectOutline, projectCorpusResearchIndex, projectCorpusWorkspace, projectSelectedCorpusWorkspace } from "./projection.ts";
 import { OutlineResearchStore, type OutlineResearchExtraction } from "./research.ts";
 import { parseOutlineAudit, parseOutlineProposal } from "./runtime.ts";
-import type { OutlineAudit, OutlineChatEntry, OutlineChatResult, OutlineDiscussionFocus, OutlineProposal, OutlineProposalEntry, OutlineSceneAdvice, OutlineSource } from "./schema.ts";
-import { OUTLINE_CHAT_ENTRY_TYPE, OUTLINE_ENTRY_TYPE, OUTLINE_PROPOSAL_ENTRY_TYPE } from "./schema.ts";
+import type { OutlineAudit, OutlineChatEntry, OutlineChatResult, OutlineDailyPlan, OutlineDiscussionFocus, OutlineProposal, OutlineProposalEntry, OutlineSceneAdvice, OutlineSource } from "./schema.ts";
+import { OUTLINE_CHAT_ENTRY_TYPE, OUTLINE_CHAT_CLEAR_TYPE, OUTLINE_ENTRY_TYPE, OUTLINE_PROPOSAL_ENTRY_TYPE } from "./schema.ts";
 import { outlineHistoryFromBranch } from "./state.ts";
 import { pendingOutlineProposalsFromBranch } from "./store.ts";
 import { validateOutlineProposal } from "./validation.ts";
@@ -39,7 +39,7 @@ export interface OutlineEngineDeps {
 	cwd: string;
 	getSessionManager: () => OutlineSessionManager;
 	loadMaterials: () => StageMaterials;
-	runSideModel: (step: SideModelStep, systemPrompt: string, userText: string, options?: { maxTokens?: number; signal?: AbortSignal; onDelta?: (event: { kind: "text"; delta: string } | { kind: "error"; text: string }) => void }) => Promise<string | { error: string }>;
+	runSideModel: (step: SideModelStep, systemPrompt: string, userText: string, options?: { maxTokens?: number; signal?: AbortSignal; forceNonStreaming?: boolean; onDelta?: (event: { kind: "text"; delta: string } | { kind: "error"; text: string }) => void }) => Promise<string | { error: string }>;
 	webResearch?: (queries: string[], maxResults: number, signal?: AbortSignal) => Promise<WebResearchItem[]>;
 	getContext?: () => OutlineContext;
 	onState?: (view: OutlineView) => void;
@@ -56,6 +56,19 @@ export interface OutlineView {
 export interface OutlinePendingRisk { highRisk: string[]; issues: OutlineAudit["issues"]; requiresConfirmation: boolean }
 interface OutlineCapture { sessionId: string; leafId: string; state: OutlineView["state"]; trustedSources: OutlineSource[]; trustedSourceIds: Set<string> }
 
+export interface OutlineResearchSourceRow { id: string; query: string; title: string; snippet: string; url: string }
+export interface OutlineResearchSearch {
+	/** 实际执行的脱敏检索式。 */
+	queries: string[];
+	/** 每个检索式的原始搜索结果（含 reject/error）。 */
+	results: WebResearchItem[];
+	/** 进提炼模型的去重来源行（带稳定 src-* id），供前端标注机制出处。 */
+	sources: OutlineResearchSourceRow[];
+	/** 本轮提炼出的机制（已入库）。 */
+	extracted: OutlineResearchExtraction[];
+}
+export interface OutlineResearchSearchResult { view: ReturnType<OutlineResearchStore["view"]>; search: OutlineResearchSearch }
+
 export class OutlineConflictError extends Error { statusCode = 409; }
 
 const SETTINGS_TYPE = "rp-outline-settings";
@@ -67,9 +80,25 @@ const parseObject = (text: string): Record<string, unknown> | null => {
 	return null;
 };
 const proposalHash = (proposal: OutlineProposal): string => createHash("sha256").update(JSON.stringify(proposal)).digest("hex");
-const DISCUSSION_FOCUS = new Set<OutlineDiscussionFocus>(["open", "next-beat", "dialogue", "character", "diagnose"]);
+const DISCUSSION_FOCUS = new Set<OutlineDiscussionFocus>(["open", "next-beat", "dialogue", "character", "diagnose", "daily"]);
 const cleanText = (value: unknown, max = 1200): string => typeof value === "string" ? value.trim().slice(0, max) : "";
 const cleanList = (value: unknown, maxItems = 8, maxChars = 500): string[] => Array.isArray(value) ? value.flatMap((item) => typeof item === "string" && item.trim() ? [item.trim().slice(0, maxChars)] : []).slice(0, maxItems) : [];
+function boundContext(value: unknown, budget: { left: number }, depth = 0): unknown {
+	if (budget.left <= 0) return "（上下文已裁剪）";
+	if (typeof value === "string") { const text = value.slice(0, Math.min(2000, budget.left)); budget.left -= text.length; return text; }
+	if (value === null || typeof value === "number" || typeof value === "boolean") return value;
+	if (depth >= 4) return "（嵌套内容已裁剪）";
+	if (Array.isArray(value)) return value.slice(-24).map((item) => boundContext(item, budget, depth + 1));
+	if (typeof value === "object") {
+		const out: Record<string, unknown> = {};
+		for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+			if (budget.left <= 0) break;
+			out[key] = boundContext(item, budget, depth + 1);
+		}
+		return out;
+	}
+	return undefined;
+}
 const conversationTargetsOf = (value: unknown): Array<{ character: string; reason: string; openingTopic: string; risk: string }> => Array.isArray(value) ? value.flatMap((item) => {
 		if (!item || typeof item !== "object" || Array.isArray(item)) return [];
 		const row = item as Record<string, unknown>;
@@ -81,12 +110,31 @@ const sceneAdviceOf = (value: unknown): OutlineSceneAdvice | undefined => {
 	const row = value as Record<string, unknown>;
 	const advice = {
 		recommendedBeat: cleanText(row.recommendedBeat), openingMove: cleanText(row.openingMove),
+		playerObjective: cleanText(row.playerObjective), naturalReason: cleanText(row.naturalReason), intendedConsequence: cleanText(row.intendedConsequence),
 		characterMoves: cleanList(row.characterMoves), conversationTargets: conversationTargetsOf(row.conversationTargets), dialogueCues: cleanList(row.dialogueCues),
 		pressure: cleanText(row.pressure), playerSpace: cleanText(row.playerSpace), stopPoint: cleanText(row.stopPoint), alternatives: cleanList(row.alternatives, 4),
 		mixedRoute: cleanText(row.mixedRoute),
 	};
 	return Object.values(advice).some((item) => Array.isArray(item) ? item.length > 0 : !!item) ? advice : undefined;
 };
+const dailyPlanOf = (value: unknown): OutlineDailyPlan | undefined => {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const row = value as Record<string, unknown>;
+	const plan: OutlineDailyPlan = {
+		title: cleanText(row.title, 180), genre: cleanText(row.genre, 100), duration: cleanText(row.duration, 100), location: cleanText(row.location, 180),
+		participants: cleanList(row.participants, 6, 120), initiator: cleanText(row.initiator, 180), surfaceActivity: cleanText(row.surfaceActivity), privateIntent: cleanText(row.privateIntent),
+		sweetBeats: cleanList(row.sweetBeats, 6), friction: cleanText(row.friction), misunderstanding: cleanText(row.misunderstanding), characterBoundaries: cleanList(row.characterBoundaries, 8),
+		relationshipChange: cleanText(row.relationshipChange), playerChoices: cleanList(row.playerChoices, 6), stopPoint: cleanText(row.stopPoint), followUpSeeds: cleanList(row.followUpSeeds, 6), researchRefs: cleanList(row.researchRefs, 12, 100),
+		entryCondition: cleanText(row.entryCondition), continuityHook: cleanText(row.continuityHook), whyNow: cleanText(row.whyNow),
+		intensity: row.intensity === "light" || row.intensity === "medium" || row.intensity === "strong" ? row.intensity : "medium",
+		initiativeType: cleanText(row.initiativeType, 120), pressureType: cleanText(row.pressureType, 120), choiceType: cleanText(row.choiceType, 120), relationshipEffect: cleanText(row.relationshipEffect, 180),
+	};
+	return plan.title && plan.location && plan.participants.length >= 2 && plan.initiator && plan.surfaceActivity && plan.privateIntent && plan.sweetBeats.length && (plan.friction || plan.misunderstanding) && plan.characterBoundaries.length && plan.relationshipChange && plan.playerChoices.length >= 2 && plan.stopPoint && plan.entryCondition && plan.continuityHook && plan.whyNow && plan.initiativeType && plan.pressureType && plan.choiceType && plan.relationshipEffect ? plan : undefined;
+};
+const dailyPlansOf = (value: unknown): OutlineDailyPlan[] => Array.isArray(value)
+	? value.flatMap((item) => dailyPlanOf(item) ?? []).slice(0, 3)
+	: [];
+const dailyPlansDistinct = (plans: OutlineDailyPlan[]): boolean => plans.length === 3 && plans.every((plan, index) => plans.slice(index + 1).every((other) => [plan.initiativeType === other.initiativeType, plan.pressureType === other.pressureType, plan.choiceType === other.choiceType, plan.relationshipEffect === other.relationshipEffect].filter(Boolean).length < 2));
 
 export class OutlineEngine {
 	#deps: OutlineEngineDeps;
@@ -120,10 +168,17 @@ export class OutlineEngine {
 		if (!skill) throw new Error("缺少 workflow: outline-chat 的 Skill");
 		const focus = options.focus && DISCUSSION_FOCUS.has(options.focus) ? options.focus : "open";
 		const request = { requestId: randomUUID(), message: wish, mode: "manual" as const, baseRevision: base.state.revision, baseHash: base.state.hash, selectedNodeIds: [], research: [], focus };
-		const prompt = buildOutlineChatPrompt(skill.body, { request, outline: base.state, context: this.#modelContext(base.leafId) });
-		const raw = await this.#call("outlineChat", prompt.systemPrompt, prompt.userText, 12288, options.onDelta);
+		const researchWorkspace = await this.#researchForChat(base, focus, wish);
 		this.#guard(base);
-		const parsed = parseObject(raw);
+		const prompt = buildOutlineChatPrompt(skill.body, { request, outline: base.state, context: this.#modelContext(base.leafId, focus, wish, researchWorkspace) });
+		let raw = await this.#call("outlineChat", prompt.systemPrompt, prompt.userText, 12288, options.onDelta);
+		this.#guard(base);
+		let parsed = parseObject(raw);
+		if (focus === "daily" && (!parsed || !dailyPlansDistinct(dailyPlansOf(parsed.dailyPlans)))) {
+			raw = await this.#call("outlineChat", prompt.systemPrompt, `${prompt.userText}\n\n上次输出未通过门禁：必须返回完整且设计指纹不同的 3 张 dailyPlans。请重新只返回完整 JSON。`, 12288);
+			this.#guard(base);
+			parsed = parseObject(raw);
+		}
 		if (!parsed) {
 			const detail = raw.trim().slice(0, 600);
 			throw new Error(detail ? `编剧室输出不可解析（${raw.trim().length} 字）：${detail}` : "编剧室输出为空");
@@ -131,14 +186,29 @@ export class OutlineEngine {
 		const proposal = this.#proposal(parsed.proposal, "chat", base);
 		const answer = String(parsed.answer ?? parsed.reply ?? "").trim();
 		const responseOptions = Array.isArray(parsed.options) ? parsed.options.slice(0, 6) : [];
-		const sceneAdvice = sceneAdviceOf(parsed.sceneAdvice);
+		const sceneAdvice = sceneAdviceOf(parsed.sceneAdvice), dailyPlans = focus === "daily" ? dailyPlansOf(parsed.dailyPlans) : [];
+		if (focus === "daily" && !dailyPlansDistinct(dailyPlans)) throw new Error(`日常剧情卡未通过数量、完整度或差异门禁（有效 ${dailyPlans.length}/3）`);
+		const dailyPlan = dailyPlanOf(parsed.dailyPlan) ?? dailyPlans[0];
 		const warnings = cleanList(parsed.warnings, 8, 500);
+		const usedResearchIds = new Set<string>([
+			...dailyPlans.flatMap((plan) => plan.researchRefs),
+			...(dailyPlan?.researchRefs ?? []),
+			...(Array.isArray(parsed.options) ? parsed.options.flatMap((item) => item && typeof item === "object" && Array.isArray((item as Record<string, unknown>).researchRefs) ? cleanList((item as Record<string, unknown>).researchRefs, 12, 100) : []) : []),
+		]);
+		if (usedResearchIds.size) await this.#research.recordUsage(usedResearchIds, "usedByDirector");
 		const sm = this.#deps.getSessionManager();
-		sm.appendCustomEntry(OUTLINE_CHAT_ENTRY_TYPE, { version: 1, requestId: request.requestId, baseLeafId: base.leafId, focus, user: wish.slice(0, 4000), answer: answer.slice(0, 8000), options: responseOptions, warnings, ...(sceneAdvice ? { sceneAdvice } : {}), createdAt: new Date().toISOString() } satisfies OutlineChatEntry);
+		sm.appendCustomEntry(OUTLINE_CHAT_ENTRY_TYPE, { version: 1, requestId: request.requestId, baseLeafId: base.leafId, focus, user: wish.slice(0, 4000), answer: answer.slice(0, 8000), options: responseOptions, warnings, ...(sceneAdvice ? { sceneAdvice } : {}), ...(dailyPlan ? { dailyPlan } : {}), ...(dailyPlans.length ? { dailyPlans } : {}), createdAt: new Date().toISOString() } satisfies OutlineChatEntry);
 		sm.flush();
 		if (proposal) this.#storePending(proposal);
 		else this.#emit();
-		return { requestId: request.requestId, reply: answer, focus, ...(responseOptions.length ? { options: responseOptions } : {}), ...(sceneAdvice ? { sceneAdvice } : {}), ...(proposal ? { proposal, proposalHash: proposal.proposalHash } : {}), warnings };
+		return { requestId: request.requestId, reply: answer, focus, ...(responseOptions.length ? { options: responseOptions } : {}), ...(sceneAdvice ? { sceneAdvice } : {}), ...(dailyPlan ? { dailyPlan } : {}), ...(dailyPlans.length ? { dailyPlans } : {}), ...(proposal ? { proposal, proposalHash: proposal.proposalHash } : {}), warnings };
+	}
+
+	clearChats(): void {
+		const sm = this.#deps.getSessionManager();
+		sm.appendCustomEntry(OUTLINE_CHAT_CLEAR_TYPE, { clearedAt: new Date().toISOString() });
+		sm.flush();
+		this.#emit();
 	}
 
 	async bootstrap(experienceWish = ""): Promise<OutlineProposal> {
@@ -195,20 +265,30 @@ export class OutlineEngine {
 	/** 删除文档后清理只被该文档引用的机制条目（CorpusEngine onRemoved 钩子）。 */
 	removeCorpus(docId: string): Promise<number> { return this.#research.removeCorpus(docId); }
 
-	async research(topic = ""): Promise<ReturnType<OutlineResearchStore["view"]>> {
+	async research(topic = ""): Promise<ReturnType<OutlineResearchStore["view"]>> { return (await this.#researchRun(topic)).view; }
+
+	/** 带本次搜索详情的版本：导演室「研究搜索」页展示搜到的来源与本轮提炼结果。 */
+	async researchSearch(topic = ""): Promise<OutlineResearchSearchResult> { return this.#researchRun(topic); }
+
+	async #researchRun(topic = ""): Promise<OutlineResearchSearchResult> {
 		if (!this.#deps.webResearch) throw new Error("当前环境没有启用联网研究");
 		const context = this.#deps.getContext?.();
 		const queries = this.#safeQueries(topic, context);
 		const rows = await this.#deps.webResearch(queries, 5, this.#abort.signal);
 		const materials = this.#deps.loadMaterials(), skill = workflowSkill(materials.skillFiles ?? [], "outline-research");
 		let extracted: OutlineResearchExtraction[] = [];
+		const sources: OutlineResearchSourceRow[] = [];
 		if (skill) {
-			const sourceRows = rows.flatMap((item) => item.results.map((result) => {
+			const sourceRows = rows.flatMap((item) => (item.results ?? []).map((result) => {
 				let url = ""; try { url = new URL(result.url).toString(); } catch { return null; }
 				return { id: `src-${createHash("sha256").update(url).digest("hex").slice(0, 16)}`, query: item.query, title: result.title.slice(0, 180), snippet: result.snippet.slice(0, 600), url };
 			}).filter((row): row is NonNullable<typeof row> => !!row)).slice(0, 30);
+			sources.push(...sourceRows);
 			if (sourceRows.length) {
-				const parsed = parseObject(await this.#call("outlineResearch", skill.body, JSON.stringify({ task: "outline-research", sources: sourceRows }, null, 2), 8192));
+				let raw: string | { error: string };
+				try { raw = await this.#call("outlineResearch", skill.body, JSON.stringify({ task: "outline-research", sources: sourceRows }, null, 2), 8192); }
+				catch (error) { console.error(`[research] 提炼调用失败（保留来源）：${error instanceof Error ? error.message : String(error)}`); raw = { error: String(error) }; }
+				const parsed = typeof raw === "string" ? parseObject(raw) : null;
 				if (Array.isArray(parsed?.mechanisms)) extracted = parsed.mechanisms.flatMap((item): OutlineResearchExtraction[] => {
 					if (!item || typeof item !== "object" || Array.isArray(item)) return [];
 					const row = item as Record<string, unknown>;
@@ -217,13 +297,55 @@ export class OutlineEngine {
 				});
 			}
 		}
-		return this.#research.merge(context?.cardKey ?? materials.config.card, rows, extracted);
+		const view = await this.#research.merge(context?.cardKey ?? materials.config.card, rows, extracted);
+		if (sources.length) {
+			this.#research.appendSearchLog({
+				id: `search-${randomUUID().slice(0, 8)}`,
+				createdAt: new Date().toISOString(),
+				topic: topic.trim().slice(0, 200),
+				queries,
+				sources,
+				extracted,
+			});
+		}
+		return { view, search: { queries, results: rows, sources, extracted } };
+	}
+
+	/** 研究搜索历史（导演室「研究搜索」保留回看）。 */
+	researchSearchLogs(): ReturnType<OutlineResearchStore["searchHistory"]> { return this.#research.searchHistory(); }
+
+	/** 对某条保留的搜索结果再次提炼（来源已留存，不重新联网）。 */
+	async researchRetrySearchExtraction(logId: string): Promise<OutlineResearchSearchResult> {
+		const log = this.#research.searchHistory().find((row) => row.id === logId);
+		if (!log) throw new Error("搜索历史不存在");
+		if (!log.sources.length) throw new Error("该搜索记录没有保留来源，无法再次提炼");
+		const materials = this.#deps.loadMaterials(), skill = workflowSkill(materials.skillFiles ?? [], "outline-research");
+		if (!skill) throw new Error("缺少 workflow: outline-research 的 Skill");
+		const context = this.#deps.getContext?.();
+		const rows: WebResearchItem[] = log.queries.map((query) => ({ query, results: log.sources.filter((s) => s.query === query).map(({ title, url, snippet }) => ({ title, url, snippet })) })).filter((row) => (row.results?.length ?? 0) > 0);
+		let extracted: OutlineResearchExtraction[] = [];
+		if (log.sources.length) {
+			let raw: string | { error: string };
+			try { raw = await this.#call("outlineResearch", skill.body, JSON.stringify({ task: "outline-research", sources: log.sources }, null, 2), 8192); }
+			catch (error) { console.error(`[research] 再次提炼失败（保留来源）：${error instanceof Error ? error.message : String(error)}`); raw = { error: String(error) }; }
+			const parsed = typeof raw === "string" ? parseObject(raw) : null;
+			if (Array.isArray(parsed?.mechanisms)) extracted = parsed.mechanisms.flatMap((item): OutlineResearchExtraction[] => {
+				if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+				const row = item as Record<string, unknown>;
+				if (typeof row.mechanism !== "string" || typeof row.appliesWhen !== "string" || typeof row.failureWarning !== "string" || !Array.isArray(row.sourceIds) || !row.sourceIds.every((id) => typeof id === "string")) return [];
+				return [{ mechanism: row.mechanism, appliesWhen: row.appliesWhen, failureWarning: row.failureWarning, sourceIds: row.sourceIds }];
+			});
+		}
+		if (extracted.length) await this.#research.merge(context?.cardKey ?? materials.config.card, rows, extracted);
+		const updated = this.#research.updateSearchLogExtracted(logId, extracted);
+		const view = this.#research.view(context?.cardKey ?? materials.config.card);
+		return { view, search: { queries: log.queries, results: rows, sources: log.sources, extracted: updated?.extracted ?? extracted } };
 	}
 
 	async #generate(workflow: "outline-bootstrap" | "outline-reconcile", step: SideModelStep, kind: "bootstrap" | "reconcile", wish: string, store = true): Promise<OutlineProposal> {
 		const base = this.#capture(), materials = this.#deps.loadMaterials(), skill = workflowSkill(materials.skillFiles, workflow);
 		if (!skill) throw new Error(`缺少 workflow: ${workflow} 的 Skill`);
-		const raw = await this.#call(step, skill.body, JSON.stringify({ task: workflow, baseLeafId: base.leafId, current_outline: base.state, experience_wish: wish, context: this.#modelContext(base.leafId) }, null, 2), 16384);
+		const raw = await this.#call(step, skill.body, JSON.stringify({ task: workflow, baseLeafId: base.leafId, current_outline: base.state, experience_wish: wish, context: this.#modelContext(base.leafId, "open", wish) }, null, 2), 16384);
 		this.#guard(base);
 		const proposal = this.#proposal(parseObject(raw), kind, base);
 		if (!proposal) throw new Error(`${workflow} 输出没有可解析 proposal`);
@@ -288,31 +410,97 @@ export class OutlineEngine {
 		if (at < 0) return true;
 		return branch.slice(at + 1).some((row) => {
 			if (row.type === "user" || row.type === "assistant" || row.message?.role === "user" || row.message?.role === "assistant") return true;
-			return row.type === "custom" && ![OUTLINE_CHAT_ENTRY_TYPE, OUTLINE_PROPOSAL_ENTRY_TYPE, SETTINGS_TYPE].includes(String(row.customType));
+			return row.type === "custom" && ![OUTLINE_CHAT_ENTRY_TYPE, OUTLINE_CHAT_CLEAR_TYPE, OUTLINE_PROPOSAL_ENTRY_TYPE, SETTINGS_TYPE].includes(String(row.customType));
 		});
 	}
 	#chats(branch: BranchEntryLike[]): OutlineChatEntry[] {
-		return branch.flatMap((row): OutlineChatEntry[] => {
+		let lastClear = -1;
+		for (let i = branch.length - 1; i >= 0; i--) {
+			if (branch[i].type === "custom" && branch[i].customType === OUTLINE_CHAT_CLEAR_TYPE) { lastClear = i; break; }
+		}
+		return branch.flatMap((row, i): OutlineChatEntry[] => {
+			if (i <= lastClear) return [];
 			if (row.type !== "custom" || row.customType !== OUTLINE_CHAT_ENTRY_TYPE || !row.data || typeof row.data !== "object" || Array.isArray(row.data)) return [];
 			const raw = row.data as Partial<OutlineChatEntry>;
 			if (raw.version !== 1 || typeof raw.requestId !== "string" || typeof raw.baseLeafId !== "string" || typeof raw.user !== "string" || typeof raw.answer !== "string" || !DISCUSSION_FOCUS.has(raw.focus as OutlineDiscussionFocus)) return [];
-			return [{ version: 1, requestId: raw.requestId, baseLeafId: raw.baseLeafId, focus: raw.focus as OutlineDiscussionFocus, user: raw.user.slice(0, 4000), answer: raw.answer.slice(0, 8000), options: Array.isArray(raw.options) ? raw.options.slice(0, 6) : [], warnings: cleanList(raw.warnings, 8, 500), ...(raw.sceneAdvice ? { sceneAdvice: sceneAdviceOf(raw.sceneAdvice) } : {}), createdAt: typeof raw.createdAt === "string" ? raw.createdAt : "" }];
+			return [{ version: 1, requestId: raw.requestId, baseLeafId: raw.baseLeafId, focus: raw.focus as OutlineDiscussionFocus, user: raw.user.slice(0, 4000), answer: raw.answer.slice(0, 8000), options: Array.isArray(raw.options) ? raw.options.slice(0, 6) : [], warnings: cleanList(raw.warnings, 8, 500), ...(raw.sceneAdvice ? { sceneAdvice: sceneAdviceOf(raw.sceneAdvice) } : {}), ...(raw.dailyPlan ? { dailyPlan: dailyPlanOf(raw.dailyPlan) } : {}), ...(Array.isArray(raw.dailyPlans) ? { dailyPlans: dailyPlansOf(raw.dailyPlans) } : {}), createdAt: typeof raw.createdAt === "string" ? raw.createdAt : "" }];
 		}).slice(-80);
 	}
 	#settings(branch: BranchEntryLike[]): OutlineSettings { for (let i = branch.length - 1; i >= 0; i--) { const row = branch[i]; if (row.type === "custom" && row.customType === SETTINGS_TYPE && row.data && typeof row.data === "object") { const data = row.data as Partial<OutlineSettings>; return { mode: ["manual", "suggest", "auto"].includes(String(data.mode)) ? data.mode! : "manual", researchMode: ["off", "manual", "auto"].includes(String(data.researchMode)) ? data.researchMode! : "off" }; } } return { mode: "manual", researchMode: "off" }; }
-	#modelContext(leafId: string): unknown { const context = this.#deps.getContext?.() ?? { cardKey: this.#deps.loadMaterials().config.card }; return { baseLeafId: leafId, ...context, trustedEvidenceRegistry: this.#trustedSources(this.#branch()).map(({ id, kind, title, locator }) => ({ id, kind, title, locator })), researchWorkspace: projectCorpusWorkspace(this.#research.view(context.cardKey), { maxDocs: 3 }) }; }
+	#modelContext(leafId: string, focus: OutlineDiscussionFocus = "open", query = "", researchWorkspace = projectCorpusWorkspace(this.#research.view(this.#deps.getContext?.()?.cardKey ?? this.#deps.loadMaterials().config.card), { maxDocs: 3, maxAssets: 8, focus, query })): unknown {
+		const context = this.#deps.getContext?.() ?? { cardKey: this.#deps.loadMaterials().config.card };
+		const budget = { left: 70_000 };
+		return {
+			baseLeafId: leafId,
+			cardKey: context.cardKey,
+			card: boundContext(context.card, budget),
+			history: boundContext(context.history, budget),
+			rpState: boundContext(context.rpState, budget),
+			world: boundContext(context.world, budget),
+			ecology: boundContext(context.ecology, budget),
+			literaryProfiles: boundContext(context.literaryProfiles, budget),
+			directorArtifacts: boundContext(context.directorArtifacts, budget),
+			trustedEvidenceRegistry: this.#trustedSources(this.#branch()).map(({ id, kind, title, locator }) => ({ id, kind, title, locator })),
+			researchWorkspace,
+		};
+	}
+	async #researchForChat(base: OutlineCapture, focus: OutlineDiscussionFocus, query: string): Promise<ReturnType<typeof projectCorpusWorkspace>> {
+		const context = this.#deps.getContext?.() ?? { cardKey: this.#deps.loadMaterials().config.card };
+		const view = this.#research.view(context.cardKey);
+		const fallback = projectCorpusWorkspace(view, { maxDocs: 3, maxAssets: 8, focus, query });
+		const index = projectCorpusResearchIndex(view);
+		if (!index.documents.length && !index.items.length) return fallback;
+		const materials = this.#deps.loadMaterials();
+		const skill = workflowSkill(materials.skillFiles ?? [], "outline-corpus-research");
+		if (!skill) return fallback;
+		const budget = { left: 24_000 };
+		const storyContext = this.#deps.getContext?.() ?? { cardKey: context.cardKey };
+		const userText = JSON.stringify({
+			task: "outline-corpus-research",
+			request: { focus, query },
+			current_outline: projectOutline(base.state, "director"),
+			story: {
+				history: boundContext(storyContext.history, budget),
+				rpState: boundContext(storyContext.rpState, budget),
+				world: boundContext(storyContext.world, budget),
+				ecology: boundContext(storyContext.ecology, budget),
+				literaryProfiles: boundContext(storyContext.literaryProfiles, budget),
+			},
+			researchIndex: index,
+		}, null, 2);
+		try {
+			const parsed = parseObject(await this.#call("outlineCorpusResearch", skill.body, userText, 8192));
+			const selections = Array.isArray(parsed?.selections) ? parsed.selections : [];
+			const ids = new Set<string>();
+			const known = new Set([...index.documents, ...index.items].map((row) => row.id));
+			for (const raw of selections) {
+				if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+				const id = typeof (raw as Record<string, unknown>).id === "string" ? (raw as Record<string, string>).id : "";
+				if (known.has(id)) ids.add(id);
+				if (ids.size >= 12) break;
+			}
+			if (ids.size) await this.#research.recordUsage(ids, "selected");
+			return ids.size ? projectSelectedCorpusWorkspace(view, ids, { maxItems: 12 }) : { documents: [], mechanisms: [], assets: [], dailyPatterns: [] };
+		} catch {
+			return fallback;
+		}
+	}
 	#trustedSources(branch: BranchEntryLike[]): OutlineSource[] { return branch.flatMap((row): OutlineSource[] => { const id = typeof row.id === "string" && row.id ? `branch:${row.id}` : ""; if (!id) return []; const kind: OutlineSource["kind"] | null = row.type === "assistant" || row.message?.role === "assistant" || ["rp-greeting", "rp-edited-reply"].includes(String(row.customType)) ? "narrative" : row.type === "user" || row.message?.role === "user" ? "user" : row.customType === "rp-state" ? "rp-state" : row.customType === "rp-world-state" || row.customType === "rp-ecology-state" ? "world" : null; return kind ? [{ id, kind, title: `${kind} ${row.id}`, locator: String(row.id), note: "由当前分支引擎注册的已提交证据" }] : []; }); }
 	#safeQueries(topic: string, context?: OutlineContext): string[] {
-		const source = topic.toLowerCase(), abstractTopic = [
-			/关系|感情|恋爱|慢热/.test(source) ? "慢热关系与互信推进" : "",
-			/悬疑|谜|伏笔|秘密/.test(source) ? "悬疑伏笔与公平回收" : "",
-			/校园|考试|班级|竞争|联盟/.test(source) ? "封闭校园制度竞争与联盟博弈" : "",
-			/人物|人设|角色/.test(source) ? "人物弧线与角色主动性" : "",
-		].filter(Boolean).join(" ") || "长篇故事人物弧线与结构";
-		const tags = [`${abstractTopic} 叙事压力 选择 后果`, `${abstractTopic} 书评 影评 节奏 失败原因`, `${abstractTopic} 异质题材 可复用结构 负面案例`];
+		const source = topic.trim().toLowerCase();
+		const abstractTopic = [
+			/关系|感情|恋爱|慢热|争风吃醋|吃醋|嫉妒|追求|告白|迷弟/.test(source) ? "关系推进与人物主动性" : "",
+			/悬疑|谜|伏笔|秘密|反转/.test(source) ? "悬疑伏笔与公平回收" : "",
+			/校园|学院|考试|班级|竞争|联盟/.test(source) ? "校园竞争与联盟博弈" : "",
+			/人物|人设|角色|弧线/.test(source) ? "人物弧线与角色主动性" : "",
+			/日常|生活/.test(source) ? "日常场景与关系变化" : "",
+		].filter(Boolean).join(" ") || "人物关系与叙事结构";
+		// 原始主题必须保留；分类词只用于扩展检索语境，不能把用户主题替换成泛化问题。
+		const subject = `${topic.trim().slice(0, 100)} ${abstractTopic}`.trim();
+		const tags = [`${subject} 叙事压力 选择 后果`, `${subject} 书评 影评 节奏 失败原因`, `${subject} 可复用结构 负面案例`];
 		const forbidden = [this.#deps.loadMaterials().card.name, this.#deps.loadMaterials().config.userName, context?.cardKey ?? ""].filter((x): x is string => typeof x === "string" && x.length >= 2);
 		return tags.map((query) => forbidden.reduce((safe, secret) => safe.replaceAll(secret, " "), query).replace(/\s+/g, " ").trim()).filter(Boolean);
 	}
-	async #call(step: SideModelStep, system: string, user: string, maxTokens: number, onDelta?: (event: { kind: "text"; delta: string } | { kind: "error"; text: string }) => void): Promise<string> { const result = await this.#deps.runSideModel(step, system, user, { maxTokens, signal: this.#abort.signal, ...(onDelta ? { onDelta } : {}) }); if (typeof result !== "string") throw new Error(result.error); return result; }
+	async #call(step: SideModelStep, system: string, user: string, maxTokens: number, onDelta?: (event: { kind: "text"; delta: string } | { kind: "error"; text: string }) => void): Promise<string> { const result = await this.#deps.runSideModel(step, system, user, { maxTokens, signal: this.#abort.signal, forceNonStreaming: true, ...(onDelta ? { onDelta } : {}) }); if (typeof result !== "string") throw new Error(result.error); return result; }
 	#emit(): void { this.#deps.onState?.(this.getView()); }
 }

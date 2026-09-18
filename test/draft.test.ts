@@ -124,6 +124,13 @@ test("extractDraftRules：只提取字数目标（8/10 验收退役——禁词/
 	assert.deepEqual(extractDraftRules(["纯文风描述，无机械约束。"]), {}, "无字数块→空规则");
 });
 
+test("extractDraftRules：识别社区预设的单值与下限字数表达", () => {
+	assert.deepEqual(extractDraftRules(["先写大概3000字让我看看吧。直接输出续写内容。"]).wordRange, { min: 2700, max: 3300 });
+	assert.deepEqual(extractDraftRules(["正文不少于2000字。"]).wordRange, { min: 2000, max: 2600 });
+	assert.deepEqual(extractDraftRules(["全篇约1000字左右。"]).wordRange, { min: 900, max: 1100 });
+	assert.equal(extractDraftRules(["摘要约300字。"]).wordRange, undefined, "纯摘要字数不能污染正文目标");
+});
+
 test("isPoliceBlock：纪律块（禁词/八股/比喻/句式）判真；文风/字数/格式块判假", () => {
 	// 纪律块——精修专用，不进写作上下文（四阶段供料）
 	assert.equal(isPoliceBlock('## 禁八股\n<anti_clich>\n词汇黑名单 = { "像是", "一秒" }\n</anti_cliche>'), true);
@@ -264,5 +271,4 @@ test("isAuditLine：动笔前一次性读题/规划不摘——只摘逐句逐�
 	assert.ok(isAuditLine("进入正文后，每一段文字，你都必须先输出html注释符进行“草稿自检”，然后再动手写这一段。"));
 	assert.ok(isAuditLine("写完后检查：这段反应是否只是在表演人设标签？"));
 });
-
 

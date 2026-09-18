@@ -191,12 +191,28 @@ export interface RpSummaryPrompt {
 	userText: string;
 }
 
-export function validateRpSummaryMarkdown(summary: string): { ok: boolean; errors: string[] } {
+/**
+ * 摘要结构校验。新生成摘要必须可证明是「合理摘要」才会被提交为第二套事实权威：
+ * - 含 `## Story Phase` → 必须是完整 10 节（v2 strict）；
+ * - 纯 Markdown 旧摘要 → 至少 3 个标题，否则视为垃圾/截断/报错文本拒绝提交；
+ * - requireStructured（本次压缩返回了 v2 envelope）→ 缺失 Story Phase 直接拒绝。
+ */
+export function validateRpSummaryMarkdown(summary: string, opts?: { requireStructured?: boolean }): { ok: boolean; errors: string[] } {
 	const text = summary.trim();
-	if (!text.includes("## Story Phase")) return { ok: true, errors: [] }; // 旧摘要兼容
-	const required = ["## Story Phase", "## Story Progress", "## Characters", "## Core Events", "## Promises & Threads", "## Canon Facts", "## Knowledge Boundaries", "## Compression Boundary", "## Current Continuity", "## Recall Index"];
-	const errors = required.filter((section) => !text.includes(section)).map((section) => `缺少 ${section}`);
-	return { ok: errors.length === 0, errors };
+	if (!text) return { ok: false, errors: ["空摘要"] };
+	if (text.includes("## Story Phase")) {
+		const required = ["## Story Phase", "## Story Progress", "## Characters", "## Core Events", "## Promises & Threads", "## Canon Facts", "## Knowledge Boundaries", "## Compression Boundary", "## Current Continuity", "## Recall Index"];
+		const errors = required.filter((section) => !text.includes(section)).map((section) => `缺少 ${section}`);
+		return { ok: errors.length === 0, errors };
+	}
+	if (opts?.requireStructured) {
+		return { ok: false, errors: ["缺失 ## Story Phase（v2 envelope 的 summaryMarkdown 必须含全部 10 节）"] };
+	}
+	const headings = text.match(/^#{1,6}\s+\S.*$/gm) ?? [];
+	if (headings.length < 3) {
+		return { ok: false, errors: ["摘要缺乏结构（标题数不足），疑似截断/报错/无格式文本，拒绝提交"] };
+	}
+	return { ok: true, errors: [] };
 }
 
 /** 长期故事纪要 v2 的固定输出结构（两部分共用） */
@@ -265,6 +281,8 @@ ${RP_SUMMARY_SECTIONS}
 - PRESERVE 人物姓名写法、物品名、事件 id、Recall Index、后台秘密边界；
 - 不确定候选不得升级为事实；无足够证据的细节不补写；
 - 只记录对话中实际发生的事；不虚构、不评论、不续写剧情。
+- 摘要总长度以约 2500 个中文字符为目标；优先保留主线因果、关系演变、承诺与知识边界，删除低价值重复细节。
+- Core Events 与 Recall Index 只能引用已有或本次 envelope events 中的稳定 event id/sourceKey，不得凭空制造不存在的事件编号。
 - 输出必须是一个 JSON 对象：{"version":2,"summaryMarkdown":"完整 Markdown 摘要","events":[]}，不要输出其他文字。
 - events 中已有事件使用原有 sourceKey；新事件必须使用稳定的 sourceKey，不要自行生成会与其他数据源冲突的随机 id。`;
 

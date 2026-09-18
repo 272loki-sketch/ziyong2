@@ -438,6 +438,24 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 						}
 					}
 
+					// 旧式 OpenAI Chat Completions 使用 delta.function_call，而不是 tool_calls。
+					// 仍有部分兼容网关只实现这一版协议；统一归一成一个原生 toolCall 块。
+					const legacyFunctionCall = (choice?.delta as { function_call?: { name?: string; arguments?: string } } | undefined)?.function_call;
+					if (legacyFunctionCall) {
+						const block = ensureToolCallBlock({
+							index: 0,
+							id: "legacy-function-call",
+							function: { name: legacyFunctionCall.name ?? "", arguments: legacyFunctionCall.arguments ?? "" },
+						} as never);
+						if (!block.name && legacyFunctionCall.name) block.name = legacyFunctionCall.name;
+						const delta = legacyFunctionCall.arguments ?? "";
+						if (delta) {
+							block.partialArgs = (block.partialArgs ?? "") + delta;
+							block.arguments = parseStreamingJson(block.partialArgs);
+						}
+						stream.push({ type: "toolcall_delta", contentIndex: getContentIndex(block), delta, partial: output });
+					}
+
 					const reasoningDetails = (choice.delta as { reasoning_details?: unknown }).reasoning_details;
 					if (Array.isArray(reasoningDetails)) {
 						for (const detail of reasoningDetails) {

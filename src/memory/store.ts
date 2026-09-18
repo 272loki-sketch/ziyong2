@@ -1,143 +1,263 @@
 /**
- * 单库落盘：JSONL chunks + 简易暴力余弦检索
- * 路径：`.liyuan-memory/scopes/<card+session>/stores/<storeId>/chunks.jsonl`
+ * SQLite memory store.
+ *
+ * The public functions intentionally retain the old store.ts contract. This
+ * keeps the stage/service layer focused on memory semantics while SQLite
+ * provides transactions, indexes, and safe concurrent read-modify-write.
+ * Legacy JSONL scopes are imported lazily on first access.
  */
 
-import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import Database from "better-sqlite3";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { memoryRoot, memoryScopeRoot } from "./config.ts";
-import { cosine, type EmbedContext, embedMany, embedOne } from "./embed.ts";
+import { memoryRoot, memoryScopeId, memoryScopeRoot } from "./config.ts";
 import type {
 	MemoryChunk,
 	MemoryChunkListItem,
-	MemoryChunkMeta,
+	MemoryDiffRecord,
 	MemoryScope,
 	MemorySearchHit,
+	MemoryChunkMeta,
 } from "./types.ts";
 import { NARRATIVE_MERGE_MAX_CHARS } from "./types.ts";
+import { cosine, type EmbedContext, embedMany, embedOne } from "./embed.ts";
 
-function storeDir(cwd: string, scope: MemoryScope, storeId: string): string {
-	return join(memoryScopeRoot(cwd, scope), "stores", storeId);
+type SqliteDatabase = Database.Database;
+
+const dbCache = new Map<string, SqliteDatabase>();
+const migratedScopes = new Set<string>();
+
+function dbPath(cwd: string): string {
+	return join(memoryRoot(cwd), "memory.sqlite");
 }
 
-function chunksPath(cwd: string, scope: MemoryScope, storeId: string): string {
-	return join(storeDir(cwd, scope, storeId), "chunks.jsonl");
+function openDatabase(cwd: string): SqliteDatabase {
+	const path = dbPath(cwd);
+	const cached = dbCache.get(path);
+	if (cached) return cached;
+	const root = memoryRoot(cwd);
+	if (!existsSync(root)) mkdirSync(root, { recursive: true });
+	const db = new Database(path);
+	db.pragma("journal_mode = WAL");
+	db.pragma("busy_timeout = 5000");
+	const existingTable = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_chunks'").get();
+	if (existingTable) {
+		const pk = db.prepare("PRAGMA table_info(memory_chunks)").all() as Array<{ name: string; pk: number }>;
+		if (pk.find((column) => column.name === "id")?.pk === 1 && !pk.some((column) => column.name === "scope_id" && column.pk > 0)) {
+			db.transaction(() => {
+				db.exec(`
+					ALTER TABLE memory_chunks RENAME TO memory_chunks_legacy_pk;
+					CREATE TABLE memory_chunks (
+						id TEXT NOT NULL, scope_id TEXT NOT NULL, store_id TEXT NOT NULL,
+						text TEXT NOT NULL, embedding TEXT NOT NULL, meta TEXT NOT NULL, created_at TEXT NOT NULL,
+						PRIMARY KEY (scope_id, store_id, id)
+					);
+					INSERT INTO memory_chunks SELECT id, scope_id, store_id, text, embedding, meta, created_at FROM memory_chunks_legacy_pk;
+					DROP TABLE memory_chunks_legacy_pk;
+				`);
+			})();
+		}
+	}
+	db.exec(`
+		CREATE TABLE IF NOT EXISTS memory_chunks (
+			id TEXT NOT NULL,
+			scope_id TEXT NOT NULL,
+			store_id TEXT NOT NULL,
+			text TEXT NOT NULL,
+			embedding TEXT NOT NULL,
+			meta TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			PRIMARY KEY (scope_id, store_id, id)
+		);
+		CREATE INDEX IF NOT EXISTS idx_memory_chunks_scope_store
+			ON memory_chunks(scope_id, store_id, created_at, id);
+		CREATE INDEX IF NOT EXISTS idx_memory_chunks_event
+			ON memory_chunks(scope_id, store_id, json_extract(meta, '$.kind'), json_extract(meta, '$.eventId'));
+		CREATE TABLE IF NOT EXISTS memory_diff (
+			seq INTEGER PRIMARY KEY AUTOINCREMENT,
+			scope_id TEXT NOT NULL,
+			ts TEXT NOT NULL,
+			op TEXT NOT NULL,
+			event_id TEXT NOT NULL,
+			title TEXT NOT NULL,
+			arc TEXT,
+			reason TEXT NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_memory_diff_scope_seq ON memory_diff(scope_id, seq);
+	`);
+	dbCache.set(path, db);
+	return db;
 }
 
-export function ensureStoreDir(cwd: string, scope: MemoryScope, storeId: string): void {
-	const d = storeDir(cwd, scope, storeId);
-	if (!existsSync(d)) mkdirSync(d, { recursive: true });
+function parseChunk(line: string): MemoryChunk | null {
+	try {
+		const c = JSON.parse(line) as MemoryChunk;
+		return c?.id && c.text && Array.isArray(c.embedding) ? c : null;
+	} catch {
+		return null;
+	}
+}
+
+function parseDiff(line: string): MemoryDiffRecord | null {
+	try {
+		const row = JSON.parse(line) as MemoryDiffRecord;
+		return row?.ts && row?.eventId && row?.op ? row : null;
+	} catch {
+		return null;
+	}
+}
+
+function rowToChunk(row: { id: string; text: string; embedding: string; meta: string; created_at: string }): MemoryChunk | null {
+	try {
+		const embedding = JSON.parse(row.embedding) as unknown;
+		const meta = JSON.parse(row.meta) as MemoryChunkMeta;
+		if (!Array.isArray(embedding)) return null;
+		return { id: row.id, text: row.text, embedding: embedding as number[], meta, createdAt: row.created_at };
+	} catch {
+		return null;
+	}
+}
+
+function migrateLegacyScope(cwd: string, scope: MemoryScope): void {
+	const scopeId = memoryScopeId(scope);
+	const key = `${dbPath(cwd)}|${scopeId}`;
+	if (migratedScopes.has(key)) return;
+	const db = openDatabase(cwd);
+	const existing = db.prepare("SELECT 1 FROM memory_chunks WHERE scope_id = ? LIMIT 1").get(scopeId);
+	const legacyRoot = memoryScopeRoot(cwd, scope);
+	const legacyStores = join(legacyRoot, "stores");
+	const legacyRows: Array<{ storeId: string; chunks: MemoryChunk[] }> = [];
+	if (existsSync(legacyStores)) {
+		for (const dir of readdirSync(legacyStores, { withFileTypes: true })) {
+			if (!dir.isDirectory()) continue;
+			const path = join(legacyStores, dir.name, "chunks.jsonl");
+			if (!existsSync(path)) continue;
+			const chunks = readFileSync(path, "utf8").split(/\r?\n/).filter(Boolean).map(parseChunk).filter((c): c is MemoryChunk => !!c);
+			if (chunks.length) legacyRows.push({ storeId: dir.name, chunks });
+		}
+	}
+	const legacyDiffPath = join(legacyRoot, "memory-diff.jsonl");
+	const legacyDiffs = existsSync(legacyDiffPath)
+		? readFileSync(legacyDiffPath, "utf8").split(/\r?\n/).filter(Boolean).map(parseDiff).filter((r): r is MemoryDiffRecord => !!r)
+		: [];
+	if (!existing && (legacyRows.length || legacyDiffs.length)) {
+		const insertChunk = db.prepare(`INSERT OR IGNORE INTO memory_chunks
+			(id, scope_id, store_id, text, embedding, meta, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`);
+		const insertDiff = db.prepare(`INSERT INTO memory_diff
+			(scope_id, ts, op, event_id, title, arc, reason) VALUES (?, ?, ?, ?, ?, ?, ?)`);
+		db.transaction(() => {
+			for (const row of legacyRows) {
+				for (const c of row.chunks) insertChunk.run(c.id, scopeId, row.storeId, c.text, JSON.stringify(c.embedding), JSON.stringify(c.meta ?? {}), c.createdAt);
+			}
+			for (const d of legacyDiffs) insertDiff.run(scopeId, d.ts, d.op, d.eventId, d.title, d.arc ?? null, d.reason);
+		})();
+	}
+	migratedScopes.add(key);
+}
+
+function prepareScope(cwd: string, scope: MemoryScope): { db: SqliteDatabase; scopeId: string } {
+	const db = openDatabase(cwd);
+	migrateLegacyScope(cwd, scope);
+	return { db, scopeId: memoryScopeId(scope) };
+}
+
+export function ensureStoreDir(_cwd: string, _scope: MemoryScope, _storeId: string): void {
+	// Kept for callers that used this helper. SQLite creates its parent on open.
 }
 
 export function loadChunks(cwd: string, scope: MemoryScope, storeId: string): MemoryChunk[] {
-	const p = chunksPath(cwd, scope, storeId);
-	if (!existsSync(p)) return [];
-	const lines = readFileSync(p, "utf8").split(/\r?\n/).filter(Boolean);
-	const out: MemoryChunk[] = [];
-	for (const line of lines) {
-		try {
-			const c = JSON.parse(line) as MemoryChunk;
-			if (c?.id && c.text && Array.isArray(c.embedding)) out.push(c);
-		} catch {
-			/* skip bad line */
-		}
-	}
-	return out;
+	const { db, scopeId } = prepareScope(cwd, scope);
+	const rows = db.prepare(`SELECT id, text, embedding, meta, created_at FROM memory_chunks
+		WHERE scope_id = ? AND store_id = ? ORDER BY rowid`).all(scopeId, storeId) as Array<{ id: string; text: string; embedding: string; meta: string; created_at: string }>;
+	return rows.map(rowToChunk).filter((c): c is MemoryChunk => !!c);
 }
 
-export function persistChunks(
-	cwd: string,
-	scope: MemoryScope,
-	storeId: string,
-	chunks: MemoryChunk[],
-): void {
-	ensureStoreDir(cwd, scope, storeId);
-	const body = chunks.map((c) => JSON.stringify(c)).join("\n") + (chunks.length ? "\n" : "");
-	writeFileSync(chunksPath(cwd, scope, storeId), body, "utf8");
+export function persistChunks(cwd: string, scope: MemoryScope, storeId: string, chunks: MemoryChunk[]): void {
+	const { db, scopeId } = prepareScope(cwd, scope);
+	const replace = db.transaction(() => {
+		db.prepare("DELETE FROM memory_chunks WHERE scope_id = ? AND store_id = ?").run(scopeId, storeId);
+		const insert = db.prepare(`INSERT INTO memory_chunks
+			(id, scope_id, store_id, text, embedding, meta, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`);
+		for (const c of chunks) insert.run(c.id, scopeId, storeId, c.text, JSON.stringify(c.embedding), JSON.stringify(c.meta ?? {}), c.createdAt);
+	});
+	replace();
+}
+
+export function appendMemoryDiff(cwd: string, scope: MemoryScope, record: MemoryDiffRecord): void {
+	const { db, scopeId } = prepareScope(cwd, scope);
+	db.prepare(`INSERT INTO memory_diff(scope_id, ts, op, event_id, title, arc, reason)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`).run(scopeId, record.ts, record.op, record.eventId, record.title, record.arc ?? null, record.reason);
+}
+
+export function listMemoryDiff(cwd: string, scope: MemoryScope, limit = 50): MemoryDiffRecord[] {
+	const { db, scopeId } = prepareScope(cwd, scope);
+	const n = Math.max(1, Math.min(500, Math.floor(limit) || 50));
+	const rows = db.prepare(`SELECT ts, op, event_id, title, arc, reason FROM memory_diff
+		WHERE scope_id = ? ORDER BY seq DESC LIMIT ?`).all(scopeId, n) as Array<{ ts: string; op: MemoryDiffRecord["op"]; event_id: string; title: string; arc: string | null; reason: string }>;
+	return rows.map((r) => ({ ts: r.ts, op: r.op, eventId: r.event_id, title: r.title, ...(r.arc ? { arc: r.arc } : {}), reason: r.reason }));
 }
 
 export function countChunks(cwd: string, scope: MemoryScope, storeId: string): number {
-	const p = chunksPath(cwd, scope, storeId);
-	if (!existsSync(p)) return 0;
-	return readFileSync(p, "utf8").split(/\r?\n/).filter(Boolean).length;
+	const { db, scopeId } = prepareScope(cwd, scope);
+	return Number((db.prepare("SELECT COUNT(*) AS count FROM memory_chunks WHERE scope_id = ? AND store_id = ?").get(scopeId, storeId) as { count: number }).count);
 }
 
 export function clearStore(cwd: string, scope: MemoryScope, storeId: string): void {
-	const d = storeDir(cwd, scope, storeId);
-	if (existsSync(d)) rmSync(d, { recursive: true, force: true });
+	const { db, scopeId } = prepareScope(cwd, scope);
+	db.prepare("DELETE FROM memory_chunks WHERE scope_id = ? AND store_id = ?").run(scopeId, storeId);
 }
 
 export function deleteStoreFiles(cwd: string, scope: MemoryScope, storeId: string): void {
 	clearStore(cwd, scope, storeId);
+	// Remove only the legacy directory after its data has been imported.
+	const legacy = join(memoryScopeRoot(cwd, scope), "stores", storeId);
+	if (existsSync(legacy)) rmSync(legacy, { recursive: true, force: true });
 }
 
-/**
- * 分级保活（PLAN-RP-MEMORY §5.2）。
- * core/major 事件与证据永不自动淘汰；优先淘汰 minor 普通块，再 normal。
- * 排序键：`importance 权重 desc → createdAt asc`；淘汰从队尾（最该删）开始。
- */
 export function evictionRank(c: MemoryChunk): number {
 	const imp = c.meta?.importance;
 	const kind = c.meta?.kind;
-	if (kind === "event" && (imp === "core" || imp === "major")) return 4;
+	if (kind === "event") {
+		if (imp === "core" || imp === "major") return 4;
+		if (imp === "minor") return 2.5;
+		return 3.5;
+	}
 	switch (imp) {
 		case "core":
-			return kind === "evidence" ? 3 : 4;
-		case "major":
-			return 3;
-		case "normal":
-			return 2;
-		default:
-			return 1; // minor / 无标记（legacy）
+		case "major": return 3;
+		case "normal": return 2;
+		default: return 1;
 	}
 }
 
-/** 超出 maxChunks 时按优先级淘汰最旧条目；core/major 不被自动删除。 */
 export function evictByPriority(chunks: MemoryChunk[], maxChunks: number): MemoryChunk[] {
 	if (chunks.length <= maxChunks) return chunks;
-	// 删除顺序：重要性权重低的在前，同权重更旧的在前。
 	const deletionOrder = [...chunks].sort((a, b) => {
-		const ra = evictionRank(a);
-		const rb = evictionRank(b);
-		if (ra !== rb) return ra - rb;
-		return (a.createdAt ?? "").localeCompare(b.createdAt ?? "");
+		const rank = evictionRank(a) - evictionRank(b);
+		return rank || (a.createdAt ?? "").localeCompare(b.createdAt ?? "") || a.id.localeCompare(b.id);
 	});
 	let n = chunks.length;
 	const dropped = new Set<string>();
 	for (const c of deletionOrder) {
 		if (n <= maxChunks) break;
-		if (evictionRank(c) === 4) continue; // core 永不自动删
+		if (evictionRank(c) >= 4) continue;
 		dropped.add(c.id);
 		n--;
 	}
-	return chunks.filter((c) => !dropped.has(c.id));;
+	return chunks.filter((c) => !dropped.has(c.id));
 }
 
-/**
- * 切块：按段落/长度。
- */
 export function splitTextChunks(text: string, maxLen = 480): string[] {
 	const t = text.replace(/\r\n/g, "\n").trim();
 	if (!t) return [];
-	const paras = t
-		.split(/\n{2,}/)
-		.map((p) => p.trim())
-		.filter(Boolean);
+	const paras = t.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean);
 	const out: string[] = [];
 	let buf = "";
-	const flush = () => {
-		if (buf.trim()) out.push(buf.trim());
-		buf = "";
-	};
+	const flush = () => { if (buf.trim()) out.push(buf.trim()); buf = ""; };
 	for (const p of paras.length ? paras : [t]) {
 		if (p.length <= maxLen) {
-			if ((buf + "\n\n" + p).length > maxLen) {
-				flush();
-				buf = p;
-			} else {
-				buf = buf ? `${buf}\n\n${p}` : p;
-			}
+			if ((buf + "\n\n" + p).length > maxLen) { flush(); buf = p; }
+			else buf = buf ? `${buf}\n\n${p}` : p;
 			continue;
 		}
 		flush();
@@ -147,87 +267,87 @@ export function splitTextChunks(text: string, maxLen = 480): string[] {
 	return out;
 }
 
+export interface EntryEvidencePart {
+	text: string;
+	charFrom: number;
+	charTo: number;
+}
+
+/**
+ * 按 entry 切证据块，并给每块标出其在**原始 entry 文本**中的绝对字符区间。
+ * charFrom/charTo 对齐原始文本（server 回源时按 message.content 切），
+ * 存储时裁掉首尾空白但不改坐标——回源切片总会包含本块正文，内容不丢。
+ */
+export function splitEntryWithOffsets(raw: string, maxLen = 600): EntryEvidencePart[] {
+	const t = raw.replace(/\r\n/g, "\n");
+	if (!t.trim()) return [];
+	const paras = t.split(/(?<=\n\n)/).map((p) => p).filter((p) => p.trim());
+	if (!paras.length) paras.push(t);
+	const out: EntryEvidencePart[] = [];
+	const push = (from: number, to: number) => {
+		const slice = t.slice(from, to);
+		if (!slice.trim()) return;
+		out.push({ text: slice.trim(), charFrom: from, charTo: to });
+	};
+	let cursor = 0;
+	for (const para of paras) {
+		const start = t.indexOf(para, cursor);
+		if (start < 0) continue;
+		cursor = start + para.length;
+		if (para.length <= maxLen) { push(start, start + para.length); continue; }
+		for (let i = 0; i < para.length; i += maxLen) {
+			push(start + i, Math.min(start + para.length, start + i + maxLen));
+		}
+	}
+	return out;
+}
+
+export type MemoryStoreInput = string | { text: string; meta?: MemoryChunkMeta };
+type ResolvedStoreInput = { text: string; meta: MemoryChunkMeta };
+
 export async function upsertTexts(
 	cwd: string,
 	scope: MemoryScope,
 	storeId: string,
-	texts: string[],
-	meta: MemoryChunkMeta,
+	inputs: MemoryStoreInput[],
+	baseMeta: MemoryChunkMeta,
 	maxChunks: number,
 	embedCtx: EmbedContext,
 ): Promise<{ added: number; total: number }> {
 	const chunks = loadChunks(cwd, scope, storeId);
 	const now = new Date().toISOString();
-	const fresh = texts.map((t) => t.trim()).filter((t) => t.length >= 8);
-	const toAdd: string[] = [];
-	for (const trimmed of fresh) {
-		if (chunks.some((c) => c.text === trimmed)) continue;
-		toAdd.push(trimmed.slice(0, 4000));
+	const seen = new Set(chunks.map((c) => c.text));
+	const fresh: Array<ResolvedStoreInput & { raw: string }> = [];
+	for (const input of inputs) {
+		const { text, meta } = typeof input === "string" ? { text: input, meta: {} as MemoryChunkMeta } : input;
+		const trimmed = (text ?? "").trim();
+		if (trimmed.length < 8 || seen.has(trimmed)) continue;
+		const body = trimmed.slice(0, 4000);
+		seen.add(body);
+		fresh.push({ raw: trimmed, text: body, meta: meta ?? {} });
 	}
-	if (!toAdd.length) return { added: 0, total: chunks.length };
-
-	const vectors = await embedMany(toAdd, embedCtx);
+	if (!fresh.length) return { added: 0, total: chunks.length };
+	const vectors = await embedMany(fresh.map((f) => f.text), embedCtx);
 	const mode = embedCtx.mode;
 	const model = mode === "cloud" ? embedCtx.cloud.model : "local-hash-v1";
-	for (let i = 0; i < toAdd.length; i++) {
-		chunks.push({
-			id: randomBytes(8).toString("hex"),
-			text: toAdd[i]!,
-			embedding: vectors[i]!,
-			meta: {
-				...meta,
-				sessionId: scope.sessionId,
-				card: scope.card,
-				embedMode: mode,
-				embedModel: model,
-			},
-			createdAt: now,
-		});
+	for (let i = 0; i < fresh.length; i++) {
+		const item = fresh[i]!;
+		chunks.push({ id: cryptoRandomId(), text: item.text, embedding: vectors[i]!, meta: { ...baseMeta, ...item.meta, sessionId: scope.sessionId, card: scope.card, embedMode: mode, embedModel: model }, createdAt: now });
 	}
-	const evicted = chunks.length > maxChunks ? evictByPriority(chunks, maxChunks) : chunks;
-	persistChunks(cwd, scope, storeId, evicted);
-	return { added: toAdd.length, total: evicted.length };
+	persistChunks(cwd, scope, storeId, chunks.length > maxChunks ? evictByPriority(chunks, maxChunks) : chunks);
+	return { added: fresh.length, total: countChunks(cwd, scope, storeId) };
 }
 
-/** 列表条目（不含 embedding） */
-export function listChunks(
-	cwd: string,
-	scope: MemoryScope,
-	storeId: string,
-): MemoryChunkListItem[] {
-	return loadChunks(cwd, scope, storeId).map((c) => ({
-		id: c.id,
-		text: c.text,
-		textLen: c.text.length,
-		meta: c.meta,
-		createdAt: c.createdAt,
-	}));
+export function listChunks(cwd: string, scope: MemoryScope, storeId: string): MemoryChunkListItem[] {
+	return loadChunks(cwd, scope, storeId).map((c) => ({ id: c.id, text: c.text, textLen: c.text.length, meta: c.meta, createdAt: c.createdAt }));
 }
 
-/** 按 id 删除单条；返回是否删到 */
-export function deleteChunkById(
-	cwd: string,
-	scope: MemoryScope,
-	storeId: string,
-	chunkId: string,
-): boolean {
-	const id = chunkId.trim();
-	if (!id) return false;
-	const chunks = loadChunks(cwd, scope, storeId);
-	const next = chunks.filter((c) => c.id !== id);
-	if (next.length === chunks.length) return false;
-	if (next.length === 0) {
-		clearStore(cwd, scope, storeId);
-		return true;
-	}
-	persistChunks(cwd, scope, storeId, next);
-	return true;
+export function deleteChunkById(cwd: string, scope: MemoryScope, storeId: string, chunkId: string): boolean {
+	const { db, scopeId } = prepareScope(cwd, scope);
+	const result = db.prepare("DELETE FROM memory_chunks WHERE scope_id = ? AND store_id = ? AND id = ?").run(scopeId, storeId, chunkId.trim());
+	return result.changes > 0;
 }
 
-/**
- * 剧情库合并入库：优先并入**最后一条**（未超字数上限则合并并重 embed）；
- * 否则新开一条。禁止产生「每轮一条」的爆炸条数。
- */
 export async function mergeNarrativeText(
 	cwd: string,
 	scope: MemoryScope,
@@ -237,107 +357,45 @@ export async function mergeNarrativeText(
 	embedCtx: EmbedContext,
 	maxEntryChars = NARRATIVE_MERGE_MAX_CHARS,
 ): Promise<{ merged: boolean; added: number; total: number; id: string; noop?: boolean }> {
-	const summary = text.trim();
-	if (summary.length < 8) {
-		return { merged: false, added: 0, total: countChunks(cwd, scope, "narrative"), id: "", noop: true };
-	}
-	const body = summary.slice(0, 4000);
+	const body = text.trim().slice(0, 4000);
+	if (body.length < 8) return { merged: false, added: 0, total: countChunks(cwd, scope, "narrative"), id: "", noop: true };
 	const chunks = loadChunks(cwd, scope, "narrative");
+	const last = chunks.length ? chunks[chunks.length - 1]! : null;
+	if (last && (last.text === body || (body.length >= 24 && last.text.includes(body.slice(0, Math.min(80, body.length)))))) {
+		return { merged: true, added: 0, total: chunks.length, id: last.id, noop: true };
+	}
 	const now = new Date().toISOString();
 	const mode = embedCtx.mode;
 	const model = mode === "cloud" ? embedCtx.cloud.model : "local-hash-v1";
-	const last = chunks.length ? chunks[chunks.length - 1]! : null;
-
-	// 完全相同则跳过
-	if (last && last.text === body) {
-		return { merged: true, added: 0, total: chunks.length, id: last.id, noop: true };
-	}
-	// 已包含本次摘要开头 → 视为重复
-	if (last && body.length >= 24 && last.text.includes(body.slice(0, Math.min(80, body.length)))) {
-		return { merged: true, added: 0, total: chunks.length, id: last.id, noop: true };
-	}
-
-	const canMerge =
-		!!last &&
-		last.meta.source === "narrative" &&
-		`${last.text}\n\n${body}`.length <= Math.max(400, maxEntryChars);
-
-	if (canMerge && last) {
-		const mergedText = `${last.text}\n\n${body}`;
-		const emb = await embedOne(mergedText, embedCtx);
-		last.text = mergedText;
-		last.embedding = emb;
-		last.meta = {
-			...last.meta,
-			...meta,
-			sessionId: scope.sessionId,
-			card: scope.card,
-			source: "narrative",
-			embedMode: mode,
-			embedModel: model,
-			mergeCount: (last.meta.mergeCount ?? 1) + 1,
-			updatedAt: now,
-		};
+	if (last && last.meta.source === "narrative" && `${last.text}\n\n${body}`.length <= Math.max(400, maxEntryChars)) {
+		last.text = `${last.text}\n\n${body}`;
+		last.embedding = await embedOne(last.text, embedCtx);
+		last.meta = { ...last.meta, ...meta, sessionId: scope.sessionId, card: scope.card, source: "narrative", embedMode: mode, embedModel: model, mergeCount: (last.meta.mergeCount ?? 1) + 1, updatedAt: now };
 		persistChunks(cwd, scope, "narrative", chunks);
 		return { merged: true, added: 0, total: chunks.length, id: last.id };
 	}
-
-	const emb = await embedOne(body, embedCtx);
-	const id = randomBytes(8).toString("hex");
-	chunks.push({
-		id,
-		text: body,
-		embedding: emb,
-		meta: {
-			...meta,
-			sessionId: scope.sessionId,
-			card: scope.card,
-			source: "narrative",
-			embedMode: mode,
-			embedModel: model,
-			mergeCount: 1,
-			updatedAt: now,
-		},
-		createdAt: now,
-	});
-	const kept = chunks.length > maxChunks ? evictByPriority(chunks, maxChunks) : chunks;
-	persistChunks(cwd, scope, "narrative", kept);
-	return { merged: false, added: 1, total: kept.length, id };
+	const id = cryptoRandomId();
+	chunks.push({ id, text: body, embedding: await embedOne(body, embedCtx), meta: { ...meta, sessionId: scope.sessionId, card: scope.card, source: "narrative", embedMode: mode, embedModel: model, mergeCount: 1, updatedAt: now }, createdAt: now });
+	persistChunks(cwd, scope, "narrative", chunks.length > maxChunks ? evictByPriority(chunks, maxChunks) : chunks);
+	return { merged: false, added: 1, total: countChunks(cwd, scope, "narrative"), id };
 }
 
-/**
- * 保留原文，用当前 embed 模式重算本库全部向量（换 local/cloud 时用，不重写剧情）。
- * 云端按 batchSize 分批调用 embeddings。
- */
-export async function reembedStore(
-	cwd: string,
-	scope: MemoryScope,
-	storeId: string,
-	embedCtx: EmbedContext,
-	batchSize = 32,
-): Promise<{ total: number; updated: number; skipped: number }> {
+export async function reembedStore(cwd: string, scope: MemoryScope, storeId: string, embedCtx: EmbedContext, batchSize = 32): Promise<{ total: number; updated: number; skipped: number }> {
 	const chunks = loadChunks(cwd, scope, storeId);
 	if (!chunks.length) return { total: 0, updated: 0, skipped: 0 };
-
+	const size = Math.max(1, Math.min(64, Math.floor(batchSize) || 32));
 	const mode = embedCtx.mode;
 	const model = mode === "cloud" ? embedCtx.cloud.model : "local-hash-v1";
-	const size = Math.max(1, Math.min(64, Math.floor(batchSize) || 32));
 	let updated = 0;
 	let skipped = 0;
-
 	for (let i = 0; i < chunks.length; i += size) {
 		const batch = chunks.slice(i, i + size);
-		const texts = batch.map((c) => c.text);
-		const vectors = await embedMany(texts, embedCtx);
+		const vectors = await embedMany(batch.map((c) => c.text), embedCtx);
 		for (let j = 0; j < batch.length; j++) {
-			const c = batch[j]!;
-			const v = vectors[j];
-			if (!v?.length) {
-				skipped++;
-				continue;
-			}
-			c.embedding = v;
-			c.meta = { ...c.meta, embedMode: mode, embedModel: model };
+			const vector = vectors[j];
+			if (!vector?.length) { skipped++; continue; }
+			batch[j]!.embedding = vector;
+			batch[j]!.meta = { ...batch[j]!.meta, embedMode: mode, embedModel: model };
 			updated++;
 		}
 	}
@@ -356,39 +414,30 @@ export async function searchStore(
 ): Promise<MemorySearchHit[]> {
 	const q = query.trim();
 	if (!q) return [];
-	const [qe] = await embedMany([q], embedCtx);
-	if (!qe) return [];
-	const chunks = loadChunks(cwd, scope, storeId).filter((chunk) => !predicate || predicate(chunk));
-	// 过滤与当前模式维度明显不兼容的旧块（长度差太大）
-	const dim = qe.length;
-	const scored = chunks
-		.filter((c) => Math.abs(c.embedding.length - dim) <= 8 || c.embedding.length === dim)
-		.map((c) => ({
-			id: c.id,
-			text: c.text,
-			score: cosine(qe, c.embedding),
-			meta: c.meta,
-			createdAt: c.createdAt,
-		}))
+	const [queryEmbedding] = await embedMany([q], embedCtx);
+	if (!queryEmbedding) return [];
+	const currentModel = embedCtx.mode === "cloud" ? embedCtx.cloud.model : "local-hash-v1";
+	return loadChunks(cwd, scope, storeId)
+		.filter((c) => (!predicate || predicate(c)) && c.meta?.embedMode === embedCtx.mode && c.meta?.embedModel === currentModel && c.embedding.length === queryEmbedding.length)
+		.map((c) => ({ id: c.id, text: c.text, score: cosine(queryEmbedding, c.embedding), meta: c.meta, createdAt: c.createdAt }))
 		.filter((h) => h.score > 0.05)
-		.sort((a, b) => b.score - a.score)
+		.sort((a, b) => b.score - a.score || a.id.localeCompare(b.id))
 		.slice(0, Math.max(1, topK));
-	return scored;
 }
 
 export function listStoreIdsOnDisk(cwd: string, scope: MemoryScope): string[] {
-	const root = join(memoryScopeRoot(cwd, scope), "stores");
-	if (!existsSync(root)) return [];
-	return readdirSync(root, { withFileTypes: true })
-		.filter((d) => d.isDirectory())
-		.map((d) => d.name);
+	const db = openDatabase(cwd);
+	const scopeId = memoryScopeId(scope);
+	const rows = db.prepare("SELECT DISTINCT store_id FROM memory_chunks WHERE scope_id = ? ORDER BY store_id").all(scopeId) as Array<{ store_id: string }>;
+	return rows.map((r) => r.store_id);
 }
 
-/** 列出磁盘上所有 scope 目录名（调试/清理用） */
 export function listScopeIdsOnDisk(cwd: string): string[] {
-	const root = join(memoryRoot(cwd), "scopes");
-	if (!existsSync(root)) return [];
-	return readdirSync(root, { withFileTypes: true })
-		.filter((d) => d.isDirectory())
-		.map((d) => d.name);
+	const db = openDatabase(cwd);
+	const rows = db.prepare("SELECT DISTINCT scope_id FROM memory_chunks ORDER BY scope_id").all() as Array<{ scope_id: string }>;
+	return rows.map((r) => r.scope_id);
+}
+
+function cryptoRandomId(): string {
+	return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
 }

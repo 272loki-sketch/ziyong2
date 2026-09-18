@@ -56,6 +56,21 @@ test("OutlineEngine next-beat discussion persists structured scene advice withou
 	assert.equal(sm.entries.at(-1)?.customType, "rp-outline-chat");
 });
 
+test("OutlineEngine daily discussion persists three distinct candidate cards", async () => {
+	const sm = new FauxSession();
+	const plan = (title: string, index: number) => ({ title, genre: "发糖", duration: "一小时", location: ["庭院", "集市", "书库"][index], participants: ["甲", "乙"], initiator: `${index ? "乙" : "甲"}主动邀请`, surfaceActivity: ["共同整理花架", "临时采购物资", "雨天整理档案"][index], privateIntent: "确认彼此默契", sweetBeats: ["递工具时记得习惯"], friction: "对完成顺序意见不同", misunderstanding: "误以为对方想独自完成", characterBoundaries: ["不替用户承诺"], relationshipChange: "从客气协作变为自然配合", playerChoices: ["先解释", "用行动回应"], stopPoint: "问题落到用户选择", followUpSeeds: ["下次共同任务"], researchRefs: [], entryCondition: "当前事务尚未收尾", continuityHook: "承接上一拍留下的物品", whyNow: "今天是完成事务的最后窗口", intensity: ["light", "medium", "strong"][index], initiativeType: ["照料", "求助", "试探"][index], pressureType: ["时间", "资源", "秘密"][index], choiceType: ["回应", "分工", "坦白"][index], relationshipEffect: ["熟悉", "信任", "边界变化"][index] });
+	const engine = new OutlineEngine({
+		cwd: new URL("..", import.meta.url).pathname,
+		getSessionManager: () => sm,
+		loadMaterials: () => loadStageMaterials(new URL("..", import.meta.url).pathname),
+		runSideModel: async () => JSON.stringify({ answer: "三种不同的小剧情。", dailyPlans: [plan("整理花架", 0), plan("临时采购", 1), plan("雨天归档", 2)], proposal: null }),
+	});
+	const result = await engine.chat("给我一些日常小剧情", { focus: "daily" });
+	assert.equal(result.dailyPlans?.length, 3);
+	assert.equal(result.dailyPlan?.title, "整理花架");
+	assert.equal(engine.getView().chats[0]?.dailyPlans?.[2]?.title, "雨天归档");
+});
+
 test("OutlineEngine rejects stale leaf before model result is stored", async () => {
 	const sm = new FauxSession();
 	let release!: () => void;
@@ -95,4 +110,22 @@ test("outline research store writes only compact source and mechanism JSON", asy
 		assert.equal(view.sources[0]?.url, "https://example.com/a");
 		assert.equal(JSON.stringify(view).includes("copyrighted excerpt"), false);
 	} finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
+test("OutlineEngine clearChats appends clear marker and only returns chats after it", async () => {
+	const sm = new FauxSession();
+	const engine = new OutlineEngine({
+		cwd: new URL("..", import.meta.url).pathname,
+		getSessionManager: () => sm,
+		loadMaterials: () => loadStageMaterials(new URL("..", import.meta.url).pathname),
+		runSideModel: async () => JSON.stringify({ answer: "第一条" }),
+	});
+	await engine.chat("第一条");
+	assert.equal(engine.getView().chats.length, 1);
+	engine.clearChats();
+	assert.equal(engine.getView().chats.length, 0);
+	sm.appendCustomEntry("rp-outline-chat", { version: 1, requestId: "r2", baseLeafId: "leaf", focus: "open", user: "第二条", answer: "第二条回复", options: [], warnings: [], createdAt: new Date().toISOString() });
+	sm.flush();
+	assert.equal(engine.getView().chats.length, 1);
+	assert.equal(engine.getView().chats[0]?.user, "第二条");
 });

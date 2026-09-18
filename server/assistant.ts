@@ -30,7 +30,7 @@ import { Type } from "typebox";
 
 import { loreTools, type LoreDeps } from "../src/tools/lore.ts";
 import { memoryTools, type MemoryDeps } from "../src/tools/memory.ts";
-import { memoryDeleteChunk, memoryListChunks, memoryManualAdd, memorySearch } from "../src/memory/index.ts";
+import { memoryDeleteChunk, memoryEvidenceForEvent, memoryManualAdd, memorySearch, memoryVisibleChunks } from "../src/memory/index.ts";
 import { cardTools, type CardDeps } from "../src/tools/card.ts";
 import { worldlineTools, type WorldlineDeps, type WorldlineViewLite } from "../src/tools/worldline.ts";
 import { panelTools, type PanelDeps } from "../src/tools/panels.ts";
@@ -100,6 +100,8 @@ export interface StoryBridge {
 	 * 必须给路径而非卡名：scopeId 按路径 hash（src/memory/config.ts:36）。
 	 */
 	memoryScope(): { sessionId: string; card?: string };
+	/** 当前剧情分支祖先条目 id，供记忆检索/列表隔离 sibling。 */
+	memoryVisibleEntryIds(): ReadonlySet<string>;
 		/** 世界线视图（M-D5）：从当前剧情会话树抽存档点并组装视图 */
 		worldlineView(): unknown;
 		/** 面板读写（M-D5）：当前剧情会话的面板，读/写/关经盘 sync 与前端双工 */
@@ -720,15 +722,21 @@ function createStagehandTools(cwd: string, bridge: StoryBridge, hooks: Stagehand
 			{
 				searchMemory: async (query) => {
 					const sc = memoryScopeOf();
+					const visible = bridge.memoryVisibleEntryIds();
 					const [narrative, external] = await Promise.all([
-						memorySearch(cwd, sc, "narrative", query).catch(() => []),
-						memorySearch(cwd, sc, "external", query).catch(() => []),
+						memorySearch(cwd, sc, "narrative", query, undefined, visible).catch(() => []),
+						memorySearch(cwd, sc, "external", query, undefined, visible).catch(() => []),
 					]);
-					return [...narrative, ...external].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).slice(0, 6);
+					const primary = [...narrative, ...external].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).slice(0, 6);
+					const evidence = await Promise.all(primary.flatMap((hit) => hit.meta?.kind === "event" && hit.meta.eventId
+						? [memoryEvidenceForEvent(cwd, sc, hit.meta.eventId, 2, visible).catch(() => [])]
+						: []));
+					return [...primary, ...evidence.flat()].slice(0, 8);
 				},
 				addMemory: (input) =>
 					memoryManualAdd(cwd, memoryScopeOf(), input.text, { ...(input.title ? { title: input.title } : {}) }),
-				listMemory: (storeId) => memoryListChunks(cwd, memoryScopeOf(), storeId),
+				listMemory: (storeId) => memoryVisibleChunks(cwd, memoryScopeOf(), storeId, bridge.memoryVisibleEntryIds())
+					.map((chunk) => ({ id: chunk.id, text: chunk.text, textLen: chunk.text.length, meta: chunk.meta, createdAt: chunk.createdAt })),
 				deleteMemory: (storeId, id) => memoryDeleteChunk(cwd, memoryScopeOf(), storeId, id),
 			},
 			loadConfig(cwd).language,

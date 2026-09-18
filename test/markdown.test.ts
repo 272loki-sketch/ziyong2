@@ -9,6 +9,7 @@ test("splitMarkdownParts: 无围栏整段 text", () => {
 	if (p[0].kind === "text") assert.equal(p[0].text, "你好\n\n世界");
 });
 
+
 test("splitMarkdownParts: Options 形态无 lang 围栏 → code 段", () => {
 	const text = "洛清霜说完。\n\n```\n选择1: 【留下】\n选择2: 【下山】\n```\n";
 	const p = splitMarkdownParts(text);

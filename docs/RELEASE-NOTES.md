@@ -5,9 +5,9 @@
 
 ![主界面](images/home.png)
 
-> 最新能力：**角色卡自适应模块化世界引擎**（卡级长期画像 / 分支 Manifest / 事实信封 /
-> 独立审计 / 模块化世界 v2 / 关键路径分级），见 [v1.6.0 发布说明](RELEASE-v1.6.0.md) 与
-> [docs/PLAN-WORLD-ENGINE.md](PLAN-WORLD-ENGINE.md)。
+> 最新能力：**导演室模块化工作台与研究链路**（独立模块导航 / 研究搜索质量门禁 /
+> 小说消化断点恢复 / 每日任务），见 [v1.6.1 发布说明](RELEASE-v1.6.1.md)。底层世界引擎
+> 能力见 [v1.6.0 发布说明](RELEASE-v1.6.0.md) 与 [docs/PLAN-WORLD-ENGINE.md](PLAN-WORLD-ENGINE.md)。
 
 ---
 
@@ -119,3 +119,5 @@ SHA256SUMS.txt
 ```
 
 把本文件内容粘贴到 GitHub Release 描述即可（图片路径在 Release 页若无法显示，可改用仓库 raw 链接或上传截图到 Release）。
+> 2026-09-02 正文剧情链、并行依赖图与导演室/总控台投影说明见 [ARCHITECTURE-RP-PIPELINE-20260902.md](ARCHITECTURE-RP-PIPELINE-20260902.md)。
+> 2026-09-17 主演稳定性、工具不兼容自动纯文本降级和 API 能力矩阵见 [WRITER-API-COMPATIBILITY.md](WRITER-API-COMPATIBILITY.md)。

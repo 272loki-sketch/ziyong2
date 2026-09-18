@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { projectOutline } from "../src/outline/projection.ts";
+import { computeArcShapeRole, arcShapeRolesByStatus, projectCorpusResearchIndex, projectSelectedCorpusWorkspace, projectOutline } from "../src/outline/projection.ts";
 import { parseOutlineProposal } from "../src/outline/runtime.ts";
 import type { OutlineForeshadowing, OutlineNode, OutlineProposal, OutlineSource, OutlineState } from "../src/outline/schema.ts";
 import { defaultOutlineState, normalizeOutlineState, outlineHistoryFromBranch } from "../src/outline/state.ts";
@@ -98,4 +98,40 @@ test("all five outline Skill examples use the parseable collection patch contrac
 		const example = examples.find((value) => value?.patch);
 		assert.ok(example && parseOutlineProposal(example, { modelInput: true }), `${name} proposal example must parse`);
 	}
+});
+
+test("arc shape role end-anchored derivation survives skipped waypoints", () => {
+	let r = computeArcShapeRole([{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }], "a");
+	assert.deepEqual(r, { role: "setup", index: 1, total: 4 });
+	r = computeArcShapeRole([{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }], "c");
+	assert.deepEqual(r, { role: "hardest", index: 3, total: 4 });
+	r = computeArcShapeRole([{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }], "d");
+	assert.deepEqual(r, { role: "climax", index: 4, total: 4 });
+	const wps = [{ id: "a", status: "done" }, { id: "b", status: "done" }, { id: "c", status: "skipped" }, { id: "d", status: "active" }, { id: "e", status: "pending" }, { id: "f", status: "pending" }];
+	r = arcShapeRolesByStatus(wps, 3);
+	assert.deepEqual(r, { role: "rising", index: 3, total: 5 });
+	r = arcShapeRolesByStatus(wps, 5);
+	assert.deepEqual(r, { role: "climax", index: 5, total: 5 });
+	// edge: ID not in live set
+	r = computeArcShapeRole([{ id: "a" }, { id: "b" }], "x");
+	assert.deepEqual(r, { role: "rising", index: -1, total: 2 });
+	// edge: OOB currentIndex
+	r = arcShapeRolesByStatus(wps, 99);
+	assert.deepEqual(r, { role: "climax", index: -1, total: 5 });
+});
+
+test("corpus research index selects only validated IDs and returns selected assets", () => {
+	const view = {
+		sources: [], mechanisms: [{ id: "m1", sourceIds: ["doc-a"], mechanism: "慢热关系", appliesWhen: "互信不足", failureWarning: "推进过快" }], cards: [],
+		documents: [{ id: "doc-a", title: "样本", sourceKind: "upload", originName: "sample.txt", chars: 1000, encoding: "utf-8", chapterCount: 2, chunkCount: 1, status: "ready", cardKey: "card", synopsisPreview: "梗概", tropeCount: 1, createdAt: "2026-01-01", updatedAt: "2026-01-01" }],
+		assets: [{ docId: "doc-a", kind: "relationship-beat", title: "一次试探", mechanism: "用小事试探关系", appliesWhen: "关系初期", failureWarning: "不要替用户表态", opening: "从眼前小事起手", progression: ["试探"], turn: "回应改变", stopPoint: "停在用户回应前", relationshipStage: "初期", pressure: "沉默", desiredExperience: "微妙", locator: "第1章" }],
+		dailyPatterns: [],
+	} as never;
+	const index = projectCorpusResearchIndex(view);
+	assert.equal(index.documents.length, 1);
+	assert.equal(index.items.some((item) => item.id === "m1"), true);
+	const selected = projectSelectedCorpusWorkspace(view, new Set(["m1", index.items.find((item) => item.kind === "asset")!.id]));
+	assert.equal(selected.mechanisms.length, 1);
+	assert.equal(selected.assets.length, 1);
+	assert.equal(projectSelectedCorpusWorkspace(view, new Set(["forged-id"])).mechanisms.length, 0);
 });

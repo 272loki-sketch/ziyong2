@@ -10,6 +10,7 @@ import {
 	openSync,
 	readdirSync,
 	readSync,
+	readFileSync,
 	statSync,
 	writeFileSync,
 } from "fs";
@@ -767,6 +768,8 @@ export class SessionManager {
 	private labelsById: Map<string, string> = new Map();
 	private labelTimestampsById: Map<string, string> = new Map();
 	private leafId: string | null = null;
+	/** branch()/resetLeaf() 后的下一次 append 是显式分叉，不得被磁盘末行纠正回旧主线。 */
+	private explicitBranchPending = false;
 
 	private constructor(
 		cwd: string,
@@ -951,6 +954,24 @@ export class SessionManager {
 	}
 
 	private _appendEntry(entry: SessionEntry): void {
+		// Multiple browser tabs/reconnects may hold independent SessionManager
+		// instances. Refresh from the shared JSONL before appending so a stale
+		// in-memory leaf cannot create a new turn on an old sibling branch.
+		if (!this.explicitBranchPending && this.persist && this.sessionFile && existsSync(this.sessionFile)) {
+			try {
+				const lines = readFileSync(this.sessionFile, "utf8").split("\n").filter((line) => line.trim());
+				const last = lines.at(-1);
+				if (last) {
+					const persisted = JSON.parse(last) as SessionEntry;
+					if (persisted.type !== "session" && persisted.id && entry.parentId !== persisted.id) {
+						entry.parentId = persisted.id;
+					}
+				}
+			} catch {
+				// Keep the in-memory parent if the file is being appended concurrently.
+			}
+		}
+		this.explicitBranchPending = false;
 		this.fileEntries.push(entry);
 		this.byId.set(entry.id, entry);
 		this.leafId = entry.id;
@@ -1261,6 +1282,7 @@ export class SessionManager {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
 		this.leafId = branchFromId;
+		this.explicitBranchPending = true;
 	}
 
 	/**
@@ -1270,6 +1292,7 @@ export class SessionManager {
 	 */
 	resetLeaf(): void {
 		this.leafId = null;
+		this.explicitBranchPending = true;
 	}
 
 	/**
@@ -1282,6 +1305,7 @@ export class SessionManager {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
 		this.leafId = branchFromId;
+		this.explicitBranchPending = true;
 		const entry: BranchSummaryEntry = {
 			type: "branch_summary",
 			id: generateId(this.byId),

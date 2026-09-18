@@ -6,11 +6,12 @@ import test from "node:test";
 
 import { CorpusEngine, cleanTextLayer, chunkText, decodeText, estimateCallsForChunks, splitChapters, MAX_CHUNKS } from "../src/outline/corpus.ts";
 import { OutlineResearchStore } from "../src/outline/research.ts";
+import { projectCorpusWorkspace } from "../src/outline/projection.ts";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "novel-digest-"));
 const AUDIT_OK = JSON.stringify({ version: 1, verdict: "approve", issues: [], summary: "ok" });
 
-function corpusDeps(cwd: string, onCall: (task: string, text: string) => string | { error: string }) {
+function corpusDeps(cwd: string, onCall: (task: string, text: string) => string | { error: string } | Promise<string | { error: string }>) {
 	const research = new OutlineResearchStore(cwd);
 	return {
 		cwd,
@@ -18,7 +19,7 @@ function corpusDeps(cwd: string, onCall: (task: string, text: string) => string 
 			assert.equal(step, "novelDigest");
 			const task = JSON.parse(userText).task;
 			if (opts.signal?.aborted) return { error: "aborted" };
-			return onCall(task, userText);
+			return await onCall(task, userText);
 		},
 		loadSkill: () => "skill-body",
 		cardKey: () => "card-a",
@@ -97,13 +98,17 @@ test("调用预估：块数越大预估越高", () => {
 test("管道：faux 返回合法 JSON → 文档到 ready，研究库有套路条目", async () => {
 	const cwd = tmp();
 	try {
+		const research = new OutlineResearchStore(cwd);
 		mkdirSync(join(cwd, ".liyuan-uploads"), { recursive: true });
 		writeFileSync(join(cwd, ".liyuan-uploads", "novel.txt"), sampleText());
 		const engine = new CorpusEngine(corpusDeps(cwd, (task) => {
 			if (task === "digest-map") return JSON.stringify({ summary: "一段摘要内容", chapters: ["第1章"] });
 			if (task === "digest-reduce-arc") return JSON.stringify({ summary: "弧线摘要" });
 			if (task === "digest-reduce-final") return JSON.stringify({ synopsis: "全书梗概", structure: { plotSpine: "主线", characterArcs: "弧", hooksAndPacing: "节奏" } });
-			if (task === "digest-extract") return JSON.stringify({ tropes: [{ mechanism: "来信制造悬念", appliesWhen: "关系刚建立时", failureWarning: "久不回收会拖节奏", locator: "第1–2章" }] });
+			if (task === "digest-extract-mechanisms") return JSON.stringify({ tropes: [{ mechanism: "来信制造悬念", appliesWhen: "关系刚建立时", failureWarning: "久不回收会拖节奏", evidenceIds: ["chunk-1"] }] });
+			if (task === "digest-extract-daily") return JSON.stringify({ dailyPatterns: [{ title: "借物归还", setting: "放学后", surfaceActivity: "归还物品", initiative: "角色借归还之名制造独处", sweetBeat: "记得对方习惯", friction: "时间安排冲突", misunderstanding: "误以为对方在躲避", microChange: "关系更主动", escalationLimit: "不升级为表白", naturalStop: "物品归还后停住", failureWarning: "过度巧合", evidenceIds: ["chunk-1"] }] });
+			if (task === "digest-extract-assets") return JSON.stringify({ assets: [{ kind: "relationship-beat", title: "试探式靠近", mechanism: "借一个低风险事务试探关系", appliesWhen: "双方有好感但不确认", failureWarning: "连续使用会显得拖沓", opening: "从具体事务开口", progression: ["制造短暂独处", "让对方误读动机"], turn: "对方主动追问", stopPoint: "得到半个回答后停笔", relationshipStage: "暧昧初期", pressure: "轻", desiredExperience: "发糖与期待", evidenceIds: ["chunk-1"] }] });
+			if (task === "digest-audit") return JSON.stringify({ results: [{ index: 0, verdict: "supported" }, { index: 1, verdict: "supported" }, { index: 2, verdict: "supported" }] });
 			return AUDIT_OK;
 		}));
 		const { doc } = await engine.create(".liyuan-uploads/novel.txt");
@@ -113,11 +118,16 @@ test("管道：faux 返回合法 JSON → 文档到 ready，研究库有套路�
 		const detail = engine.getDetail(doc.id);
 		assert.equal(detail.digest?.synopsis, "全书梗概");
 		assert.equal(detail.digest?.extractedCount, 1);
+		assert.equal(detail.digest?.dailyPatterns?.[0]?.title, "借物归还");
+		assert.equal(detail.digest?.assets?.[0]?.kind, "relationship-beat");
+		assert.equal(detail.digest?.assetCount, 1);
+		assert.equal(research.view("card-a").assets[0]?.docId, doc.id);
+		assert.equal(research.view("card-a").dailyPatterns[0]?.title, "借物归还");
 		assert.equal(engine.listTexts().length, 1);
 	} finally { rmSync(cwd, { recursive: true, force: true }); }
 });
 
-test("管道：map 返回非法 JSON → 重试一次后占位不中断", async () => {
+test("管道：map 返回非法 JSON → 模型层+文档层双重自动重试后成功穿到 ready", async () => {
 	const cwd = tmp();
 	try {
 		mkdirSync(join(cwd, ".liyuan-uploads"), { recursive: true });
@@ -127,18 +137,20 @@ test("管道：map 返回非法 JSON → 重试一次后占位不中断", async 
 			if (task === "digest-map") { mapCalls++; return mapCalls <= 2 ? "not json" : JSON.stringify({ summary: "合法块摘要", chapters: [] }); }
 			if (task === "digest-reduce-arc") return JSON.stringify({ summary: "弧线" });
 			if (task === "digest-reduce-final") return JSON.stringify({ synopsis: "梗概", structure: { plotSpine: "a", characterArcs: "b", hooksAndPacing: "c" } });
-			if (task === "digest-extract") return JSON.stringify({ tropes: [] });
+			if (task === "digest-extract-mechanisms") return JSON.stringify({ tropes: [] });
+			if (task === "digest-extract-daily") return JSON.stringify({ dailyPatterns: [] });
+			if (task === "digest-extract-assets") return JSON.stringify({ assets: [] });
 			return AUDIT_OK;
 		}));
 		const { doc } = await engine.create(".liyuan-uploads/bad.txt");
 		await engine.waitIdle();
+		// 两次 #call 均返回非法 JSON → block 写失败摘要 → 文档自动重试 → 第三次成功 → 最终 ready
 		assert.equal(engine.getDoc(doc.id)?.status, "ready");
-		// 每个失败块：首次非法 JSON + 重试一次 → 仍失败记占位，不再第三次
-		assert.equal(mapCalls, 2);
+		assert.ok(mapCalls >= 3);
 	} finally { rmSync(cwd, { recursive: true, force: true }); }
 });
 
-test("管道：reduce 失败 → failed 且保留已完成块，retry 从断点续跑（faux 计数只补缺失块）", async () => {
+test("管道：reduce 失败 → 文档自动重试 → 最终 ready，已完成块保留", async () => {
 	const cwd = tmp();
 	try {
 		mkdirSync(join(cwd, ".liyuan-uploads"), { recursive: true });
@@ -148,24 +160,19 @@ test("管道：reduce 失败 → failed 且保留已完成块，retry 从断点�
 			if (task === "digest-map") { mapCalls++; return JSON.stringify({ summary: `块${mapCalls}摘要`, chapters: [] }); }
 			if (task === "digest-reduce-arc") { if (reduceFail) { reduceFail = false; return "bad"; } return JSON.stringify({ summary: "弧线" }); }
 			if (task === "digest-reduce-final") return JSON.stringify({ synopsis: "梗概", structure: { plotSpine: "a", characterArcs: "b", hooksAndPacing: "c" } });
-			if (task === "digest-extract") { extractCalls++; return JSON.stringify({ tropes: [] }); }
+			if (task === "digest-extract-mechanisms") { extractCalls++; return JSON.stringify({ tropes: [] }); }
+			if (task === "digest-extract-daily") return JSON.stringify({ dailyPatterns: [] });
+			if (task === "digest-extract-assets") return JSON.stringify({ assets: [] });
 			return AUDIT_OK;
 		}));
 		await engine.create(".liyuan-uploads/retry.txt");
 		await engine.waitIdle();
-		const afterFail = engine.getDoc([...engine.view().documents][0]?.id ?? "");
-		assert.ok(afterFail);
-		assert.equal(afterFail.status, "failed");
-		const digestPathAfter = engine.listTexts();
-		assert.equal(digestPathAfter.length, 1);
-		// retry：map 不应再跑（已完成块被跳过 / 不重复），但这次会成功
-		engine.retry(afterFail.id);
-		const docId = afterFail.id;
-		// 等待串行链完成（写链在 engine 内部是 promise 链；此处等一个 tick 后再查）
-		await engine.waitIdle();
-		const status = engine.getDoc(docId)?.status;
-		assert.ok(status === "ready" || status === "failed", `retry 后应为 ready 或 failed，实际 ${status}`);
-		if (status === "ready") assert.ok(extractCalls >= 1);
+		// reduce-arc 首次失败 → 文档自动重试 → 第二次成功 → ready
+		const docId = [...engine.view().documents][0]?.id ?? "";
+		assert.ok(docId);
+		assert.equal(engine.getDoc(docId)?.status, "ready");
+		assert.ok(extractCalls >= 1);
+		assert.equal(engine.listTexts().length, 1);
 	} finally { rmSync(cwd, { recursive: true, force: true }); }
 });
 
@@ -178,7 +185,10 @@ test("入库：mergeCorpus 机制入研究库；删除只删该 doc 独占条目
 			if (task === "digest-map") return JSON.stringify({ summary: "s", chapters: [] });
 			if (task === "digest-reduce-arc") return JSON.stringify({ summary: "a" });
 			if (task === "digest-reduce-final") return JSON.stringify({ synopsis: "x", structure: { plotSpine: "1", characterArcs: "2", hooksAndPacing: "3" } });
-			if (task === "digest-extract") return JSON.stringify({ tropes: [{ mechanism: "共享来源套路", appliesWhen: "w", failureWarning: "f", locator: "第1章" }] });
+			if (task === "digest-extract-mechanisms") return JSON.stringify({ tropes: [{ mechanism: "共享来源套路", appliesWhen: "w", failureWarning: "f", evidenceIds: ["chunk-1"] }] });
+			if (task === "digest-extract-daily") return JSON.stringify({ dailyPatterns: [] });
+			if (task === "digest-extract-assets") return JSON.stringify({ assets: [] });
+			if (task === "digest-audit") return JSON.stringify({ results: [{ index: 0, verdict: "supported" }] });
 			return AUDIT_OK;
 		}));
 		const { doc } = await engine.create(".liyuan-uploads/shared.txt");
@@ -201,12 +211,54 @@ test("投影：同卡 view 里 documents 包含 ready 文档，非该卡不混�
 			if (task === "digest-map") return JSON.stringify({ summary: "s", chapters: [] });
 			if (task === "digest-reduce-arc") return JSON.stringify({ summary: "a" });
 			if (task === "digest-reduce-final") return JSON.stringify({ synopsis: "梗概全文", structure: { plotSpine: "1", characterArcs: "2", hooksAndPacing: "3" } });
-			if (task === "digest-extract") return JSON.stringify({ tropes: [] });
+			if (task === "digest-extract-mechanisms") return JSON.stringify({ tropes: [] });
+			if (task === "digest-extract-daily") return JSON.stringify({ dailyPatterns: [] });
+			if (task === "digest-extract-assets") return JSON.stringify({ assets: [] });
 			return AUDIT_OK;
 		}));
 		const { doc } = await engine.create(".liyuan-uploads/proj.txt");
 		await engine.waitIdle();
 		assert.equal(doc.cardKey, "card-a");
 		assert.equal(engine.getDoc(doc.id)?.synopsisPreview, "梗概全文");
+	} finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
+test("投影：按导演 focus 选择结构化素材，而不是按落盘顺序整包倾倒", () => {
+	const view = {
+		sources: [], mechanisms: [], cards: [], documents: [], dailyPatterns: [],
+		assets: [
+			{ kind: "dialogue-move", title: "对白试探", mechanism: "通过信息差试探对方", appliesWhen: "关系初期", failureWarning: "重复会机械", opening: "从公开话题切入", progression: ["留白", "追问"], turn: "对方反问", stopPoint: "留下未答问题", relationshipStage: "初识", pressure: "轻", desiredExperience: "暧昧", locator: "第1章" },
+			{ kind: "scene-pattern", title: "日常偶遇", mechanism: "用共同活动制造自然接触", appliesWhen: "需要低烈度推进", failureWarning: "缺少主动目的会空转", opening: "从活动开始", progression: ["共同做事", "出现小摩擦"], turn: "一方改变安排", stopPoint: "关系发生微变", relationshipStage: "熟悉", pressure: "低", desiredExperience: "轻松", locator: "第3章" },
+		],
+	} as any;
+	const projection = projectCorpusWorkspace(view, { focus: "dialogue", query: "潜台词 信息差" });
+	assert.equal(projection.assets[0]?.title, "对白试探");
+});
+
+test("管道：多部文档串行消化，避免长请求并发挤占模型网关", async () => {
+	const cwd = tmp();
+	try {
+		mkdirSync(join(cwd, ".liyuan-uploads"), { recursive: true });
+		for (const name of ["a.txt", "b.txt", "c.txt"]) writeFileSync(join(cwd, ".liyuan-uploads", name), sampleText());
+		let active = 0, maxActive = 0;
+		const deps = corpusDeps(cwd, async (task) => {
+			if (task === "digest-map") {
+				active++; maxActive = Math.max(maxActive, active);
+				await new Promise((resolve) => setTimeout(resolve, 15));
+				active--;
+				return JSON.stringify({ summary: "块摘要", chapters: [] });
+			}
+			if (task === "digest-reduce-arc") return JSON.stringify({ summary: "弧线" });
+			if (task === "digest-reduce-final") return JSON.stringify({ synopsis: "梗概", structure: { plotSpine: "主线", characterArcs: "人物", hooksAndPacing: "节奏" } });
+			if (task === "digest-extract-mechanisms") return JSON.stringify({ tropes: [] });
+			if (task === "digest-extract-daily") return JSON.stringify({ dailyPatterns: [] });
+			if (task === "digest-extract-assets") return JSON.stringify({ assets: [] });
+			return AUDIT_OK;
+		});
+		const engine = new CorpusEngine(deps);
+		await Promise.all([engine.create("a.txt"), engine.create("b.txt"), engine.create("c.txt")]);
+		await engine.waitIdle();
+		assert.equal(maxActive, 1);
+		assert.equal(engine.view().documents.every((doc) => doc.status === "ready"), true);
 	} finally { rmSync(cwd, { recursive: true, force: true }); }
 });

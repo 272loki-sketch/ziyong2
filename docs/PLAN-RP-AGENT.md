@@ -1,5 +1,7 @@
 # PLAN-RP-AGENT：把扮演当成代码来生成（tools 层 + harness 层设计契约）
 
+> 历史设计文档。本文记录 2026-08-03 的目标与实验，不是当前实现清单。当前正文链、工具状态和 API 降级以 `docs/ARCHITECTURE-OVERVIEW.md`、`docs/ARCHITECTURE-RP-PIPELINE-20260902.md` 和 `docs/WRITER-API-COMPATIBILITY.md` 为准。
+
 > 2026-08-03 定稿。前置：用户定案「死磕思考问题」；46KB 思考文件逐行实证（本地留档）；上轮 harness 重建（PLAN-RP-HARNESS.md）M0–M4 已实弹验证但
 > M4.5 提速负收益、M5 未做。本文档是「RP agent 化」的完整设计契约——tools 层（写作工具栈）+
 > harness 层（预设拆三层），两层合起来回答一个问题：**为什么梨园不是 RP agent，以及怎么把它变成**。

@@ -3,7 +3,7 @@
   "version": "1.5.0",
   "description": "梨园（Liyuan）— 以 AI 为主演的角色扮演剧院",
   "scripts": {
-    "test": "node --test test/*.test.ts",
+    "test": "if [ -x /opt/node22/bin/node ]; then /opt/node22/bin/node --test test/*.test.ts; else node --test test/*.test.ts; fi",
     "web": "node server/main.ts",
     "web:new": "node server/main.ts --new",
     "web:build": "npm --prefix web run build",
@@ -19,9 +19,11 @@
     "@liyuan/agent-runtime": "file:./packages/coding-agent",
     "@liyuan/ai": "file:./packages/ai",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "better-sqlite3": "^12.11.1",
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "playwright": "^1.49.0"
   }
 }

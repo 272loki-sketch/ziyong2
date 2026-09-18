@@ -240,6 +240,17 @@ cp -a /root/Liyuan/liyuan.config.json /root/Liyuan/liyuan.agent.json /root/Liyua
 tar -czf /root/Liyuan-backups/$TS/agent-data.tgz -C /var/lib/liyuan agent
 ```
 
+## 10.1 研究搜索自动任务
+
+普通研究搜索与小说消化的自动选书是两条独立任务：研究搜索读取 `liyuan.config.json` 的 `researchSearchSchedule`，按 VPS 本地时间每日运行；导演室研究搜索页的“自动搜索主题”按钮可立即运行同一主题列表。任务状态保存在 `.liyuan/outline/research/search-schedule.json`，可用以下接口检查：
+
+```bash
+curl -fsS http://127.0.0.1:7620/api/outline/research/search/schedule
+curl -fsS -X POST http://127.0.0.1:7620/api/outline/research/search/schedule/run
+```
+
+默认配置关闭自动任务；开启后建议限制 `maxPerRun` 和主题数量。任务共用运行锁，同日定时任务只执行一次；单个主题失败会记录错误并继续其他主题。
+
 ## 11. 更新部署
 
 当前 VPS 使用本地双分支维护，不再通过 tar 覆盖整个源码目录：
@@ -295,7 +306,7 @@ journalctl -u liyuan -n 100 --no-pager
 ### 外部访问 502/504
 
 - 确认 `liyuan.service` 在运行。
-- 确认 `curl -fsS http://127.0.0.1:7620/healthz` 正常。
+- 确认 `curl -fsS http://127.0.0.1:7620/` 正常；梨园当前没有通用 `/healthz` 接口。
 - 查看 `/www/wwwlogs/liyuan-8788.error.log`。
 
 ### 联网查证失败
@@ -308,6 +319,21 @@ journalctl -u liyuan -n 100 --no-pager
 - 确认 `liyuan.agent.json` 里的接口、key、模型名正确。
 - 在网页“连接”面板测试连接。
 - 查看服务日志是否有 provider 错误。
+
+### 小说研究长时间不完成
+
+```bash
+curl -fsS http://127.0.0.1:7620/api/outline/corpus
+journalctl -u liyuan --since "30 minutes ago" --no-pager | grep -E "\[corpus\]|最终消息无文本|模型调用错误|结构化素材部分降级"
+```
+
+重点检查：
+
+- `running` 是否为空；文档是否停在 `mapping`、`reducing` 或 `extracting`。
+- `liyuan.config.json` 的 `stepModels.novelDigest` 是否为已验证的模型。模型名称带 `flash` 不代表一定兼容当前中转站的 reasoning/结构化协议。
+- `最终消息无文本` 通常表示 provider 返回了空 `content` 或最终消息未从 `stream.result()` 读取，不应盲目等待数小时。
+- 当前 Corpus 单次调用最多 4 次、硬超时 60 秒；研究旁路不叠加 SDK 的隐式 9 次重试。增强提炼失败会降级为 ready。
+- 详细根因和修复记录见 `docs/INCIDENT-20260901-NOVEL-DIGEST.md`。
 
 ## 13. 回滚
 
@@ -333,3 +359,8 @@ D:\zhuce\_non_reg\Liyuan\docs\STANDALONE-INTEGRATION-BASELINE.md  脱离 Luker �
 D:\zhuce\_non_reg\Liyuan\deploy\README.md               官方部署说明
 D:\zhuce\_non_reg\Liyuan\deploy\VPS-OPERATIONS.md       本文档
 ```
+
+
+## 研究搜索结果异常
+
+研究搜索返回 0 条时，先检查 `GET /api/outline/research/search/schedule` 和服务日志，不要把搜索引擎原始页面直接导入素材库。当前系统会拒绝低相关结果；DuckDuckGo 人机验证或 Bing 兜底异常时，空结果是保护行为。查看完整根因、实战结果和清理范围：[`docs/INCIDENT-20260901-RESEARCH-SEARCH.md`](../docs/INCIDENT-20260901-RESEARCH-SEARCH.md)。

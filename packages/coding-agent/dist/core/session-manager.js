@@ -1,6 +1,6 @@
 import { uuidv7 } from "@liyuan/agent-core";
 import { randomUUID } from "crypto";
-import { appendFileSync, closeSync, createReadStream, existsSync, mkdirSync, openSync, readdirSync, readSync, statSync, writeFileSync, } from "fs";
+import { appendFileSync, closeSync, createReadStream, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, writeFileSync, } from "fs";
 import { readdir, stat } from "fs/promises";
 import { join, resolve } from "path";
 import { createInterface } from "readline";
@@ -514,6 +514,8 @@ export class SessionManager {
     labelsById = new Map();
     labelTimestampsById = new Map();
     leafId = null;
+    /** branch()/resetLeaf() 后的下一次 append 是显式分叉，不得被磁盘末行纠正回旧主线。 */
+    explicitBranchPending = false;
     constructor(cwd, sessionDir, sessionFile, persist, newSessionOptions) {
         this.cwd = resolvePath(cwd);
         this.sessionDir = normalizePath(sessionDir);
@@ -681,6 +683,22 @@ export class SessionManager {
         }
     }
     _appendEntry(entry) {
+        // Refresh the shared JSONL leaf before appending. Multiple runtime
+        // instances can otherwise append a new turn to an old sibling branch.
+        if (!this.explicitBranchPending && this.persist && this.sessionFile && existsSync(this.sessionFile)) {
+            try {
+                const lines = readFileSync(this.sessionFile, "utf8").split("\n").filter((line) => line.trim());
+                const last = lines.at(-1);
+                if (last) {
+                    const persisted = JSON.parse(last);
+                    if (persisted.type !== "session" && persisted.id && entry.parentId !== persisted.id) {
+                        entry.parentId = persisted.id;
+                    }
+                }
+            }
+            catch { }
+        }
+        this.explicitBranchPending = false;
         this.fileEntries.push(entry);
         this.byId.set(entry.id, entry);
         this.leafId = entry.id;
@@ -957,6 +975,7 @@ export class SessionManager {
             throw new Error(`Entry ${branchFromId} not found`);
         }
         this.leafId = branchFromId;
+        this.explicitBranchPending = true;
     }
     /**
      * Reset the leaf pointer to null (before any entries).
@@ -965,6 +984,7 @@ export class SessionManager {
      */
     resetLeaf() {
         this.leafId = null;
+        this.explicitBranchPending = true;
     }
     /**
      * Start a new branch with a summary of the abandoned path.
@@ -976,6 +996,7 @@ export class SessionManager {
             throw new Error(`Entry ${branchFromId} not found`);
         }
         this.leafId = branchFromId;
+        this.explicitBranchPending = true;
         const entry = {
             type: "branch_summary",
             id: generateId(this.byId),

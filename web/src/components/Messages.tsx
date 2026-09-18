@@ -994,8 +994,8 @@ export function Bubble({
 								</button>
 							)}
 							{onReroll && (
-								<button className="act" onClick={onReroll} title="复用拍前工件，从 writer 正文阶段重写；随后重新记账、推演世界和生成状态栏">
-									<IconRedo size={13} /> 重Roll正文
+								<button className="act" onClick={onReroll} title="从当前用户输入重新生成整拍：正文、状态栏、记账与后台推演都会重新执行">
+									<IconRedo size={13} /> 重Roll整段
 								</button>
 							)}
 							{onCurtainReroll && (
@@ -1079,7 +1079,7 @@ function BeatWorkflowCard({ workflow }: { workflow: WireBeatWorkflow }) {
 	const continuity = workflow.continuity;
 	const writer = workflow.writer;
 	return <details className="world-state-card beat-workflow-card">
-		<summary><span className="world-state-title">本拍工作流</span><span className="world-state-round">{statusLabel}</span><span className="world-state-digest">导演、连续性与主演工件可核对</span></summary>
+		<summary><span className="world-state-title">本拍工作流</span><span className="world-state-round">{statusLabel}</span><span className="world-state-digest">导演、排演、连续性与主演工件可核对</span></summary>
 		<div className="world-state-body beat-workflow-body">
 			<div className="bwf-rail">{workflow.stages.map((stage) => <span key={stage.id} className={`bwf-node ${stage.status}`} title={`${stage.label}：${stage.summary}`}>{stage.status === "success" ? "✓" : stage.status === "reused" ? "↺" : stage.status === "degraded" ? "!" : "○"}</span>)}</div>
 			<div className="bwf-stages">{workflow.stages.map((stage) => <div className="bwf-stage" key={stage.id}><span className={`bwf-status ${stage.status}`} /> <strong>{stage.label}</strong><span>{stage.summary}</span></div>)}</div>

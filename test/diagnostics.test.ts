@@ -105,3 +105,13 @@ test("diagnostics caps curtain and accepts runtime outline status", () => {
 	assert.equal(turn.curtainChars, 40_000);
 	assert.equal(turn.stages.find((stage) => stage.id === "outline-reconcile")?.status, "stable");
 });
+
+test("diagnostics reads settled curtain override", () => {
+	const branch: BranchEntryLike[] = [
+		{ id: "a1", type: "assistant", message: { role: "assistant", details: { rpNarrative: "正文", rpWorkflow: { appends: 1 } } } },
+		{ id: "c1", type: "custom", customType: "rp-curtain-override", data: { targetEntryId: "a1", curtain: "<StatusBlock>最终状态</StatusBlock>" } },
+	];
+	const [view] = diagnosticsFromBranch(branch, 1).turns;
+	assert.match(view?.artifacts.curtain ?? "", /最终状态/);
+	assert.equal(view?.stages.find((stage) => stage.id === "curtain")?.status, "success");
+});

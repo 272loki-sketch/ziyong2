@@ -73,6 +73,8 @@ import {
 	memoryDeleteChunk,
 	memoryImportText,
 	memoryListChunks,
+	memoryListEventDigests,
+	memoryListDiff,
 	memoryManualAdd,
 	retryNarrativeMemory,
 	memoryReembedScope,
@@ -318,11 +320,18 @@ export interface RestHost {
 		reject(id: string, reason?: string): void;
 		researchView(): unknown;
 		research(topic?: string): Promise<unknown>;
+		researchSearch(topic?: string): Promise<unknown>;
+		researchSearchLogs(): unknown;
+		researchRetrySearchExtraction(logId: string): Promise<unknown>;
+		researchSearchScheduleStatus(): unknown;
+		researchSearchScheduleRunNow(): Promise<unknown>;
 		settings(value?: { mode?: "manual" | "suggest" | "auto"; researchMode?: "off" | "manual" | "auto" }): unknown;
 	};
 	/** 小说长文消化（导演室研究库扩容，阶段 1） */
 	corpus: {
 		create(file: string): Promise<{ doc: unknown; estimatedCalls: number }>;
+		createUrl(url: string): Promise<{ doc: unknown; estimatedCalls: number }>;
+		discover(): Promise<unknown>;
 		view(): unknown;
 		detail(id: string): unknown;
 		pause(id: string): unknown;
@@ -468,6 +477,7 @@ const CONFIG_EDITABLE = new Set([
 	"literaryWorldEnabled",
 	"literaryEcologyEnabled",
 	"webResearchMode",
+	"researchSearchSchedule",
 	"novelDigest",
 	"stepModels",
 ]);
@@ -499,15 +509,33 @@ export function applyConfigPatch(config: RpConfig, patch: Record<string, unknown
 		DEFAULT_CONFIG.literaryProfileEveryNTurns ?? 8,
 	);
 	if (!["off", "auto", "manual"].includes(String(next.webResearchMode))) next.webResearchMode = "off";
+	const rss = next.researchSearchSchedule && typeof next.researchSearchSchedule === "object" ? next.researchSearchSchedule as Record<string, unknown> : {};
+	const rssDef = DEFAULT_CONFIG.researchSearchSchedule ?? { enabled: false, hour: 6, minute: 0, maxPerRun: 3, topics: [] };
+	next.researchSearchSchedule = {
+		enabled: rss.enabled === true,
+		hour: clampInt(rss.hour, 0, 23, rssDef.hour),
+		minute: clampInt(rss.minute, 0, 59, rssDef.minute),
+		maxPerRun: clampInt(rss.maxPerRun, 1, 8, rssDef.maxPerRun),
+		topics: Array.isArray(rss.topics) ? rss.topics.filter((item): item is string => typeof item === "string" && item.trim()).map((item) => item.trim().slice(0, 200)).slice(0, 8) : rssDef.topics,
+	};
 	next.stepModels = normalizeStepModels(next.stepModels);
-	// 小说长文消化：纯手动触发。缺省 enabled=true 无后台自动成本；非法值回落默认。
+	// 小说长文消化：正文关键路径之外；自动计划显式开启才产生后台抓取成本。
 	if (next.novelDigest !== undefined && next.novelDigest !== null && typeof next.novelDigest === "object") {
-		const nd = next.novelDigest as { enabled?: unknown; chunkChars?: unknown; maxCallsPerDoc?: unknown };
+		const nd = next.novelDigest as { enabled?: unknown; chunkChars?: unknown; maxCallsPerDoc?: unknown; autoSchedule?: { enabled?: unknown; hour?: unknown; minute?: unknown; maxPerRun?: unknown; queries?: unknown } };
 		const def = DEFAULT_CONFIG.novelDigest ?? { enabled: true, chunkChars: 20000, maxCallsPerDoc: 800 };
+		const auto = nd.autoSchedule && typeof nd.autoSchedule === "object" ? nd.autoSchedule : {};
+		const autoDef = def.autoSchedule ?? { enabled: false, hour: 5, minute: 0, maxPerRun: 3, queries: ["学園 日常", "現代 日常 社会人", "青春 日常"] };
 		next.novelDigest = {
 			enabled: nd.enabled === true || nd.enabled === false ? nd.enabled : def.enabled,
 			chunkChars: clampInt(nd.chunkChars as number, 1000, 50000, def.chunkChars),
 			maxCallsPerDoc: clampInt(nd.maxCallsPerDoc as number, 100, 20000, def.maxCallsPerDoc),
+			autoSchedule: {
+				enabled: auto.enabled === true,
+				hour: clampInt(auto.hour as number, 0, 23, autoDef.hour),
+				minute: clampInt(auto.minute as number, 0, 59, autoDef.minute),
+				maxPerRun: clampInt(auto.maxPerRun as number, 1, 3, autoDef.maxPerRun),
+				queries: Array.isArray(auto.queries) ? auto.queries.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim().slice(0, 80)).slice(0, 8) : autoDef.queries,
+			},
 		};
 	} else if (next.novelDigest === null || next.novelDigest === undefined) {
 		next.novelDigest = DEFAULT_CONFIG.novelDigest ?? { enabled: true, chunkChars: 20000, maxCallsPerDoc: 800 };
@@ -1044,6 +1072,9 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 		if (corpusResume) { sendJson(res, 200, host.corpus.resume(decodeURIComponent(corpusResume[1]))); return true; }
 		const corpusDelete = /^DELETE \/api\/outline\/corpus\/([^/]+)$/.exec(route);
 		if (corpusDelete) { sendJson(res, 200, await host.corpus.remove(decodeURIComponent(corpusDelete[1]))); return true; }
+		// 研究搜索记录子路由：再次提炼
+		const researchRetry = /^POST \/api\/outline\/research\/search\/logs\/([^/]+)\/retry$/.exec(route);
+		if (researchRetry) { sendJson(res, 200, await host.outline.researchRetrySearchExtraction(decodeURIComponent(researchRetry[1]))); return true; }
 		switch (route) {
 			case "GET /api/outline": { sendJson(res, 200, host.outline.getView()); return true; }
 			case "GET /api/turn-diagnostics": {
@@ -1087,11 +1118,31 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				const body = JSON.parse((await readBody(req)) || "{}") as { topic?: string };
 				sendJson(res, 200, await host.outline.research(body.topic)); return true;
 			}
+			case "POST /api/outline/research/search": {
+				const body = JSON.parse((await readBody(req)) || "{}") as { topic?: string };
+				sendJson(res, 200, await host.outline.researchSearch(body.topic)); return true;
+			}
+			case "GET /api/outline/research/search/logs": {
+				res.setHeader("cache-control", "no-store");
+				sendJson(res, 200, { logs: host.outline.researchSearchLogs() }); return true;
+			}
+			case "GET /api/outline/research/search/schedule": {
+				res.setHeader("cache-control", "no-store");
+				sendJson(res, 200, host.outline.researchSearchScheduleStatus()); return true;
+			}
+			case "POST /api/outline/research/search/schedule/run": {
+				if (refuseWhileStreaming()) return true;
+				sendJson(res, 202, await host.outline.researchSearchScheduleRunNow()); return true;
+			}
 			case "PUT /api/outline/settings": {
 				const body = JSON.parse(await readBody(req)) as { mode?: "manual" | "suggest" | "auto"; researchMode?: "off" | "manual" | "auto" };
 				sendJson(res, 200, { settings: host.outline.settings(body) }); return true;
 			}
-			// ---- 小说长文消化（导演室「小说研究」页签；纯手动触发） ----
+			case "DELETE /api/outline/chats": {
+				host.outline.clearChats();
+				sendJson(res, 200, { ok: true, chats: [] }); return true;
+			}
+			// ---- 小说长文消化（导演室「藏书消化」页签） ----
 			case "POST /api/outline/corpus": {
 				const cfglite = loadConfig(host.cwd);
 				if (cfglite.novelDigest?.enabled === false) throw new Error("小说消化尚未启用");
@@ -1099,6 +1150,19 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				const file = (body.file ?? "").trim();
 				if (!file) throw new Error("缺少 file（上传区文件名）");
 				sendJson(res, 201, await host.corpus.create(file)); return true;
+			}
+			case "POST /api/outline/corpus/url": {
+				const cfglite = loadConfig(host.cwd);
+				if (cfglite.novelDigest?.enabled === false) throw new Error("小说消化尚未启用");
+				const body = JSON.parse(await readBody(req)) as { url?: string };
+				const value = (body.url ?? "").trim();
+				if (!value) throw new Error("缺少 url（Kakuyomu 作品 URL）");
+				sendJson(res, 201, await host.corpus.createUrl(value)); return true;
+			}
+			case "POST /api/outline/corpus/discover": {
+				const cfglite = loadConfig(host.cwd);
+				if (cfglite.novelDigest?.enabled === false) throw new Error("小说消化尚未启用");
+				sendJson(res, 202, await host.corpus.discover()); return true;
 			}
 			case "GET /api/outline/corpus": {
 				res.setHeader("cache-control", "no-store");
@@ -1420,6 +1484,20 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				const sc = host.memoryScope();
 				const chunks = memoryListChunks(host.cwd, sc, storeId);
 				sendJson(res, 200, { storeId, chunks });
+				return true;
+			}
+			case "GET /api/memory/events": {
+				const sc = host.memoryScope();
+				const events = memoryListEventDigests(host.cwd, sc);
+				sendJson(res, 200, { events, total: events.length, scope: sc });
+				return true;
+			}
+			case "GET /api/memory/diff": {
+				const sc = host.memoryScope();
+				const rawLimit = Number(query.get("limit") ?? 50);
+				const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(500, Math.floor(rawLimit))) : 50;
+				const diff = memoryListDiff(host.cwd, sc, limit);
+				sendJson(res, 200, { diff, total: diff.length, scope: sc });
 				return true;
 			}
 			case "DELETE /api/memory/chunk": {
@@ -2822,6 +2900,18 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				const body = JSON.parse(await readBody(req)) as { provider?: string; id?: string };
 				if (!body.provider || !body.id) throw new Error("缺少 provider / id");
 				const current = await host.selectModel(body.provider, body.id);
+				// “连接”面板切换的是用户理解中的剧情模型。若主演另有旧覆盖，
+				// 只切 session 会造成界面显示已切换、正文却仍走旧模型。同步更新
+				// writer 插头，使下一拍立即使用本次选择，不要求重启。
+				const config = loadConfig(host.cwd);
+				const writer = config.stepModels?.writer;
+				if (writer?.provider !== body.provider || writer?.id !== body.id) {
+					writeJsonWithBackup(configPath(host.cwd), {
+						...config,
+						stepModels: { ...(config.stepModels ?? {}), writer: { provider: body.provider, id: body.id } },
+					});
+					await host.softRefreshConfig();
+				}
 				host.notify("info", `模型已切换：${current.name}`);
 				sendJson(res, 200, { current });
 				return true;
@@ -3238,8 +3328,16 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 			case "PUT /api/config": {
 				if (refuseWhileStreaming()) return true;
 				const patch = JSON.parse(await readBody(req)) as Record<string, unknown>;
-				const next = applyConfigPatch(loadConfig(host.cwd), patch);
+				const previous = loadConfig(host.cwd);
+				const next = applyConfigPatch(previous, patch);
 				writeJsonWithBackup(configPath(host.cwd), next);
+				const previousWriter = previous.stepModels?.writer;
+				const nextWriter = next.stepModels?.writer;
+				if (nextWriter && (previousWriter?.provider !== nextWriter.provider || previousWriter?.id !== nextWriter.id)) {
+					// 设置齿轮里的“主演正文”保存后同步当前会话模型。StageEngine 本来
+					// 就每拍现读 config；这里再对齐会话显示与后续新会话默认，无需重启。
+					await host.selectModel(nextWriter.provider, nextWriter.id);
+				}
 				await host.softRefreshConfig();
 				sendJson(res, 200, { config: next });
 				return true;

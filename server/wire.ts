@@ -65,7 +65,7 @@ export type WireSegment =
 export type WireWorkflowStatus = "success" | "degraded" | "skipped" | "reused";
 
 export interface WireWorkflowStage {
-	id: "continuity" | "director" | "ecology-arrival" | "writer" | "curtain";
+	id: "continuity" | "plot-adaptation" | "director" | "scene-conductor" | "ecology-arrival" | "writer" | "curtain";
 	label: string;
 	status: WireWorkflowStatus;
 	summary: string;
@@ -93,6 +93,7 @@ export interface WireBeatWorkflow {
 		relationshipLimit?: string;
 		playerStop?: string;
 	};
+	planFact?: { selectedEvent: string; actualOutcome: string; eventStatus: string; foreshadowingStatus: string; nextPressure: string; evidence: string[] };
 	writer: {
 		planWrites: number;
 		writes: number;
@@ -551,13 +552,17 @@ function workflowView(details: Record<string, unknown>): WireBeatWorkflow | unde
 	};
 	const stages: WireWorkflowStage[] = [
 		{ id: "continuity", label: "文学连续性", status: stageStatus("continuity", continuity ? "success" : "skipped"), summary: continuity ? "已生成并交给拍前导演" : status.continuity === "degraded" ? "调用或解析失败，本拍无补充工件" : "本拍未触发" },
+		{ id: "plot-adaptation", label: "生态剧情适配", status: stageStatus("plotAdaptation", prep.plotAdaptation ? "success" : "skipped"), summary: prep.plotAdaptation ? "卡级语法已将生态候选改造成当前事件" : status.plotAdaptation === "degraded" ? "调用或解析失败，正文按原流程继续" : "生态关闭或未运行" },
 		{ id: "director", label: "Stitches 导演", status: stageStatus("director", direction ? "success" : typeof prep.literaryDirection === "string" ? "reused" : "skipped"), summary: direction ? "方向已生成并注入主演" : typeof prep.literaryDirection === "string" ? "旧导演工件已注入主演" : status.director === "degraded" ? "调用或解析失败，主演无导演工件继续" : "本拍未运行" },
+		{ id: "scene-conductor", label: "场面编排", status: stageStatus("sceneConductor", prep.sceneConductor ? "success" : "skipped"), summary: prep.sceneConductor ? "已组织角色动作、信息边界和停点" : status.sceneConductor === "degraded" ? "调用或解析失败，主演按导演方向继续" : "本拍未运行" },
 		{ id: "ecology-arrival", label: "生态抵达", status: stageStatus("ecologyArrival", prep.literaryEcology ? "success" : "skipped"), summary: status.ecologyArrival === "degraded" ? "候选失败或被门禁拒绝，沿用上一快照" : prep.literaryEcology ? "生态切面已提供给导演" : "生态关闭或未运行" },
 		{ id: "writer", label: "主演分段演出", status: "success", summary: `${writer.appends || writer.writes} 个稿段 · ${writer.rounds} 轮` },
 		{ id: "curtain", label: "独立谢幕格式", status: typeof details.rpCurtain === "string" && details.rpCurtain.trim() ? "success" : "skipped", summary: typeof details.rpCurtain === "string" && details.rpCurtain.trim() ? "已生成非正文格式工件" : "本拍没有额外格式" },
 	];
 	return {
-		version: 1, containsReasoning: false, stages, writer,
+		version: 1, containsReasoning: false, stages,
+		...(prep.planFact && typeof prep.planFact === "object" && !Array.isArray(prep.planFact) ? { planFact: { selectedEvent: typeof (prep.planFact as Record<string, unknown>).selectedEvent === "string" ? (prep.planFact as Record<string, unknown>).selectedEvent as string : "", actualOutcome: typeof (prep.planFact as Record<string, unknown>).actualOutcome === "string" ? (prep.planFact as Record<string, unknown>).actualOutcome as string : "", eventStatus: String((prep.planFact as Record<string, unknown>).eventStatus ?? "not-used"), foreshadowingStatus: String((prep.planFact as Record<string, unknown>).foreshadowingStatus ?? "not-planted"), nextPressure: typeof (prep.planFact as Record<string, unknown>).nextPressure === "string" ? (prep.planFact as Record<string, unknown>).nextPressure as string : "", evidence: boundedStrings((prep.planFact as Record<string, unknown>).evidence, 4) } } : {}),
+		writer,
 		...(continuity ? { continuity: {
 			positions: boundedStrings(continuity.positions, 4), ongoingActions: boundedStrings(continuity.ongoingActions, 4), promisesAndDeadlines: boundedStrings(continuity.promisesAndDeadlines, 4),
 			unresolvedPlayerChoices: boundedStrings(continuity.unresolvedPlayerChoices, 4), uncertainties: boundedStrings(continuity.uncertainties, 4), knowledgeBoundaryCount: boundedStrings(continuity.knowledgeBoundaries, 4).length,

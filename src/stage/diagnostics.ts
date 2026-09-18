@@ -143,8 +143,7 @@ function diagnosticFor(branch: BranchEntryLike[], index: number, entry: BranchEn
 		return result;
 	}, { thinking: 0, tools: 0, text: 0 });
 	const narrativeRaw = typeof details.rpNarrative === "string" ? details.rpNarrative.trim() : "";
-	const curtainRaw = typeof details.rpCurtain === "string" ? details.rpCurtain.trim() : "";
-	const curtain = curtainRaw.slice(0, MAX_CURTAIN);
+	let curtainRaw = typeof details.rpCurtain === "string" ? details.rpCurtain.trim() : "";
 	const commits: TurnDiagnosticView["artifacts"]["commits"] = [];
 	let outlineReconcileSeen = false;
 	let scribeDiagnostic: Record<string, unknown> | undefined;
@@ -156,6 +155,11 @@ function diagnosticFor(branch: BranchEntryLike[], index: number, entry: BranchEn
 			const data = customData(next);
 			if (text(data?.sourceEntryId) === entry.id && text(data?.stage) === "scribe") scribeDiagnostic = data;
 			if (text(data?.sourceEntryId) === entry.id && text(data?.stage) === "memory") memoryDiagnostic = data;
+			continue;
+		}
+		if (next.type === "custom" && next.customType === "rp-curtain-override") {
+			const data = customData(next);
+			if (text(data?.targetEntryId) === entry.id && typeof data?.curtain === "string") curtainRaw = data.curtain.trim();
 			continue;
 		}
 		if (next.type !== "custom" || !next.customType || !["rp-state", "rp-world-audit", "rp-world-state", "rp-ecology-state", "rp-outline-proposal", "rp-outline"].includes(next.customType)) continue;
@@ -183,6 +187,7 @@ function diagnosticFor(branch: BranchEntryLike[], index: number, entry: BranchEn
 		commits.push({ type: next.customType, ...(resultStatus ? { status: resultStatus } : {}), summary: commitSummary(next.customType, data), ...(Object.keys(commitDetails).length ? { data: commitDetails } : {}) });
 		if (commits.length >= MAX_COMMITS) break;
 	}
+	const curtain = curtainRaw.slice(0, MAX_CURTAIN);
 	const worldAudit = commits.find((item) => item.type === "rp-world-audit");
 	const worldCommit = commits.find((item) => item.type === "rp-world-state");
 	const ecologyCommit = commits.find((item) => item.type === "rp-ecology-state");
@@ -211,9 +216,11 @@ function diagnosticFor(branch: BranchEntryLike[], index: number, entry: BranchEn
 	} : undefined;
 	const stages: TurnDiagnosticStage[] = [
 		stage("continuity", "文学连续性", prepStatus.continuity, prep?.literaryContinuity ? "success" : "skipped", prep?.literaryContinuity ? "连续性工件已生成" : "本拍未触发", safeFields(recordOf(prep?.literaryContinuity), ["positions", "ongoingActions", "promisesAndDeadlines", "unresolvedPlayerChoices", "uncertainties"])),
+		stage("plot-adaptation", "生态剧情适配", prepStatus.plotAdaptation, prep?.plotAdaptation ? "success" : "skipped", prep?.plotAdaptation ? "卡级语法已将生态候选变形成当前事件" : prepStatus.plotAdaptation === "degraded" ? "调用或解析失败，正文按原流程继续" : "生态关闭或本拍未运行", safeFields(recordOf(prep?.plotAdaptation), ["cardGrammar", "selected", "reserves"])),
 		stage("director", "Stitches 导演", prepStatus.director, prep?.literaryDirectionData ? "success" : typeof prep?.literaryDirection === "string" ? "reused" : "skipped", prep?.literaryDirectionData ? "导演工件已生成" : typeof prep?.literaryDirection === "string" ? "沿用旧导演工件" : "本拍未运行", safeFields(recordOf(prep?.literaryDirectionData), ["scenePressure", "characterInitiatives", "personalThreads", "candidateBeats", "relationshipLimit", "playerStop"])),
+		stage("scene-conductor", "场面编排", prepStatus.sceneConductor, prep?.sceneConductor ? "success" : "skipped", prep?.sceneConductor ? "角色动作、信息边界与玩家停点已编排" : prepStatus.sceneConductor === "degraded" ? "调用或解析失败，主演按导演方向继续" : "本拍未运行", safeFields(recordOf(prep?.sceneConductor), ["sceneObjective", "turnOrder", "pressureShift", "playerStop"])),
 		stage("ecology-arrival", "生态抵达", prepStatus.ecologyArrival, prep?.literaryEcology ? "success" : "skipped", prepStatus.ecologyArrival === "degraded" ? "候选失败或门禁拒绝，沿用上一快照" : prep?.literaryEcology ? "生态候选已交给导演" : "生态未运行", safeFields(recordOf(prep?.literaryEcology), ["round", "digest"])),
-		stage("memory-recall", "剧情记忆召回", prepStatus.memoryRecall, memoryRecall?.results ? "success" : prepStatus.memoryRecall === "degraded" ? "degraded" : "skipped", prepStatus.memoryRecall === "degraded" ? "召回失败或超时，按摘要与状态继续" : memoryRecall?.results ? `命中 ${number(memoryRecall.results)} 条历史记忆` : "本拍未触发历史回照", safeFields(memoryRecall, ["triggered", "results", "queryChars"])),
+		stage("memory-recall", "剧情记忆召回", prepStatus.memoryRecall, memoryRecall?.results ? "success" : prepStatus.memoryRecall === "degraded" ? "degraded" : "skipped", prepStatus.memoryRecall === "degraded" ? "召回失败或超时，按摘要与状态继续" : memoryRecall?.results ? `命中 ${number(memoryRecall.results)} 条历史记忆` : "本拍未触发历史回照", safeFields(memoryRecall, ["triggered", "results", "queryChars", "mode", "arcs"])),
 		stage("writer", "主演分段演出", undefined, workflowStats ? "success" : "failed", workflowStats ? `${workflowStats.appends || workflowStats.writes} 个稿段 · ${workflowStats.rounds} 轮` : "缺少主演工作流工件", workflowStats),
 		stage("ledger", "角色账本", undefined, ledgerStatus, ledgerSummary, safeFields(scribeDiagnostic, ["kind", "reason", "error"])),
 		stage("world-facts", "拍后事实信封", undefined, factStatus, factStatus === "success" ? "已提取带证据事实" : factStatus === "failed" ? worldAuditSummary : "世界链未运行", worldAudit?.data),

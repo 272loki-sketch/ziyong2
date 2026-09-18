@@ -7,6 +7,7 @@ import { memoryScopeId } from "../src/memory/config.ts";
 import { cosine, embedTextLocal } from "../src/memory/embed.ts";
 import {
 	getMemoryStatus,
+	memoryArchiveCompacted,
 	memoryDeleteChunk,
 	memoryImportText,
 	memoryListChunks,
@@ -18,7 +19,7 @@ import {
 	updateMemoryConfig,
 	updateStoreConfig,
 } from "../src/memory/service.ts";
-import { loadChunks, splitTextChunks } from "../src/memory/store.ts";
+import { loadChunks, splitEntryWithOffsets, splitTextChunks } from "../src/memory/store.ts";
 
 const scopeA = { sessionId: "sess-a", card: "assets/cards/hero.png" };
 const scopeB = { sessionId: "sess-b", card: "assets/cards/hero.png" };
@@ -34,6 +35,14 @@ test("embed local: 相似文本余弦更高", () => {
 test("splitTextChunks: 长文切开", () => {
 	const parts = splitTextChunks("甲".repeat(1000), 300);
 	assert.ok(parts.length >= 3);
+});
+
+test("splitEntryWithOffsets: 重复段落保持各自原文坐标", () => {
+	const raw = "她没有回答。\n\n她没有回答。";
+	const parts = splitEntryWithOffsets(raw, 100);
+	assert.equal(parts.length, 2);
+	assert.notEqual(parts[0]!.charFrom, parts[1]!.charFrom);
+	assert.equal(raw.slice(parts[1]!.charFrom, parts[1]!.charTo).trim(), "她没有回答。");
 });
 
 test("memoryScopeId: 不同卡或不同会话 → 不同 id", () => {
@@ -119,6 +128,71 @@ test("memory: 剧情合并入库不每轮一条", async () => {
 		// 另一会话看不到
 		const hitsB = await memorySearch(cwd, scopeB, "narrative", "青梧 玉佩", 3);
 		assert.equal(hitsB.length, 0);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("memory: everyNTurns 周期写入完整 N 拍并携带分支锚点", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "liyuan-mem-window-"));
+	try {
+		updateMemoryConfig(cwd, { enabled: true, embedMode: "local" });
+		updateStoreConfig(cwd, "narrative", { enabled: true, everyNTurns: 3 });
+		for (let turn = 1; turn <= 3; turn++) {
+			await onNarrativeTurnEnd(cwd, scopeA, `第${turn}拍正文`, {
+				entries: Array.from({ length: turn }, (_, index) => ({
+					entryId: `a-${index + 1}`,
+					entryType: "message" as const,
+					turn: index + 1,
+					text: `第${index + 1}拍中段事实：物品${index + 1}完成交接。`.repeat(40),
+				})).slice(-3),
+				branchLeafId: "leaf-3",
+			});
+		}
+		const chunks = loadChunks(cwd, scopeA, "narrative");
+		assert.ok(chunks.some((chunk) => chunk.text.includes("物品1")));
+		assert.ok(chunks.some((chunk) => chunk.text.includes("物品2")));
+		assert.ok(chunks.some((chunk) => chunk.text.includes("物品3")));
+		assert.ok(chunks.every((chunk) => chunk.meta.sourceRefs?.length === 1));
+		assert.ok(chunks.every((chunk) => chunk.meta.branchLeafId === "leaf-3"));
+		const hidden = await memorySearch(cwd, scopeA, "物品1", 5, new Set(["a-2", "a-3"]));
+		assert.equal(hidden.some((chunk) => chunk.text.includes("物品1")), false, "兄弟分支不得看见无祖先锚点的周期记忆");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("memory: 周期纪要与压缩证据并发写入不互相覆盖", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "liyuan-mem-mixed-write-"));
+	try {
+		updateMemoryConfig(cwd, { enabled: true, embedMode: "local" });
+		updateStoreConfig(cwd, "narrative", { enabled: true, everyNTurns: 1 });
+		await Promise.all([
+			onNarrativeTurnEnd(cwd, scopeA, "本拍正文完整内容", {
+				entries: [{ entryId: "current-entry", entryType: "message", turn: 9, text: "当前拍独特标记 current-memory-token，包含完整的中段剧情事实。" }],
+				branchLeafId: "current-entry",
+			}),
+			memoryArchiveCompacted(cwd, scopeA, "早期正文", {
+				perEntry: [{ entryId: "old-entry", entryType: "message", turn: 1, text: "早期独特标记 archived-memory-token，包含已经被压缩的原文证据。" }],
+			}),
+		]);
+		const chunks = loadChunks(cwd, scopeA, "narrative");
+		assert.ok(chunks.some((chunk) => chunk.text.includes("current-memory-token")));
+		assert.ok(chunks.some((chunk) => chunk.text.includes("archived-memory-token")));
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("memory: 相同 chunk id 可在不同 scope 独立存在", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "liyuan-mem-scope-pk-"));
+	try {
+		const { persistChunks } = await import("../src/memory/store.ts");
+		const chunk = { id: "shared-id", text: "共享编号但作用域不同的内容", embedding: [1, 0], meta: {}, createdAt: new Date().toISOString() };
+		persistChunks(cwd, scopeA, "narrative", [chunk]);
+		persistChunks(cwd, scopeB, "narrative", [{ ...chunk, text: "另一个会话的独立内容" }]);
+		assert.equal(loadChunks(cwd, scopeA, "narrative")[0]!.text, chunk.text);
+		assert.equal(loadChunks(cwd, scopeB, "narrative")[0]!.text, "另一个会话的独立内容");
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}

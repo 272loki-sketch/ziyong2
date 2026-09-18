@@ -4,7 +4,7 @@
 > **采用 pi harness（`packages/agent`）已成熟的总结范式**——结构化固定格式、
 > 初建/增量两套提示词、保留旧有效信息、无依据不编造；
 > 并确认：**摘要 = 第二套事实权威**（正文不可能全量长期发送，长局必然只保留最近几楼
-> 原文 + 早期摘要/记忆）。本文件是记忆系统改造的唯一决策契约。
+> 原文 + 早期摘要/记忆）。本文件是记忆系统改造的唯一决策契约。当前实现基线：2026-09-18。
 
 ## 0. 为什么采纳数据库的范式
 
@@ -48,21 +48,27 @@ memory archive        = 被裁原文证据（可与 rp-summary 冲突，赛氏�
 ```ts
 interface RpEventDigest {
   kind: "rp-event-digest";
-  id: string;                // canonical id = event_<sha1(session|card|sourceRef|title)>，代码生成，非面板可改
-  sourceKey?: string;        // 模型/提示词输出的稳定来源键；最终 id 由代码按 sourceRef 生成
+  id: string;                // canonical id = event_<sha1(session|card|sourceRef|title)>，代码生成
+  sourceKey?: string;        // 模型输出的稳定来源键；最终 id 由代码按 sourceRef 生成
+  /** 2026-08-27 新增：提取旁路的去重意图；入库前消费，不持久化。 */
+  op?: "create" | "skip" | `merge:${string}`;
   status: "candidate" | "active" | "resolved" | "retired";
   importance: "core" | "major" | "normal" | "minor";
   title: string;
   turnRange?: { from: number; to: number };
-  sourceRefs: Array<{ entryId: string; entryType: string; turn?: number; charFrom?: number; charTo?: number }>;  // 原文锚点（可精确到字符区间）
+  sourceRefs: Array<{ entryId: string; entryType: string; turn?: number; charFrom?: number; charTo?: number }>;
   participants?: string[];
   time?: string;
   location?: string;
+  /** 2026-08-27 新增：同一长期剧情线的稳定名称（如“初遇误会线”）。 */
+  arc?: string;
   tags: string[];
-  recallAnchors: string[];    // 历史回照措辞（「那把伞」「第一次见面」「当年」）
-  summary: string;            // 短事件摘要
+  recallAnchors: string[];
+  summary: string;
   evidenceLevel: "source-backed" | "summary-only";
-  branchLeafId?: string;      // 生成时分支叶；子孙分支可继承
+  branchLeafId?: string;
+  /** 2026-08-27 新增：与其他事件的因果/演进/化解/冲突关系。 */
+  links?: Array<{ to: string; type: "caused_by" | "evolved_from" | "resolved_the" | "contradicts"; note?: string }>;
 }
 ```
 
@@ -85,7 +91,7 @@ interface RpEventDigest {
 
 ### 2.3 证据归档（memory archive）
 
-被压缩正文完整归档进剧情库（现状已做），本次增强：
+被压缩正文完整归档进剧情库，本次增强：
 - 分块时携带 `entryId` / `entryType` sourceRefs；
 - meta 增加 `kind: "evidence"`；
 - 核心事件卡标注 `importance: "core"`，不受普通 FIFO 淘汰；evidence 是可回源缓存，
@@ -93,20 +99,26 @@ interface RpEventDigest {
 
 ## 3. 提示词：数据库式两段
 
-### 3.1 一级纪要（随压缩 envelope 产出）
+### 3.1 一级纪要（随剧情库每 N 拍滚动提取 + 压缩 envelope 兜底）
 
-一级纪要不单独调一次模型。它与二级纪要一起，由**同一次压缩旁路**返回统一 envelope
-（§3.5）：`{"version":2,"summaryMarkdown":"...","events":[...]}`。只有兼容路径
-（旧模型只回 Markdown）才走 `workflow: memory` Skill 的补丁提取。
+一级纪要主要随 `everyNTurns` 节拍按完整窗口滚动提取：拍尾旁路把
+窗口正文 + 既有事件卡（去重上下文）发给记忆 Skill，产出事件卡（含 `op`/`arc`/`links`），
+入库经代码级 cosine 去重与字段合并（§3.1.1）。压缩 envelope 的 `events` 字段作为兜底
+路径。
 
 system：
-> 你是长篇角色扮演的记忆整理旁路。从给定正文/状态提取事件候选（随摘要 envelope 返回）。
-> 只记录已发生事实，不续写剧情、不替角色作决定、不评论。人物名/物品名保持剧中写法。
-> 证据不足的事件只能 `summary-only`，不得 `source-backed`。每条候选必须带 sourceRefs
-> （正文里的 entryId 或拍序），且引用必须落在本次输入范围内。无重要事件则输出空列表。
+> 你是梨园的记忆整理旁路。遵守 `skills/剧情记忆摘要/SKILL.md` 的规则：
+> 输入 `<narrative>` + `<sourceRefs>` + `<existing-events>`（既有卡去重上下文）+ `<existing-arcs>`
+> → 输出事件卡数组（含 `op: create | merge:<id> | skip`、`arc`、`links`、`sourceRefs`）。
+> 同一事件演进用 `merge` + `evolved_from/resolved_the` 链接旧卡，不要堆新卡。
+> 新事件由旧引发用 `create` + `caused_by`。每窗口至少给普通进程 `normal` 节点保时间线连续。
+> 弧线名优先复用 `existing-arcs`。
 
-user：`<conversation>` 本拍/本场景正文序列化 + `<state>` rp-state 快照 + `<previous-events>` 既有候选
-　→ 输出：`{"version":2,"summaryMarkdown":"...","events":[{...}]}` JSON。
+user：`<narrative>` 窗口正文 + `<sourceRefs>` + `<existing-events>` + `<existing-arcs>` → 仅 JSON。
+> 入库前经代码级 cosine 去重兜底（local 0.75 / cloud 0.92）：命中既有卡 → 字段合并——
+> sourceRefs 累积、importance 取高、旧 title 优先、new summary 更新、links 并集。
+> 合并轨迹写入 `memory-diff.jsonl` 审计日志（create/merge/update + 原因码）。
+> 滚动提取失败不推进游标；恢复后从最老待处理窗口继续，输入过长时按完整拍缩小窗口，不能静默跳过早期窗口。
 
 ### 3.2 二级纪要·初建（复用数据库范式）
 
@@ -168,20 +180,17 @@ user：`<previous-summary>` 旧纪要 + `<new-events>` 新事件卡 + `<new-narr
 
 ### 4.1 召回构造
 
-输入信号（无模型调用、纯装配侧）：
-- 用户本轮原文 `lastUserText` **先过轻量历史回照预判** `shouldRecallHistory()`——
-  命中「第一次/当年/还记得/那把……」等信号才发起云端 embedding 召回；普通拍不发查询；
-- Roster 中已不在当前状态的条目名（离场/离失/了结）；
-- 当前活跃 plot_threads / outline 伏笔标题；
-- 当前在场人物名 + 地点 + 物品。
+输入信号采用两阶段判定（2026-08-27 升级）：
+
+1. **门控** `shouldRecallHistory()` 正则预判（命中…表达 / 扫荡词才进入后续），普通拍零 embedding；
+2. **意图分档** `classifyRecallIntent(userText)`：`"sweep"`（线召回）vs `"point"`（点召回），扫荡词如「从头讲讲」「这些年」「一路走来」「来龙去脉」等。
 
 输出（两阶段）：
-1. `recall-for-turn(query)` → `memoryRecallForTurn`（受 `injectOnTurn` + 预判双重门控）：
-   合并检索事件/纪要 + 证据，**按当前分支祖先链过滤**（`visibleEntryIds`），去重后取最多 6 条；
-2. 命中的事件再沿 `recallEvidence`/sourceRefs 回 **Session Tree 原文**；缺 sourceRefs 或
-   树条目不可读时退回 evidence 向量缓存。
+1. `recall-for-turn(query)` （点召回）：锚词直通（query 命中 recallAnchors/tags 子串 → 直通加分，score=2）+ embedding 合并检索；去重后取最多 6 条；
+2. `recallArcsForTurn` （线召回，仅 sweep）：纯本地，按弧线分组 → 每弧「◆ 弧线名（拍序范围 · 进度） + 事件骨架行」，cap 5 弧 × 12 事件/弧 × 1200 字总预算；
+3. 命中事件再沿 `recallEvidence` / sourceRefs 回 Session Tree 原文。
 
-召回预算 15 秒；事件 kind 的注入块以「标题+摘要+标签」可读文本呈现，不把 JSON 原样塞进主演上下文。
+注入【剧情记忆】分两节：`— 剧情脉络 —`（arc 骨架块）+ `— 相关片段 —`（现有事件/证据条目），整块 ≤ 2500 字硬截断。
 
 ### 4.2 注入位置（不破坏用户原话最后一句）
 
@@ -189,12 +198,14 @@ user：`<previous-summary>` 旧纪要 + `<new-events>` 新事件卡 + `<new-narr
 
 ```text
 【剧情记忆】
-本拍可能触及以下历史（按需自然融入，勿逐字照抄）：
-- 〔初遇事件 · event_first_meeting_001〕……
-- 〔早期归档 · 原文证据〕……
+本拍可能触及以下历史（按需自然融入，勿逐字照抄；与当前已提交事实冲突时以当前事实为准）：
+— 剧情脉络 —
+◆ 误会线（拍1–87 · 已化解）
+  · 拍1 递伞与初误会 — ……
+  · 拍23 关系恶化 — ……
+— 相关片段 —
+- 〔event_xxx〕……
 ```
-
-用户当拍原话仍然必须是上下文最后一句（既有约束不变）。
 
 ### 4.3 预算与降级
 
@@ -217,16 +228,18 @@ user：`<previous-summary>` 旧纪要 + `<new-events>` 新事件卡 + `<new-narr
 
 ### 5.2 分级保活（替代纯 FIFO shift）
 
-```ts
-// 现在的做法（保留，仅对 normal/minor 生效）：
-while (chunks.length > maxChunks) chunks.shift();
-// 改为：按优先级淘汰 —— core / major / active 事件与证据不淘汰；
-//        先淘汰 minor 普通块，再 normal，reinforce/re-ranking 不清 core。
-```
+（2026-08-27 重排）淘汰优先级从低到高（rank 越大越不容易被删）：
 
-具体实现：新增 `evictByPriority(chunks, maxChunks)`，按
-`kind/importance → createdAt` 排序淘汰；core/major 事件卡永不自动删，evidence 不作为
-永久副本，必须保留 sourceRefs 以便回源。
+| rank | 内容 | 说明 |
+|---|---|---|
+| 4 | event(core\|major) | 永不自动删除（`>= 4` 跳过） |
+| 3.5 | event(normal) | 事件账本优先于可重建纪要和证据缓存 |
+| 3 | evidence(core), importance major, event(minor) | 核心证据/重要标识/低价值事件 |
+| 2 | digest normal / importance normal | 滚动纪要/普通标记 |
+| 1 | evidence 无标记 / legacy / arc 骨架块 | 可回源/可重建，最先淘汰 |
+
+event(minor) 从 1 提到 2.5，event(normal) 从 2 提到 3.5——事件卡是账本，
+自然比可回源的 evidence 和可重建的 digest 存活更久。
 
 ## 6. 分支隔离
 
@@ -249,7 +262,7 @@ while (chunks.length > maxChunks) chunks.shift();
 | 文件 | 改动 |
 |---|---|
 | `src/scribe.ts` | `buildRpSummaryInitialPrompt` / `buildRpSummaryUpdatePrompt` / `validateRpSummaryMarkdown`；摘要结构含 Compression Boundary + Current Continuity |
-| `src/stage/compact.ts` | 压缩走统一 envelope：`parseRpSummaryEnvelope` 解析 `summaryMarkdown + events`；archive/事件写入带上界 sourceRefs（entryId/entryType/turn/charFrom/charTo）+ fire-and-forget |
+| `src/stage/compact.ts` | 压缩走统一 envelope：`parseRpSummaryEnvelope` 解析 `summaryMarkdown + events`；摘要落树前完成 archive/事件写入，并携带 sourceRefs（entryId/entryType/turn/charFrom/charTo） |
 | `src/memory/event-id.ts` | `canonicalEventId()`：按 session+card+sourceRef+title 生成 `event_<sha1>` |
 | `src/memory/types.ts` | meta 增加 `kind / importance / sourceRefs / recallAnchors / evidenceLevel / eventId / branchLeafId`；`RpEventDigest` 含 `sourceKey`、sourceRef 精确到字符区间 |
 | `src/memory/store.ts` | `evictByPriority` 分级保活（core/major 事件卡保活，evidence 可淘汰） |
@@ -264,6 +277,24 @@ while (chunks.length > maxChunks) chunks.shift();
 | `skills/剧情记忆摘要/SKILL.md` | 事件提取 Skill：sourceKey 语义 + sourceRef 限定 + JSON 输出 |
 
 规则提示词正文优先落 `skills/`（用户覆盖在 `.liyuan-stage-skills/`），不硬编码进 TS。
+
+## 9. 2026-09-18 可靠性修订
+
+- 压缩归档与 envelope 事件写入改为在追加 `rp-summary` 前完成，避免摘要条目推进叶后被叶守卫自行取消。
+- `everyNTurns` 周期写入改为完整 N 拍窗口；每个正文块携带 entry 级 `sourceRefs`、绝对拍序与 `branchLeafId`，不再只保存触发拍首尾片段。
+- 周期纪要、事件卡和 evidence 统一使用同一 narrative keyed lock，避免 embedding 等待期间旧快照覆盖新写入。
+- 滚动事件游标从最老待处理窗口向前推进；输入过长时按完整拍缩小窗口，不再截正文却保留整窗 refs。
+- 台上与助手 `memory_search` 命中事件后补取 evidence；`memory_list` 与助手检索统一按当前祖先链过滤。
+- 事件语义去重只比较同 embedding mode/model/维度；长期事件 refs 保留最新 24 条；同 entry 多区间证据全部参与重叠评分。
+- SQLite chunk 主键升级为 `(scope_id, store_id, id)`，不同会话可安全复用旧数据 id。
+- 正文流程骨架不变；每拍仅额外在 assistant details 的 `rpInputComposition` 留下 system/summary/history/injection/user/tools 字符构成诊断，不裁剪正常正文历史。
+
+### 9.1 验收状态
+
+- 记忆、压缩、正文引擎专项回归：`147 passed`。
+- 前端 `typecheck` 与生产构建通过。
+- 完整后端套件中剩余 NovelAI UI 源码结构断言和 Outline research 脱敏断言，均不属于本次记忆/正文主链。
+- 旧数据没有 `sourceRefs` 时不能 retroactively 推断真实分支来源；需要严格隔离时，应从 Session Tree 重新归档/提取。
 
 ## 9. 验收目标（1000 楼回照场景）
 
@@ -284,12 +315,12 @@ while (chunks.length > maxChunks) chunks.shift();
 5. 不让记忆注入压住用户原话；
 6. 不让后台记忆任务直接写正文。
 
-## 11. 落地状态（2026-08-26）
+## 11. 落地状态（历史记录，2026-08-26）
 
 - ✅ memory 类型 + 分级保活 + sourceRefs（P1A types / P1B store / P1C service）
 - ✅ 摘要两段提示词（scribe.ts）+ compact 增量接线
 - ✅ 拍前自动召回（assemble 注入块 + engine 调用 + main.ts 依赖）
-- ✅ 事件候选提取 + archive sourceRefs 增强；旁路事件写入 fire-and-forget，不阻塞 agent end
+- ✅ 事件候选提取 + archive sourceRefs 增强；压缩写入在摘要落树前完成，滚动事件仍不阻塞正文
 - ✅ 分支可见性过滤 + 叶守卫 + 诊断投影 + 针对性测试
 - ✅ 摘要/事件统一 envelope：`version=2 + summaryMarkdown + events`；兼容旧 Markdown
 - ✅ 事件 canonical id 由代码按 session/card/sourceRef/title 生成（`src/memory/event-id.ts`），模型 id 只作 source key
@@ -328,10 +359,103 @@ while (chunks.length > maxChunks) chunks.shift();
 - `memory-recall` 与 `memory-settlement` 已进入本拍诊断投影；召回失败/超时显示降级，
   不把失败伪装成未触发。
 
+## 11.1 落地状态（2026-08-27 · 本侧迭代）
+
+- ✅ 事件卡 `arc` / `links` / `op` 字段（types.ts / skills/SKILL.md / engine 解析）
+- ✅ 入库语义去重：candidate id 匹配 ⇒ 字段合并；cosine 门槛 local 0.75 / cloud 0.92 ⇒ merge；`memory-diff.jsonl` 审计
+- ✅ `evictionRank` 重排（event 升格，evidence/legacy 靠后）
+- ✅ 滚动事件提取：`eventBook` dep（游标+everyNTurns 完整窗口）+ engine 旁路 + 叶守卫
+- ✅ 召回分档：`classifyRecallIntent` sweep/point + 锚词直通 + `memoryArcRecallForTurn` 弧线聚合
+- ✅ 注入格式：`— 剧情脉络 —` + `— 相关片段 —`，整块 ≤2500 字
+- ✅ 诊断 `mode` / `arcs` 投影；REST `GET /api/memory/diff`
+- ✅ 测试：`rp-memory.test.ts` 7 条新 + `rp-memory-longrun.test.ts` 弧线演变
+- ✅ 摘要增量提示词 +2 行（长度目标\Core Events id 约束）
+
+### 参考来源
+
+本设计吸收两家成熟系统的信息结构，保留梨园 agent 原生形态：
+
+| 来源 | 吸收点 | 不采用 |
+|---|---|---|
+| [shujuku 数据库](https://github.com/AlbusKen/shujuku) | 账本纪律（逐行时间线、稳定编码、概要索引常驻、合并折叠）、列式元数据过滤 | 填表 DSL、美杜莎 CoAT、世界书 keyword 注入、每轮 300 字强制纪要 |
+| [OpenViking](https://github.com/volcengine/OpenViking) | L0/L1/L2 三级预算（256/4000）。检索意图 TypedQuery 分档。向量预筛 + LLM 语义去重。记忆操作审计（memory_diff）。目录递归检索的弧线聚合思想 | VLM/AGFS/Python 服务端、PPR 图遍历、外部服务依赖 |
+
 ## 12. 后续优化（P1/P2 剩余）
 
-- 将世界/生态/压缩后台结算与「正文完成」拆成两个 UI 状态；当前旁路有超时和降级，
-  但 `performTurn()` 仍会等待拍后结算后才完全结束（待用户拍板再拆）。
-- 导演室增加记忆诊断与事件卡管理页面：触发原因、命中事件/证据数、超时、悬空引用、
-  来源楼层、手动升/降重要性。已提供 `GET /api/memory/events` 数据面。
-- 「正文完成」与「后台结算完成」拆分、真实 API 低频回照回归测试继续补齐。
+- 导演室记忆诊断与事件卡管理页（触发原因/命中/超时/来源楼层/手动升/降）；`GET /api/memory/events` + `/api/memory/diff` 已提供数据面
+- 「正文完成」与「后台结算完成」拆分、真实 API 低频回照回归测试继续补齐
+
+## 11.2 落地状态（历史记录，2026-08-28 · SQLite 迁移 + 正确性加固）
+
+存储后端从 JSONL 全文重写切换为 SQLite（`better-sqlite3`，原生事务/WAL/索引），并
+按上一轮审计 P0/P1 完成六项正确性加固：
+
+### SQLite 存储（`src/memory/store.ts`）
+
+- 单文件 `.liyuan-memory/memory.sqlite`；表 `memory_chunks`（向量 JSON + meta JSON，
+  索引按 scope+store+kind+eventId）+ `memory_diff`（审计行）。
+- 首访自动迁入旧 `scopes/**/stores/*/chunks.jsonl` 与 `memory-diff.jsonl`（幂等，仅在
+  目标 scope 尚无数据时导入）；删除路径会清理已迁入的旧 lain 目录。
+- `searchStore` 只检索「embedMode + embedModel + 维度」与当前一致的块（杜绝跨向量
+  空间误比）；排序去重加 `id` 兜底保证确定性。
+- `upsertTexts` 支持按块独立 meta（逐 entry 证据锚点依赖它）。
+
+### 正确性修复
+
+1. **分支隔离统一**：`memoryHitVisibleOnBranch` 由 `some` 收紧为 `every`——带 refs 的
+   内容须**全部** refs 落在当前祖先链才可见；source-backed 但缺 refs 默认不可见。
+   过滤统一应用到自动召回、`memory_search` 工具、事件列表（提取上下文）、显式
+   merge（`merge:<id>` 目标与本事件必须共享至少一个来源条目，否则 `stored:false`）。
+2. **并发防丢写**：服务层 keyed async mutex（`scopeId|storeId` 与全局配置两把锁）包住
+   事件 upsert / 归档 / 滚动入库 / 手工写入 / reembed 的读-改-写事务；叠加 SQLite 单
+   写者事务与 WAL，消除服务层 await 交错造成的丢更新。
+3. **事件游标结算**：`#rollMemoryEvents` 只在本窗口无事件或全部非 `skip` 事件保存成功
+   后才推进游标；任一失败不推进，下一窗口扩展重试（upsert 幂等，不重复建卡），失败
+   事件上报 onActivity。
+4. **证据锚点精确到 entry**：压缩归档改由 `compact.ts` 生成 `perEntry`
+   （`entryId + entryType + turn + 原始正文`），`memoryArchiveCompacted` 逐 entry 切块并
+   带 `charFrom/charTo`（坐标对齐 Session Tree 原始 `message.content`）；两阶段召回优先
+   返回「同 entry + 区间重叠」的证据块，不再整个压缩区间互扫首块误配。
+5. **新摘要严格校验 + canonical 统一**：`parseRpSummaryEnvelope` 暴露 `wasEnvelope`；
+   `validateRpSummaryMarkdown` 收紧——v2 envelope 缺 `## Story Phase` 或其他 10 节直接
+   拒绝；纯 Markdown 兜底需 ≥3 个标题（拒绝截断/报错/无格式文本）。归一化摘要时用
+   **被压缩区间 sourceRefs（不是整条分支）** 作为 canonical 种子，摘要别名与事件卡 id
+   不再分叉。
+6. **项目根测试命令**：新增依赖 `better-sqlite3`（`@types/better-sqlite3` 为 dev）；
+   构建以 Node 22 为 ABI 目标（`npm rebuild better-sqlite3 --target=22.19.0`）。
+
+### 新增回归测试（`test/rp-memory.test.ts`、`test/stage-compact.test.ts`、`test/stage-engine.test.ts`）
+
+- 逐 entry 归档 → 事件证据精确命中所在条目（不误拉无关 entry）；
+- 多 sourceRefs `every` 可见性（只看部分 refs → 整卡隐藏）；
+- 显式 merge 跨分支目标被拒、共享来源放行；
+- 6 路并发归档全部存活（锁串行化防丢写）；
+- `wasEnvelope` 解析标志；
+- 无结构/单节/缺节 v2 摘要一律拒绝提交。
+
+**历史验证记录**：当时记忆相关 + checkout + engine + scribe + model-routing 等 141 条全过；该阶段完整
+后端套件后来又增加了测试。当前结果以 2026-09-18 校准段为准。
+
+## 11.3 实测记录（历史记录，2026-08-28 · new/gpt-5.6-luna）
+
+- ✅ `new` 渠道已存在 `gpt-5.6-luna`，无需额外拉取；直接 `chat/completions` 请求返回
+  HTTP 200。`liyuan.config.json` 的 `stepModels.writer` 已切换为
+  `{ "provider": "new", "id": "gpt-5.6-luna" }`。
+- ✅ 使用真实实教二年级篇角色卡启动 server、建立新会话并通过 WS 发起正文回合成功；
+  实测收到计划接受、3 个路标演出、选择卡应答、角色/Skill 读取、面板创建、记账和
+  拍后世界处理等阶段信号。
+- ⚠️ 本次真实驱动在收到最终可判定的完整拍收束前被中止；因此**不能记为完整流程已
+  跑通**，也不能把本次回合计入“滚动剧情入库 / 事件提取 / 事件卡落库”实测样本。
+  后续验收必须同时看到 `agent:end`、assistant 正文落树、记忆 settlement，以及
+  `/api/memory/events` 的新增/更新结果。
+- ⚠️ 实测中 `ecologyRuntime`、`literaryWorld` 等旁路出现 90 秒超时并走降级快照；这
+  不等于主流程卡死，但必须和“只有活动日志、没有正文/终态”的 watchdog 区分开。
+- ✅ 确定性记忆链路另已验证：旧 JSONL 事件卡迁入 SQLite、云端 embedding、事件卡
+  upsert、perEntry evidence、事件→证据召回、语义检索和 reembed 均成功；该结果不
+  替代真实 StageEngine 端到端验收。
+
+### 11.4 2026-09-14 演出链回归
+
+- 实教二年级篇新会话完成三回合正文落树；修复前正文为 642–1085 字，修复字数目标识别和封笔软门禁后，单回合正文约 2289 字、净正文约 2229 字。
+- 正文关键路径已移除逐角色排演；人物主动性由导演统一处理，回合中不再按出场人数额外调用模型。
+- 模型热切换已验证：连接面板与设置页均可在不重启服务的情况下同步当前会话模型和 `stepModels.writer`。

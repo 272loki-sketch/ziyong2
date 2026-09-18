@@ -1,5 +1,7 @@
 # PLAN-RP-AGENT-EXEC：立骨架执行计划（M-A/M-B/M-C/M-D）
 
+> 历史执行计划。M-A/M-B/M-C 中的未完成项、旧 `draft_check`/`#revise` 形态和早期工具数量不代表当前实现；现状见 `docs/ARCHITECTURE-RP-PIPELINE-20260902.md`。
+
 > 2026-08-03 定稿。上游契约：docs/PLAN-RP-AGENT.md（两层设计：RP 工具栈 + 预设拆三层）。
 > 本文档是它的**执行计划**——把四个任务（agent 循环、RP 工具、预设拆层、板块工具化）收敛成
 > 四个里程碑，每步落到具体文件、带验收标准。23 拍实弹数据（8 层 × 主生成+2 roll）已坐实全部根因。
@@ -390,7 +392,7 @@ uid80 全文不含 `UpdateVariable` 字样，只有标题的 `[mvu_update]` 能�
 | 模型不调 writing_guide → 方法论缺席 | 工作循环契约温和提示；实弹观测调用率（activities 可见）；调用率低且正文质量受损才降级为首拍自动注入一次 |
 | 8/02 教训复发（steer/泄漏/二象性） | 循环互斥与谢幕判定沿用 M0 骨架的 busy/queue；叶守卫复用 scribe-run；工作区不跨 jiti 边界 |
 
-## 7. 待办总览（2026-08-03 调序：M-C 提前，M-B 后置）
+## 7. 待办总览（2026-09-18 校准）
 
 - [x] M-A：workspace.ts + writeTools + #agentLoop 重写 + 流层参数增量 + dist 重建 + 单测 + 两拍实弹（循环形态达成，思考未塌→M-C）
 - [x] M-C：拆层表+校验脚本 → 句级拆分器+规则摘除 → 拆层装配+去向报告 → writing_guide(topic) → assemble/engine 接线+sov 降档 → 回归 434 → 两拍实弹对照（§4.3 双 KPI；类型学 docs/PRESET-SPLIT-TAXONOMY.md）
@@ -399,7 +401,9 @@ uid80 全文不含 `UpdateVariable` 字样，只有标题的 `[mvu_update]` 能�
   452 绿，B 方案指纹已从 config 移除（§4.5.5）；② ~~S4 POV/user_boundary 互斥~~ **撤出范围**
   （2026-08-04 用户定案：预设自相矛盾是预设作者的事，梨园不当保姆）；
   ③ 首拍多样本复验 **未完成**（上游 500 频发，实得首拍 n=1）
-- [ ] **M-D（全盘工具化）**：把各板块做成 agent 可调用的工具（用户原意，非思考问题判据）。
+- [x] **M-D（全盘工具化）**：主要板块已统一为 agent 可调用工具；后续只保留明确缺口，不再把已完成 D1-D3 标作总项未完成。
+
+2026-09-18 补充：记忆系统可靠性修复、正文输入构成诊断和对应专项回归已完成；正文不新增硬裁剪。完整后端套件仍有 NovelAI UI 旧源码断言和 Outline research 脱敏断言两个历史失败，均不阻塞本次主链。
   **契约见 `docs/PLAN-RP-TOOLING.md`**（2026-08-04 定稿）——用户定案「三套注册表必须合一」，
   统一工具层取 stage 形状（纯数据 + 注入），M-D1 垂直切片 → 世界书 → 向量库 → 角色库 → 世界线
   - [x] **M-D1 地基 + lorebook_search 垂直切片**（2026-08-04，**464/464 绿**，未提交）：
@@ -417,7 +421,7 @@ uid80 全文不含 `UpdateVariable` 字样，只有标题的 `[mvu_update]` 能�
     门禁增 `DELETE_REQUEST_RE`（删除认删除信号，两个信号集分开）。
     `memory_import` 按 D-T3 并入 add。实弹拍1 零写入、拍2 落盘；
     **拍3 召回未取得**（上游 `Stream ended without finish_reason`，已用全新会话对照排除本次改动）
-- [ ] **路由破口（M-D1 发现）**：`/reroll <带参>` 绕过宿主拦截落到 pi 会话，
+- [ ] **路由破口（遗留）**：`/reroll <带参>` 绕过宿主拦截落到 pi 会话，
   经 `pi.sendUserMessage` 跑一次**无台上装配**的裸 LLM 回合（无预设拆层/无工作区/无验收器）。
   前端「编辑用户消息」即走此路（`web/src/App.tsx:1180`）。修法是宿主改道 StageEngine。
   **用户定案：归入 TOOLING §3 M-D6 统一修复（D 全做完后一并处理），中途不顺手改。**

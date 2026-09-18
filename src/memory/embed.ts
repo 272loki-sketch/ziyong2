@@ -93,6 +93,7 @@ export async function embedTextsCloud(
 			"content-type": "application/json",
 			authorization: `Bearer ${key}`,
 		},
+		signal: AbortSignal.timeout(30_000),
 		body: JSON.stringify({
 			model,
 			input: inputs.length === 1 ? inputs[0] : inputs,

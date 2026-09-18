@@ -215,7 +215,7 @@ export interface ModelsResponse {
 }
 
 export interface ModelRef { provider: string; id: string }
-export type SideModelStep = "writer" | "literaryContinuity" | "literaryDirector" | "literaryCharacter" | "literaryPersona" | "literaryWorld" | "worldProfile" | "literaryWorldFacts" | "literaryWorldAudit" | "ecologySearch" | "ecologyGlobal" | "ecologyCard" | "ecologyRuntime" | "outlineBootstrap" | "outlineChat" | "outlineReconcile" | "outlineResearch" | "novelDigest" | "outlineAudit" | "contractDeclare" | "scribe" | "compaction" | "presetSort";
+export type SideModelStep = "writer" | "literaryContinuity" | "literaryDirector" | "literaryCharacter" | "literaryPersona" | "literaryWorld" | "worldProfile" | "literaryWorldFacts" | "literaryWorldAudit" | "ecologySearch" | "ecologyGlobal" | "ecologyCard" | "ecologyRuntime" | "outlineBootstrap" | "outlineChat" | "outlineReconcile" | "outlineResearch" | "outlineCorpusResearch" | "novelDigest" | "outlineAudit" | "contractDeclare" | "scribe" | "compaction" | "presetSort";
 export type StepModelOverrides = Partial<Record<SideModelStep, ModelRef>>;
 
 export interface AuthProviderInfo {

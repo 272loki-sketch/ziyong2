@@ -2,8 +2,8 @@ import type { CharacterCard, LorebookEntry } from "../types.ts";
 import type { RpPreset } from "../preset.ts";
 
 const clip = (text: string, max: number): string => text.length <= max ? text : `${text.slice(0, max)}\n……（已截断 ${text.length - max} 字）`;
-const FORMAT_RE = /<\/?(?:StatusPlaceHolderImpl|StatusBlock|state\d+|user_now_status|comprehensive_now_status|NPC_status|NPC_perspective|calendar|Small_theater|options|chat)\b|状态栏|日历|小剧场|行动选项|FinalOutputFormat/i;
-const KNOWN_PAIR_TAGS = ["StatusBlock", "user_now_status", "comprehensive_now_status", "NPC_status", "NPC_perspective", "calendar", "Small_theater", "options", "chat"] as const;
+const FORMAT_RE = /<\/?(?:StatusPlaceHolderImpl|StatusBlock|state\d+|user_now_status|comprehensive_now_status|NPC_status|NPC_perspective|calendar|Small_theater|options|chat|image|imageTag)\b|状态栏|日历|小剧场|行动选项|FinalOutputFormat|NovelAI|nai4/i;
+const KNOWN_PAIR_TAGS = ["StatusBlock", "user_now_status", "comprehensive_now_status", "NPC_status", "NPC_perspective", "calendar", "Small_theater", "options", "chat", "image", "imageTag"] as const;
 const NATIVE_TAGS = new Set(["calendar"]);
 
 export interface CurtainFormatPlan {

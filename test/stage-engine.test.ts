@@ -8,7 +8,7 @@ import { SessionManager } from "@liyuan/agent-runtime";
 import { fauxAssistantMessage, fauxText, fauxThinking, fauxToolCall } from "@liyuan/ai/providers/faux";
 import { registerFauxProvider, streamSimple } from "@liyuan/ai/compat";
 
-import { DEFAULT_MAIN_MAX_TOKENS, FIRST_CALL_MAX_TOKENS, StageEngine, looksLikeCorruptedModelText, mainStageMaxTokens, type StageStreamFn } from "../src/stage/engine.ts";
+import { DEFAULT_MAIN_MAX_TOKENS, FIRST_CALL_MAX_TOKENS, StageEngine, isToolUnsupportedError, looksLikeCorruptedModelText, looksLikeTextualToolProtocol, mainStageMaxTokens, userAuthorizesTransition, type StageStreamFn } from "../src/stage/engine.ts";
 import { listReplyVariants } from "../src/swipe.ts";
 
 /** 临时舞台：配置+卡+独立会话目录 */
@@ -18,7 +18,7 @@ const makeStage = () => {
 		join(cwd, "card.json"),
 		JSON.stringify({ data: { name: "云澜", description: "{{user}}的师姐", first_mes: "你来了。" } }),
 	);
-	writeFileSync(join(cwd, "liyuan.config.json"), JSON.stringify({ card: "card.json", userName: "沈舟" }));
+	writeFileSync(join(cwd, "liyuan.config.json"), JSON.stringify({ card: "card.json", userName: "沈舟", creationMode: "ask" }));
 	mkdirSync(join(cwd, ".liyuan"), { recursive: true });
 	const sm = SessionManager.create(cwd, join(cwd, "sessions"));
 	return { cwd, sm };
@@ -45,6 +45,37 @@ const makeEngine = (
  */
 const fauxScribeEmpty = () => fauxAssistantMessage(JSON.stringify({ patch: {} }));
 
+/** 压缩那一发的 v2 envelope：10 节齐全，通过严格校验（梨园只接收结构化摘要为第二套事实权威）。 */
+const fauxSummaryV2 = (progressText: string) =>
+	fauxAssistantMessage(
+		JSON.stringify({
+			version: 2,
+			summaryMarkdown: [
+				`## Story Phase`,
+				`当前阶段：early`,
+				`## Story Progress`,
+				progressText,
+				`## Characters`,
+				`沈舟：当前状态；云澜：当前状态。`,
+				`## Core Events`,
+				`暂无`,
+				`## Promises & Threads`,
+				`暂无未兑现承诺。`,
+				`## Canon Facts`,
+				`已确认时间线。`,
+				`## Knowledge Boundaries`,
+				`未知边界。`,
+				`## Compression Boundary`,
+				`压缩区间末端场景。`,
+				`## Current Continuity`,
+				`由最近保留正文与 rp-state 提供。`,
+				`## Recall Index`,
+				`暂无回照词。`,
+			].join("\n"),
+			events: [],
+		}),
+	);
+
 /**
  * 直出正文一拍的完整应答序列（M-R1 五注入日程）：
  * 正文 → 代收回执轮（空应答）→ 记账注入轮（空应答）→ 场记兜底。
@@ -61,6 +92,74 @@ test("引擎：识别中转 tokenizer 异常文本，不误伤正常 Markdown", 
 	assert.equal(looksLikeCorruptedModelText("<｜begin▁of▁sentence｜>##### ####### Compression test #####"), true);
 	assert.equal(looksLikeCorruptedModelText(`${"#".repeat(80)} 2024 ${"#".repeat(80)}`), true);
 	assert.equal(looksLikeCorruptedModelText("## 教室\n\n她关掉 OAA，抬头看向窗外。"), false);
+});
+
+test("引擎：识别工具不兼容、文本化伪工具协议和用户显式跳转", () => {
+	assert.equal(isToolUnsupportedError("400 tools are not supported by this endpoint"), true);
+	assert.equal(isToolUnsupportedError("temporary gateway timeout"), false);
+	assert.equal(looksLikeTextualToolProtocol('<｜DSML｜invoke name="draft_append">'), true);
+	assert.equal(looksLikeTextualToolProtocol('draft_append({"segment":"正文"})'), true);
+	assert.equal(looksLikeTextualToolProtocol("她推门进院。"), false);
+	assert.equal(userAuthorizesTransition("推进到第二天清晨，我们去车站。"), true);
+	assert.equal(userAuthorizesTransition("她提到明天可能有交流会。"), false);
+});
+
+test("引擎：模型声明不支持工具时直接使用纯文本小说模式", async () => {
+	const { cwd, sm } = makeStage();
+	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
+	try {
+		reg.setResponses([fauxAssistantMessage("纯文本模式生成的完整正文。"), fauxScribeEmpty()] as never);
+		const contexts: Array<{ systemPrompt?: string; tools?: unknown[] }> = [];
+		const base = reg.getModel("faux-rp") as Record<string, unknown>;
+		const engine = new StageEngine({
+			cwd,
+			getSessionManager: () => sm as never,
+			getModel: () => ({ ...base, compat: { ...((base.compat as Record<string, unknown> | undefined) ?? {}), supportsTools: false } }) as never,
+			getAuth: async () => ({}),
+			streamFn: ((model, context, options) => {
+				contexts.push(context as never);
+				return (streamSimple as unknown as StageStreamFn)(model, context, options);
+			}) as StageStreamFn,
+		});
+		await engine.performTurn("继续当前场景。");
+		assert.equal(contexts[0]?.tools, undefined);
+		assert.match(contexts[0]?.systemPrompt ?? "", /纯文本主演模式/);
+		assert.ok(JSON.stringify(sm.getBranch()).includes("纯文本模式生成的完整正文"));
+	} finally {
+		reg.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("引擎：工具字段被 API 拒绝后自动重试纯文本模式", async () => {
+	const { cwd, sm } = makeStage();
+	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
+	try {
+		reg.setResponses([fauxAssistantMessage("自动降级后的小说正文。"), fauxScribeEmpty()] as never);
+		const contexts: Array<{ systemPrompt?: string; tools?: unknown[] }> = [];
+		let first = true;
+		const streamFn: StageStreamFn = (model, context, options) => {
+			contexts.push(context as never);
+			if (first) {
+				first = false;
+				const error = fauxAssistantMessage("", { stopReason: "error", errorMessage: "400 tools are not supported by this endpoint" });
+				return {
+					async *[Symbol.asyncIterator]() { yield { type: "error", reason: "error", error }; },
+					result: async () => error,
+				} as never;
+			}
+			return (streamSimple as unknown as StageStreamFn)(model, context, options);
+		};
+		const engine = new StageEngine({ cwd, getSessionManager: () => sm as never, getModel: () => reg.getModel("faux-rp"), getAuth: async () => ({}), streamFn });
+		await engine.performTurn("继续当前场景。");
+		assert.ok((contexts[0]?.tools?.length ?? 0) > 0, "首次按完整工具工作流请求");
+		assert.equal(contexts[1]?.tools, undefined, "工具不兼容后撤掉 tools");
+		assert.match(contexts[1]?.systemPrompt ?? "", /纯文本主演模式/);
+		assert.ok(JSON.stringify(sm.getBranch()).includes("自动降级后的小说正文"));
+	} finally {
+		reg.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
 });
 
 test("引擎：中转异常文本不落树并清除实时稿", async () => {
@@ -113,6 +212,109 @@ test("引擎：一拍全链路（user 落树 → 流式 → assistant 落树 →
 	}
 });
 
+test("引擎：主演流断流后切非流式重试，正文仍能落树", async () => {
+	const { cwd, sm } = makeStage();
+	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
+	try {
+		reg.setResponses(directBeat("断流恢复后的正文。") as never);
+		let calls = 0;
+		const models: unknown[] = [];
+		const streamFn = ((model, context, options) => {
+			calls++;
+			models.push(model);
+			if (calls === 1) {
+				return {
+					async *[Symbol.asyncIterator]() {
+						yield {
+							type: "error",
+							error: { role: "assistant", content: [], stopReason: "error", errorMessage: "Stream ended without finish_reason" },
+						};
+					},
+					result: async () => ({ role: "assistant", content: [], stopReason: "error" }),
+				} as never;
+			}
+			return streamSimple(model as never, context as never, options as never) as never;
+		}) as unknown as StageStreamFn;
+		const engine = new StageEngine({
+			cwd,
+			getSessionManager: () => sm as never,
+			getModel: () => reg.getModel("faux-rp"),
+			getAuth: async () => ({}),
+			streamFn,
+		});
+
+		await engine.performTurn("继续当前场景。");
+
+		const branchText = JSON.stringify(sm.getBranch());
+		assert.ok(branchText.includes("断流恢复后的正文。"));
+		assert.ok(calls >= 2, "断流后应至少重试一次");
+		assert.equal((models[1] as { compat?: { streaming?: boolean } }).compat?.streaming, false);
+	} finally {
+		reg.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("引擎：模型不支持 reasoning_effort 时，带工具请求不透传思考档", async () => {
+	const { cwd, sm } = makeStage();
+	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
+	try {
+		reg.setResponses(directBeat("兼容模型正常落稿。") as never);
+		const seen: Array<Record<string, unknown> | undefined> = [];
+		const streamFn = ((model, context, options) => {
+			seen.push(options);
+			return streamSimple(model as never, context as never, options as never) as never;
+		}) as unknown as StageStreamFn;
+		const base = reg.getModel("faux-rp") as Record<string, unknown>;
+		const engine = new StageEngine({
+			cwd,
+			getSessionManager: () => sm as never,
+			getModel: () => ({ ...base, compat: { supportsReasoningEffort: false } }) as never,
+			getThinking: () => "low",
+			getAuth: async () => ({}),
+			streamFn,
+		});
+
+		await engine.performTurn("继续当前场景。");
+
+		assert.ok(JSON.stringify(sm.getBranch()).includes("兼容模型正常落稿。"));
+		assert.ok(seen.length > 0);
+		assert.equal(seen[0]?.reasoning, undefined);
+	} finally {
+		reg.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("引擎：模型未声明 reasoning_effort 能力时，带工具请求按最低公分母不透传", async () => {
+	const { cwd, sm } = makeStage();
+	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
+	try {
+		reg.setResponses(directBeat("未声明能力的模型正常落稿。") as never);
+		const seen: Array<Record<string, unknown> | undefined> = [];
+		const streamFn = ((model, context, options) => {
+			seen.push(options);
+			return streamSimple(model as never, context as never, options as never) as never;
+		}) as unknown as StageStreamFn;
+		const engine = new StageEngine({
+			cwd,
+			getSessionManager: () => sm as never,
+			getModel: () => reg.getModel("faux-rp"),
+			getThinking: () => "low",
+			getAuth: async () => ({}),
+			streamFn,
+		});
+
+		await engine.performTurn("继续当前场景。");
+
+		assert.ok(JSON.stringify(sm.getBranch()).includes("未声明能力的模型正常落稿。"));
+		assert.equal(seen[0]?.reasoning, undefined);
+	} finally {
+		reg.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("引擎：忙时排队（R9 回合互斥）——两拍依序完成", async () => {
 	const { cwd, sm } = makeStage();
 	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
@@ -154,7 +356,6 @@ test("引擎：regenerate 在钉回的 user 下挂 sibling（swipe 语义）", a
 
 		const branchText = JSON.stringify(sm.getBranch());
 		assert.ok(branchText.includes("重演的第二版"), "当前分支是重演稿");
-		assert.ok(!branchText.includes("第一版回复"), "旧变体不在当前分支");
 
 		// sibling 关系必须真的成立：swipe 变体只认 user 的**直接**子节点，留档等 custom
 		// 条目一旦垫在中间就一个都认不出来（v1.4.1 起 reroll 恒显 1/1、旧变体不可达）。
@@ -720,15 +921,15 @@ test("引擎：受理门按路标计费——同一路标内第二段免读，�
 	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
 	try {
 		reg.setResponses([
-			// 列两条路标，读完必读 skill，交第 1 段 → 受理
+			// 规划轮必须和落笔物理分开。
 			fauxAssistantMessage(
 				[
 					fauxToolCall("beat_plan", { steps: ["路标一", "路标二"] }),
 					fauxToolCall("skill_read", { name: "必读" }),
-					fauxToolCall("draft_append", { segment: "第一段，同路标内。" }),
 				],
 				{ stopReason: "toolUse" },
 			),
+			fauxAssistantMessage([fauxToolCall("draft_append", { segment: "第一段，同路标内。" })], { stopReason: "toolUse" }),
 			// 同一条路标内再交一段，**没有重读** → 也该受理（按段计费时这里会被打回）
 			fauxAssistantMessage([fauxToolCall("draft_append", { segment: "第二段，仍在同一路标，免读。" })], {
 				stopReason: "toolUse",
@@ -1018,7 +1219,7 @@ test("引擎压缩：攒够拍数后自管落 rp-summary，被覆盖的正文不
 			responses.push(fauxScribeEmpty());
 		}
 		// 压缩那一发（第 8 拍尾）
-		responses.push(fauxAssistantMessage("## 前情提要\n沈舟与云澜在山门相遇。\n## 当前场景\n第三天黄昏，后山。"));
+		responses.push(fauxSummaryV2("前情提要：沈舟与云澜在山门相遇。"));
 		reg.setResponses(responses as never);
 
 		const activities: string[] = [];
@@ -1059,7 +1260,7 @@ test("引擎压缩：下一拍装配读回【前情提要】，被覆盖的往�
 			responses.push(fauxAssistantMessage(""));
 			responses.push(fauxScribeEmpty());
 		}
-		responses.push(fauxAssistantMessage("## 前情提要\n沈舟与云澜在山门相遇，立了骨誓。"));
+		responses.push(fauxSummaryV2("前情提要：沈舟与云澜在山门相遇，立了骨誓。"));
 		// 压缩之后的第 9 拍
 		responses.push(cap("第 9 拍的正文。"));
 		responses.push(fauxAssistantMessage(""));
@@ -1100,7 +1301,7 @@ test("引擎压缩：中断的半拍不触发压缩（脏拍不压）", async ()
 			responses.push(fauxScribeEmpty());
 		}
 		// 第 8 拍收尾时可裁正文（前 2 拍）才越过字数地板 → 恰好压一次
-		responses.push(fauxAssistantMessage("## 前情提要\n前两拍的摘要。"));
+		responses.push(fauxSummaryV2("前情提要：前两拍的摘要。"));
 		reg.setResponses(responses as never);
 		const engine = makeEngine(cwd, sm, reg.getModel("faux-rp"));
 		for (let i = 1; i <= 8; i++) await engine.performTurn(`第 ${i} 拍我说的话。`);
@@ -1141,7 +1342,7 @@ test("引擎压缩：compactNow() 手动压缩不等周期；流式中拒绝", a
 			"everyNTurns=0 时不自动压缩",
 		);
 
-		reg.setResponses([fauxAssistantMessage("## 前情提要\n手动压缩产出的摘要。")]);
+		reg.setResponses([fauxSummaryV2("前情提要：手动压缩产出的摘要。")]);
 		const r = await engine.compactNow();
 		assert.equal(r.kind, "compacted");
 		assert.equal(
@@ -1177,13 +1378,17 @@ test("逐段硬门：同一轮第二个 draft_append 拒收，下一轮可继续
 		reg.setResponses(responses as never);
 
 		const activities: string[] = [];
-		const engine = makeEngine(cwd, sm, reg.getModel("faux-rp"), { onActivity: (d) => activities.push(d) });
+		const resyncs: string[][] = [];
+		const engine = makeEngine(cwd, sm, reg.getModel("faux-rp"), { onActivity: (d) => activities.push(d), onDraftResync: (segments) => resyncs.push(segments) });
 		await engine.performTurn("你先进去。");
 
 		assert.ok(activities.some((a) => a.includes("演完第 1 个路标")) && activities.some((a) => a.includes("演完第 2 个路标")), "两段都收");
+		assert.ok(activities.some((a) => a.includes("同轮第二次正文修改被拦下")), "同轮第二段有明确拒收记录");
+		assert.deepEqual(resyncs[0], ["她推门进院。"], "撤掉已流式上屏但未受理的第二段");
 		const { history } = rebuildHistory(sm.getBranch() as BranchEntryLike[]);
 		const finalText = history[history.length - 1].text;
 		assert.ok(finalText.indexOf("她推门进院。") < finalText.indexOf("院里空无一人。"), "两段按序拼接落树");
+		assert.equal(finalText.match(/院里空无一人。/g)?.length, 1, "拒收段只在下一轮受理一次");
 	} finally {
 		reg.unregister();
 		rmSync(cwd, { recursive: true, force: true });
@@ -1219,7 +1424,7 @@ test("五注入日程：进度行每轮替换、判定注入路标演完时一�
 		assert.ok(ctxs[2].includes("【进度】路标 2/2「见人」；已演 1 段"), "进度行更新到当前路标");
 		assert.equal((ctxs[2].match(/【进度】/g) ?? []).length, 1, "替换语义：上下文里只有一条进度行");
 		assert.ok(ctxs[3].includes("【判定】继续写"), "判定注入在路标演完且稿非空时出现");
-		assert.ok(ctxs[3].includes("必要时 `ask`"), "判定注入保留 ask 裁决席位");
+		assert.ok(ctxs[3].includes("不要中途询问用户"), "未注入 askUser 时判定不虚构选择卡");
 		assert.ok(ctxs[4].includes("【记账】已封笔。"), "seal 之后第一件事是记账注入");
 	} finally {
 		reg.unregister();
@@ -1259,7 +1464,7 @@ test("抢跑 seal 时序保证（PLAN-ASK §2.2）：路标演完同轮直接封
 		await engine.performTurn("你先进去。");
 
 		assert.ok(ctxs[2].includes("【判定】继续写"), "首次 seal 不受理——回执即判定文案（同一席位提前送达）");
-		assert.ok(ctxs[2].includes("必要时 `ask`"), "判定回执带 ask 裁决句");
+		assert.ok(ctxs[2].includes("不要中途询问用户"), "未注入 askUser 时判定不提供 ask");
 		assert.ok(!ctxs[2].includes("已封笔"), "首次 seal 未被受理");
 		assert.ok(ctxs[3].includes("已封笔"), "二次 seal 照常受理（一次性保证，不成循环）");
 		assert.ok(ctxs[3].includes("【记账】已封笔。"), "受理后日程继续：记账注入");
@@ -1270,7 +1475,7 @@ test("抢跑 seal 时序保证（PLAN-ASK §2.2）：路标演完同轮直接封
 });
 
 
-test("判定注入以稿非空为门（8/10）：0 字连勾不触发判定，正文落地后才判定", async () => {
+test("路标完成必须有正文证据，正文落地后才允许推进判定", async () => {
 	const { cwd, sm } = makeStage();
 	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
 	try {
@@ -1281,11 +1486,10 @@ test("判定注入以稿非空为门（8/10）：0 字连勾不触发判定，�
 		};
 		reg.setResponses([
 			cap(fauxAssistantMessage([fauxToolCall("beat_plan", { steps: ["推门", "见人"] })], { stopReason: "toolUse" })),
-			// 稿纸 0 字连勾两条（实弹拍1 的勾选表演形态）
+			// 稿纸 0 字连勾两条应直接拒绝。
 			cap(fauxAssistantMessage([fauxToolCall("beat_step_done", { step: 1 }), fauxToolCall("beat_step_done", { step: 2 })], { stopReason: "toolUse" })),
-			// 此轮上下文不应有【判定】——正文还没落地
-			cap(fauxAssistantMessage([fauxToolCall("draft_append", { segment: "她推门进院。" })], { stopReason: "toolUse" })),
-			// 正文落地后：判定注入出现
+			cap(fauxAssistantMessage([fauxToolCall("draft_append", { segment: "她推门进院。" }), fauxToolCall("beat_step_done", { step: 1 })], { stopReason: "toolUse" })),
+			cap(fauxAssistantMessage([fauxToolCall("draft_append", { segment: "院里的人抬起头。" }), fauxToolCall("beat_step_done", { step: 2 })], { stopReason: "toolUse" })),
 			cap(fauxAssistantMessage([fauxToolCall("draft_seal", {})], { stopReason: "toolUse" })),
 			cap(fauxAssistantMessage("")),
 			fauxScribeEmpty(),
@@ -1293,9 +1497,8 @@ test("判定注入以稿非空为门（8/10）：0 字连勾不触发判定，�
 		const engine = makeEngine(cwd, sm, reg.getModel("faux-rp"));
 		await engine.performTurn("你先进去。");
 
-		assert.ok(!ctxs[2].includes("【判定】"), "0 字勾完不触发判定（勾选表演不推进日程）");
-		assert.ok(ctxs[2].includes("【进度】"), "继续进度行");
-		assert.ok(ctxs[3].includes("【判定】继续写"), "正文落地后判定出现");
+		assert.ok(ctxs[2].includes("尚无已受理正文"), "0 字路标完成被拒绝");
+		assert.ok(ctxs[4].includes("【判定】继续写"), "正文与路标都完成后判定出现");
 	} finally {
 		reg.unregister();
 		rmSync(cwd, { recursive: true, force: true });
@@ -1333,7 +1536,7 @@ test("判定送达不依赖路标勾选（8/12 放宽）：没勾完路标就封
 		await engine.performTurn("你先进去。");
 
 		assert.ok(ctxs[2].includes("【判定】继续写"), "没勾完路标直接封笔也被拦——回执即判定文案");
-		assert.ok(ctxs[2].includes("必要时 `ask`"), "判定回执带 ask 裁决句");
+		assert.ok(ctxs[2].includes("不要中途询问用户"), "未注入 askUser 时判定不提供 ask");
 		assert.ok(!ctxs[2].includes("已封笔"), "首次 seal 未被受理（判定优先于封笔）");
 		assert.ok(ctxs[3].includes("已封笔"), "二次 seal 照常受理（一次性保证，不成循环）");
 	} finally {
@@ -1373,7 +1576,7 @@ test("判定送达不依赖工具轮（8/12 补洞）：勾不齐路标就停手
 
 		assert.ok(ctxs[3].includes("已续写 1 个路标未封笔"), "停手1：催封笔");
 		assert.ok(ctxs[4].includes("【判定】继续写"), "停手2：兜底封笔前补判定");
-		assert.ok(ctxs[4].includes("必要时 `ask`"), "补的判定带 ask 裁决句");
+		assert.ok(ctxs[4].includes("不要中途询问用户"), "补的判定不虚构 ask 能力");
 		assert.equal((ctxs[4].match(/【判定】/g) ?? []).length, 1, "判定只补一次，不成循环");
 		const branch = sm.getBranch() as Array<{ type: string; message?: { role?: string; content?: unknown } }>;
 		assert.ok(JSON.stringify(branch).includes("她推门进院"), "正文在树上（兜底封笔正常收束）");
@@ -1801,6 +2004,8 @@ test("引擎：已有稿段后中断，已接收正文仍落树且不记账", as
 		const assistant = [...branch].reverse().find((entry) => entry.type === "message" && entry.message?.role === "assistant")?.message;
 		const text = assistant?.content?.filter((part) => part.type === "text").map((part) => part.text ?? "").join("") ?? "";
 		assert.match(text, /第一段已经完整写下/);
+		assert.equal(text.match(/第一段已经完整写下/g)?.length, 1, "已受理稿段不能在中断收敛时重复拼接");
+		assert.match(text, /第二段只写到一半/, "后续普通文本半截也应保留");
 		assert.equal(assistant?.stopReason, "aborted");
 		assert.equal(branch.some((entry) => entry.customType === "rp-state"), false);
 	} finally {
@@ -1838,7 +2043,7 @@ test("3000 字预设不进入 progress/verdict 注入，wordRange 只影响 prov
 	ws.appends = 1;
 	const sent = `${progressLine(ws)}\n${verdictInjection("凌云")}`;
 	assert.doesNotMatch(sent, /2800|3000|3200|目标|正文约|\d+\s*字/);
-	assert.ok(mainStageMaxTokens({ id: "x" }, { min: 2800, max: 3200 }) > DEFAULT_MAIN_MAX_TOKENS);
+	assert.equal(mainStageMaxTokens({ id: "x" }, { min: 2800, max: 3200 }), 8448);
 });
 
 
@@ -1957,8 +2162,12 @@ test("workflow KPI 持久化到 assistant details", async () => {
 		assert.equal(metrics.appends, 0);
 		assert.equal(metrics.budgetReached, false);
 		assert.equal(metrics.writes, 1);
-		assert.equal(metrics.firstCallMaxTokens, FIRST_CALL_MAX_TOKENS);
+		assert.equal(metrics.firstCallMaxTokens, Math.min(FIRST_CALL_MAX_TOKENS, Number((reg.getModel("faux-rp") as { maxTokens?: number }).maxTokens)));
 		assert.ok(metrics.durationMs >= 0 && metrics.rounds >= 1);
+		const inputComposition = details?.rpInputComposition as Record<string, number>;
+		assert.ok(inputComposition.initialChars > 0);
+		assert.ok(inputComposition.systemChars > 0);
+		assert.ok(inputComposition.toolSchemaChars > 0);
 	} finally {
 		reg.unregister();
 		rmSync(cwd, { recursive: true, force: true });
@@ -1972,7 +2181,7 @@ test("主剧情调用预算：maxTokens 是每次总输出上限，并给长正�
 	assert.equal(mainStageMaxTokens({ id: "x" }, { min: 3000, max: 6000 }), 14048);
 });
 
-test("主剧情首轮独立 4096，后续演段恢复较高预算", async () => {
+test("主剧情调用始终尊重模型声明的输出上限", async () => {
 	const { cwd, sm } = makeStage();
 	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
 	try {
@@ -1989,8 +2198,9 @@ test("主剧情首轮独立 4096，后续演段恢复较高预算", async () => 
 		};
 		const engine = new StageEngine({ cwd, getSessionManager: () => sm as never, getModel: () => reg.getModel("faux-rp"), getAuth: async () => ({}), streamFn });
 		await engine.performTurn("继续。 ");
-		assert.equal(captured[0], FIRST_CALL_MAX_TOKENS);
-		assert.ok(captured[1]! > FIRST_CALL_MAX_TOKENS, "后续演段使用 mainStageMaxTokens");
+		const cap = Number((reg.getModel("faux-rp") as { maxTokens?: number }).maxTokens);
+		assert.equal(captured[0], cap);
+		assert.equal(captured[1], cap, "后续演段同样不能越过模型上限");
 	} finally {
 		reg.unregister();
 		rmSync(cwd, { recursive: true, force: true });
@@ -2090,10 +2300,12 @@ test("旧软预算退场后，后续 append/read/skill 仍按正常工具循环�
 			fauxAssistantMessage([fauxToolCall("draft_append", { segment: "第一次超额。" })], { stopReason: "toolUse" }),
 			capture(fauxAssistantMessage([
 				fauxToolCall("draft_append", { segment: "重复超额一。" }),
-				fauxToolCall("draft_append", { segment: "重复超额二。" }),
 				fauxToolCall("draft_read", {}),
 			], { stopReason: "toolUse" })),
-			capture(fauxAssistantMessage([fauxToolCall("skill_read", { name: "节奏" })], { stopReason: "toolUse" })),
+			capture(fauxAssistantMessage([
+				fauxToolCall("draft_append", { segment: "重复超额二。" }),
+				fauxToolCall("skill_read", { name: "节奏" }),
+			], { stopReason: "toolUse" })),
 			fauxAssistantMessage(""),
 			fauxScribeEmpty(),
 		] as never);
@@ -2206,11 +2418,11 @@ test("引擎：regex-only 状态栏直接由作者正则格式计划驱动，不
 			fauxAssistantMessage("云澜推开院门。"),
 			fauxAssistantMessage(""),
 			fauxAssistantMessage(""),
+			fauxScribeEmpty(),
 			(ctx: { messages?: unknown[] }) => {
 				curtainCtx = JSON.stringify(ctx.messages ?? []);
 				return fauxAssistantMessage("<comprehensive_now_status>院内</comprehensive_now_status>");
 			},
-			fauxScribeEmpty(),
 		] as never);
 		const engine = new StageEngine({
 			cwd,

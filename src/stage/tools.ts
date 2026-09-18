@@ -91,7 +91,7 @@ export function writeTools(language: string, maxPlanSteps = 3): StageTool[] {
 				`列出这一拍要演的几步（${language}）——落笔前先在这里构思。` +
 				`每条写**这一步发生什么**，一句话的**抽象路标**，` +
 				`不写这一步怎么演（留给演到那个路标时再想），也不写字数。` +
-				`2~8 条。列路标时按本拍总字数把篇幅分配到各步（几步分几份，每个路标心里有数）。` +
+				`1~8 条。列路标时按本拍总字数把篇幅分配到各步（几步分几份，每个路标心里有数）。` +
 				`这是草图不是剧本：演到中途剧情走岔了，随时重调本工具改写剩下的步骤。`,
 			parameters: {
 				type: "object",
@@ -121,9 +121,10 @@ export function writeTools(language: string, maxPlanSteps = 3): StageTool[] {
 		},
 		{
 			name: "draft_append",
-			description:
-				`往下演一个路标（${language}）——你落笔的方式。` +
-				`在现稿末尾追加，不覆盖已写部分：交出去的就是已经发生的事，不会被打回。` +
+				description:
+					`往下演一个路标（${language}）——你落笔的方式。` +
+					`在现稿末尾追加，不覆盖已写部分：交出去的就是已经发生的事，不会被打回。` +
+					`正文按正常小说段落输出：独立动作、反应或对白段之间使用空行，不要把多个完整句和多个动作挤成一个大段。` +
 				`落笔前先思考剧情、构思文字，再书写正文。随后判断：` +
 				`接下来要不要 ask 用户、剩余路标是否需要重拟、戏是否到停点。` +
 				`演完一个路标就交。全部演完调用 draft_seal 收笔。`,
@@ -155,7 +156,7 @@ export function writeTools(language: string, maxPlanSteps = 3): StageTool[] {
 		{
 			name: "draft_seal",
 			description:
-				"封笔：声明正文已全部写完，返回完整稿的验收事实（字数/文面/主权）。" +
+				"封笔：声明正文已全部写完。明确篇幅目标明显未达到时，系统可能暂缓封笔并要求继续当前场景。" +
 				"分路标续写（draft_append）结束后必须调用本工具，否则本拍没有最终正文。",
 			parameters: { type: "object", properties: {}, required: [] },
 		},
@@ -189,7 +190,7 @@ export function writeTools(language: string, maxPlanSteps = 3): StageTool[] {
 		{
 			name: "draft_read",
 			description:
-				"读回当前稿全文，附稿次与**验收口径字数**（与字数规则同一口径，不含标签模块）。" +
+				"读回当前稿全文与稿次。" +
 				"改了多轮后拿不准现稿长什么样、或要给 draft_edit 取原文时调用。",
 			parameters: { type: "object", properties: {}, required: [] },
 		},
@@ -210,7 +211,7 @@ export function writeTools(language: string, maxPlanSteps = 3): StageTool[] {
 				"提交世界状态账本补丁（合并语义）：time/location 字符串整体替换；characters 按角色名合并字段" +
 				"（affinity 数值/status/notes，传 null 删除该角色）；flags 按键合并（null 删除）；" +
 				"inventory/plot_threads 传**字符串数组**整体替换（如 [\"补气丹（已服用）\"]，元素不能是对象）。" +
-				"仅在 draft_write 或 draft_seal 已封笔后受理。",
+				"仅在 draft_seal 已封笔后受理；draft_write 交稿后也必须先显式封笔。",
 			parameters: {
 				type: "object",
 				properties: {

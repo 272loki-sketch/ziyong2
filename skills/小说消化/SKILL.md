@@ -41,15 +41,28 @@ resident: false
   }
 }
 
-## task: digest-extract
+## task: digest-extract-mechanisms
 
-输入：{ task, doc_title, synopsis, structure, arc_summaries }
+输入：{ task, doc_title, synopsis, structure, evidence_index: [{ id, kind, locator, summary }] }
 提炼**可复用的叙事套路**，不是复述剧情。每条必须：
 - mechanism：去掉作品专名后的可复用手法（桥段结构/信息分配/节奏手段/关系推进方式）
 - appliesWhen：适用的人物动机、关系阶段、压力与前置条件
 - failureWarning：这套手法用滥/用错会怎么翻车（OOC、拖节奏、伏笔崩）
-- sourceIds：固定填输入里的 docId（形如 ["doc-..."]），locator 用"第X–Y章"
+- evidenceIds：只能填写 `evidence_index` 中真实存在、直接支撑该结论的 1–4 个 id。出处由系统根据 id 确定性生成，禁止自行填写章节或出处
 禁止：输出原作专名、台词、标志性场景序列、完整反转、可识别的换皮方案；
-不能从输入确认的内容不要编造。最多 40 条，材料不足返回空数组。
-返回：{ "tropes": [{ "mechanism": string, "appliesWhen": string,
-  "failureWarning": string, "locator": string }] }
+不能从输入确认的内容不要编造。具体桥段机制必须至少引用一个 `chunk-*`；只有全书结构结论才可只引用 `arc-*`。最多 40 条，材料不足返回空数组。
+返回：`{ "tropes": [{ "mechanism": string, "appliesWhen": string, "failureWarning": string, "evidenceIds": string[] }] }`
+
+## task: digest-extract-daily
+
+输入同上。提炼可直接落地的日常剧情结构，返回 `dailyPatterns`。每条必须有活动、角色主动目的、发糖点、低烈度冲突或误会、关系微变化和自然停点，并至少引用一个 `chunk-*`。字段：`title`、`setting`、`surfaceActivity`、`initiative`、`sweetBeat`、`friction`、`misunderstanding`、`microChange`、`escalationLimit`、`naturalStop`、`failureWarning`、`evidenceIds`。最多 20 条。
+返回：`{ "dailyPatterns": [] }`
+
+## task: digest-extract-assets
+
+输入同上。提炼可调度中尺度素材，最多 30 条。`kind` 只允许 `scene-pattern|relationship-beat|dialogue-move`。字段：`kind`、`title`、`mechanism`、`appliesWhen`、`failureWarning`、`opening`、`progression`、`turn`、`stopPoint`、`relationshipStage`、`pressure`、`desiredExperience`、`evidenceIds`；至少引用一个 `chunk-*`。
+返回：`{ "assets": [] }`
+
+## task: digest-audit
+
+输入：证据索引与待审计条目。逐条判断结论是否由其 evidenceIds 直接支持，是否把推测写成原作事实。`supported` 表示直接支持，`weak` 表示可作抽象灵感但证据不够强，`unsupported` 表示无关或编造。只返回：`{ "results": [{ "index": 0, "verdict": "supported|weak|unsupported", "reason": "简短理由" }] }`。
