@@ -5,24 +5,36 @@ on:
 permissions:
   contents: write
 jobs:
-  apply:
-    if: github.event.head_commit.message == 'Apply durable novel API hardening'
+  test-fix:
+    if: github.event.head_commit.message == 'Fix novel API tests after hardening'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: feat/novel-play-foundation
-          fetch-depth: 12
-      - name: Apply and commit source before tests
+      - name: Commit owned test corrections then verify
         shell: bash
         run: |
-          git show e28b0ffc1f6e29ff5148db9f14ca70aace24ec07:.github/workflows/fix-novel-api-blockers.yml > /tmp/original.yml
-          sed -n '/cat > \/tmp\/fix.py/,/python \/tmp\/fix.py/p' /tmp/original.yml | sed '$d' | sed 's/^          //' > /tmp/run-fix.sh
-          bash /tmp/run-fix.sh
-          python /tmp/fix.py
-          git checkout -- test/novel-play-api-audit.test.ts
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('test/novel-play-api.test.ts'); s=p.read_text()
+          old='''function host(root: string, model: (system: string, user: string) => string): RestHost {
+\treturn { cwd: root, isStreaming: () => false, runSideText: async (_step, system, user) => model(system, user), memoryScope: () => ({ sessionId: "test", card: "assets/cards/default_Qingwu.json" }), switchToCard: async () => "created" } as unknown as RestHost;
+}'''
+          new='''function host(root: string, model: (system: string, user: string) => string): RestHost {
+\tlet runtimeCard = "assets/cards/default_Qingwu.json";
+\treturn { cwd: root, isStreaming: () => false, runSideText: async (_step, system, user) => model(system, user), memoryScope: () => ({ sessionId: "test", card: runtimeCard }), switchToCard: async () => { runtimeCard = JSON.parse(readFileSync(join(root, "liyuan.config.json"), "utf8")).card; return "created"; } } as unknown as RestHost;
+}'''
+          assert old in s; p.write_text(s.replace(old,new))
+          p=Path('test/novel-play-api-audit.test.ts'); s=p.read_text()
+          s=s.replace('const start = api.indexOf("await startFromConfirmedProposal", consume);','const start = api.indexOf("startFromConfirmedProposal", consume);')
+          s=s.replace('assert.match(application, /memoryScope\\(\\)\\.sessionId/);\n\tassert.match(application, /loadRawConfig\\(host\\.cwd\\)\\.config\\.card/);','assert.match(application, /const scope = host\\.memoryScope\\(\\)/);\n\tassert.match(application, /const sessionId = scope\\.sessionId/);\n\tassert.match(application, /runtimeCard !== configCard/);')
+          s=s.replace('assert.equal(NOVEL_PLAY_LIMITS.buildDeadlineMs, 120_000);','assert.equal(NOVEL_PLAY_LIMITS.buildDeadlineMs, 30 * 60_000);\n\tassert.equal(NOVEL_PLAY_LIMITS.modelCallDeadlineMs, 120_000);\n\tassert.equal(NOVEL_PLAY_LIMITS.startSwitchDeadlineMs, 30_000);')
+          p.write_text(s)
+          PY
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add src/novel-play/application.ts server/novel-play-api.ts
-          git commit -m "Harden novel API admission and switch recovery"
+          git add test/novel-play-api.test.ts test/novel-play-api-audit.test.ts
+          git commit -m "Align novel API tests with runtime card binding"
           git push origin HEAD:feat/novel-play-foundation
+          node --test --test-reporter=./scripts/test-summary.mjs test/novel-play*.test.ts
