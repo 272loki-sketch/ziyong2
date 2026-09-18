@@ -1,5 +1,6 @@
 name: Fix start lock ordering
-on: workflow_dispatch
+on:
+  workflow_dispatch:
 permissions:
   contents: write
 jobs:
