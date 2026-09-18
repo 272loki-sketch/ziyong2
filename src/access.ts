@@ -1,12 +1,11 @@
 /**
- * 访问密码（Web 登录）：scrypt 加盐哈希 + 持久化会话 token（纯函数，零 pi 依赖）。
+ * 访问密码（Web 登录）：scrypt 加盐哈希 + 持久化会话 token（零 pi 依赖）。
  *
- * - 存储 `.liyuan/access.json`（.gitignore 已覆盖 .liyuan/*，不随仓库分发）；
- * - 未设置密码 = 完全开放（首次使用零门槛）；设置后 REST / WS / 媒体托管统一凭 Cookie 过闸；
- * - 设置/修改密码会清空全部旧 token（所有已登录设备下线），并为当前设备签发新 token。
+ * 只有访问文件不存在才表示未设置密码。损坏或不可读的文件必须阻止启动，
+ * 不能降级成开放访问。写入先原子发布到磁盘，再更新调用方的内存令牌。
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 
@@ -29,30 +28,57 @@ function accessPath(cwd: string): string {
 }
 
 export function loadAccess(cwd: string): AccessData | null {
-	const p = accessPath(cwd);
-	if (!existsSync(p)) return null;
+	let text: string;
 	try {
-		const raw = JSON.parse(readFileSync(p, "utf8")) as Partial<AccessData>;
-		if (typeof raw.salt !== "string" || typeof raw.hash !== "string") return null;
-		const tokens = Array.isArray(raw.tokens)
-			? raw.tokens.filter((t): t is AccessToken => !!t && typeof t.id === "string")
+		text = readFileSync(accessPath(cwd), "utf8");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+		throw new Error("无法读取访问密码配置；为避免开放访问，已拒绝启动。请检查 .liyuan/access.json。", { cause: error });
+	}
+	try {
+		const raw: unknown = JSON.parse(text);
+		if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid access data");
+		const value = raw as Record<string, unknown>;
+		if (typeof value.salt !== "string" || !/^[a-f0-9]{32}$/i.test(value.salt)
+			|| typeof value.hash !== "string" || !/^[a-f0-9]{128}$/i.test(value.hash)) {
+			throw new Error("invalid password hash or salt");
+		}
+		// A damaged token is not an authenticated session. Keep valid password data
+		// so the maintainer can sign in again rather than opening the instance.
+		const tokens = Array.isArray(value.tokens)
+			? value.tokens.filter((item): item is AccessToken => {
+				if (!item || typeof item !== "object") return false;
+				const token = item as Record<string, unknown>;
+				return typeof token.id === "string" && /^[a-f0-9]{64}$/i.test(token.id)
+					&& typeof token.createdAt === "number" && Number.isFinite(token.createdAt);
+			}).slice(-MAX_TOKENS)
 			: [];
-		return { salt: raw.salt, hash: raw.hash, tokens };
-	} catch {
-		return null;
+		return { salt: value.salt, hash: value.hash, tokens };
+	} catch (error) {
+		throw new Error("访问密码配置损坏；为避免开放访问，已拒绝启动。请从可信备份恢复 .liyuan/access.json。", { cause: error });
 	}
 }
 
 function save(cwd: string, data: AccessData): void {
 	mkdirSync(join(cwd, ".liyuan"), { recursive: true });
-	writeFileSync(accessPath(cwd), JSON.stringify(data, null, "\t"));
+	const target = accessPath(cwd);
+	const temporary = `${target}.${randomBytes(16).toString("hex")}.tmp`;
+	try {
+		writeFileSync(temporary, JSON.stringify(data, null, "\t"), {
+			encoding: "utf8", flag: "wx", mode: 0o600, flush: true,
+		});
+		renameSync(temporary, target);
+	} finally {
+		// Cleanup must not hide the original write/rename failure.
+		try { rmSync(temporary, { force: true }); } catch { /* best effort */ }
+	}
 }
 
 function hashPassword(password: string, salt: string): string {
 	return scryptSync(password, salt, 64).toString("hex");
 }
 
-/** 设置/修改密码：清空旧 token（所有设备下线），返回为当前设备签发的新 token */
+/** 设置/修改密码：清空旧 token，持久化成功后返回新 token。 */
 export function setPassword(cwd: string, password: string): { data: AccessData; token: string } {
 	const salt = randomBytes(16).toString("hex");
 	const token = randomBytes(32).toString("hex");
@@ -61,13 +87,9 @@ export function setPassword(cwd: string, password: string): { data: AccessData; 
 	return { data, token };
 }
 
-/** 关闭密码：删除存储文件，恢复完全开放 */
+/** 关闭密码：仅不存在的文件可忽略；删除失败必须向调用方报告。 */
 export function clearPassword(cwd: string): void {
-	try {
-		rmSync(accessPath(cwd));
-	} catch {
-		/* 文件不存在即目标态 */
-	}
+	rmSync(accessPath(cwd), { force: true });
 }
 
 export function verifyPassword(data: AccessData, password: string): boolean {
@@ -76,12 +98,12 @@ export function verifyPassword(data: AccessData, password: string): boolean {
 	return a.length === b.length && timingSafeEqual(a, b);
 }
 
-/** 登录成功后签发新 token 并落盘（FIFO，上限 MAX_TOKENS） */
+/** 登录成功后签发新 token，FIFO 上限 20；写盘失败时不改变内存。 */
 export function issueToken(cwd: string, data: AccessData): string {
 	const token = randomBytes(32).toString("hex");
-	data.tokens.push({ id: token, createdAt: Date.now() });
-	while (data.tokens.length > MAX_TOKENS) data.tokens.shift();
-	save(cwd, data);
+	const tokens = [...data.tokens, { id: token, createdAt: Date.now() }].slice(-MAX_TOKENS);
+	save(cwd, { ...data, tokens });
+	data.tokens = tokens;
 	return token;
 }
 
@@ -96,15 +118,16 @@ export function verifyToken(data: AccessData, token: string | undefined): boolea
 	return ok;
 }
 
-/** 注销：吊销单个 token */
+/** 注销：持久化成功后吊销内存中的单个 token。 */
 export function revokeToken(cwd: string, data: AccessData, token: string | undefined): void {
 	if (!token) return;
-	const before = data.tokens.length;
-	data.tokens = data.tokens.filter((t) => t.id !== token);
-	if (data.tokens.length !== before) save(cwd, data);
+	const tokens = data.tokens.filter((t) => t.id !== token);
+	if (tokens.length === data.tokens.length) return;
+	save(cwd, { ...data, tokens });
+	data.tokens = tokens;
 }
 
-/** 解析 Cookie 请求头 */
+/** 解析 Cookie 请求头。 */
 export function parseCookies(header: string | undefined): Record<string, string> {
 	const out: Record<string, string> = {};
 	if (!header) return out;
