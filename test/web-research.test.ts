@@ -39,6 +39,7 @@ test("联网结果：识别人机验证并可解析 Bing 兜底", () => {
 	assert.deepEqual(parseBing(html), [{ title: "校园图书馆活动", url: "https://example.com/story", snippet: "旧书募集与读书会资料" }]);
 });
 
+
 test("联网查证模式：manual 只接受明确联网意图", () => {
 	assert.equal(wantsManualWebResearch("请联网搜索一下明治时期的资料"), true);
 	assert.equal(wantsManualWebResearch("帮我上网搜一下明治资料"), true);
@@ -52,14 +53,33 @@ test("联网查询最终闸门剔除用户栏姓名并保留剧情主题", () =>
 	assert.equal(sanitizeWebResearchQuery("图书馆 朱.耀良 读书会", "朱.耀良"), "图书馆 读书会");
 });
 
-test("联网代理：专用变量优先、direct 关闭、NO_PROXY 生效", () => {
-	assert.equal(resolveWebResearchProxy({ LIYUAN_WEB_RESEARCH_PROXY: "http://127.0.0.1:9000", HTTPS_PROXY: "http://x:1" } as never)?.port, "9000");
-	assert.equal(resolveWebResearchProxy({ LIYUAN_WEB_RESEARCH_PROXY: "direct" } as never), null);
+test("联网代理：无显式配置时默认直连", () => {
+	assert.equal(resolveWebResearchProxy({} as never), null);
+});
+
+test("联网代理：direct 关闭并阻止回退到低优先级变量", () => {
+	assert.equal(resolveWebResearchProxy({ LIYUAN_WEB_RESEARCH_PROXY: "direct", HTTPS_PROXY: "http://127.0.0.1:9001", HTTP_PROXY: "http://127.0.0.1:9002" } as never), null);
+	assert.equal(resolveWebResearchProxy({ HTTPS_PROXY: "direct", HTTP_PROXY: "http://127.0.0.1:9002" } as never), null);
+	assert.equal(resolveWebResearchProxy({ HTTP_PROXY: "direct" } as never), null);
+});
+
+test("联网代理：LIYUAN、HTTPS_PROXY、HTTP_PROXY 按优先级解析", () => {
+	assert.equal(resolveWebResearchProxy({ LIYUAN_WEB_RESEARCH_PROXY: "http://127.0.0.1:9000", HTTPS_PROXY: "http://127.0.0.1:9001", HTTP_PROXY: "http://127.0.0.1:9002" } as never)?.port, "9000");
+	assert.equal(resolveWebResearchProxy({ HTTPS_PROXY: "http://127.0.0.1:9001", HTTP_PROXY: "http://127.0.0.1:9002" } as never)?.port, "9001");
+	assert.equal(resolveWebResearchProxy({ HTTP_PROXY: "127.0.0.1:9002", http_proxy: "127.0.0.1:9003" } as never)?.port, "9002");
+});
+
+test("联网代理：非法协议报错", () => {
+	assert.throws(() => resolveWebResearchProxy({ LIYUAN_WEB_RESEARCH_PROXY: "socks5://127.0.0.1:1080" } as never), /不支持的联网代理协议：socks5:/);
+});
+
+test("联网代理：NO_PROXY 生效", () => {
 	const proxy = new URL("http://127.0.0.1:7890");
 	assert.equal(hostUsesWebResearchProxy("localhost", proxy, { NO_PROXY: "localhost,.example.com" } as never), false);
 	assert.equal(hostUsesWebResearchProxy("api.example.com", proxy, { NO_PROXY: "localhost,.example.com" } as never), false);
 	assert.equal(hostUsesWebResearchProxy("duckduckgo.com", proxy, { NO_PROXY: "localhost" } as never), true);
 });
+
 
 test("联网结果：DuckDuckGo 解析、URL 去重和相关性排名", () => {
 	const html = '<a class="result__a" href="https://example.com/a">明治 京都</a><a class="result__snippet">町屋取暖资料</a>';
