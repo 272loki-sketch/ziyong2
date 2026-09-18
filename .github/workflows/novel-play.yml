@@ -1,5 +1,8 @@
 name: novel-play verification
 on:
+  push:
+    branches: [feat/novel-play-foundation]
+    paths: ['.github/workflows/novel-play.yml']
   workflow_dispatch:
 permissions:
   contents: write
