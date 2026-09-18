@@ -93,22 +93,7 @@ function stored(host: NovelPlayModelHost, docId: string, revision: string): Stor
 }
 
 function awaitFingerprint(text: string): string {
-	return new BunlessHash("sha256").update(text).digest();
-}
-
-class BunlessHash {
-	#chunks = "";
-	constructor(private readonly algorithm: string) {}
-	update(value: string): this { this.#chunks += value; return this; }
-	digest(): string {
-		if (this.algorithm !== "sha256") throw new Error("unsupported hash");
-		return requireHash(this.#chunks);
-	}
-}
-
-function requireHash(value: string): string {
-	// Kept behind a function so tests can exercise source validation without exposing source text.
-	return createSha256(value);
+	return createSha256(text);
 }
 
 import { createHash } from "node:crypto";

@@ -30,7 +30,8 @@ function corpus(root: string): { docId: string; text: string } {
 
 function stored(root: string, docId: string, text: string): string {
 	const source = prepareNovelSource({ id: docId, title: "测试小说", status: "ready", chars: text.length, chunkCount: 1 }, text);
-	const ref = { chunkIndex: 0, start: text.indexOf("晨钟"), end: text.indexOf("晨钟") + 4, quote: "晨钟响起" };
+	const quote = "晨钟响起。旅人推开城门。";
+	const ref = { chunkIndex: 0, start: text.indexOf(quote), end: text.indexOf(quote) + quote.length, quote };
 	const pkg = buildNovelPackage(source, [{ id: "chunk-0", order: 0, title: "第一章" }], [{ id: "canon-node", key: "bell", stageId: "chunk-0", order: 0, title: "晨钟", summary: "晨钟响起", visibility: "public", dependsOn: [], sourceRefs: [ref] }]);
 	saveNovelPackage(root, source, pkg);
 	return pkg.revision;
