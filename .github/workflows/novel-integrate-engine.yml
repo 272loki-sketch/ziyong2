@@ -1,6 +1,9 @@
 name: one-time novel engine integration
 
 on:
+  push:
+    branches: [feat/novel-play-foundation]
+    paths: ['.github/workflows/novel-integrate-engine.yml']
   workflow_dispatch:
 
 permissions:
