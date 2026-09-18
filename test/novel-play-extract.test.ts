@@ -11,8 +11,8 @@ const source: NovelSource = {
 	fingerprint: "fingerprint-a",
 	chunkChars: 100,
 	chunks: [
-		{ index: 0, chars: 16, chapters: ["第一章"], text: "甲推开门。雨落下来。" },
-		{ index: 1, chars: 15, chapters: [], text: "钟声响起。众人离开。" },
+		{ index: 0, chars: 11, chapters: ["第一章"], text: "甲推开门。雨落下来。" },
+		{ index: 1, chars: 11, chapters: [], text: "钟声响起。众人离开。" },
 	],
 };
 
@@ -36,7 +36,7 @@ function sequence(outputs: Array<string | Error>, calls: { count: number }): Nov
 	};
 }
 
-test("extracts one stage per chunk, resolves exact offsets, visibility and local dependencies", async () => {
+test("extracts one stage per event-containing chunk, resolves exact offsets, visibility and local dependencies", async () => {
 	const calls = { count: 0 };
 	const extracted = await extractNovelEvents(source, {
 		skillBody,
@@ -50,6 +50,7 @@ test("extracts one stage per chunk, resolves exact offsets, visibility and local
 	});
 	assert.equal(calls.count, 2);
 	assert.deepEqual(extracted.package.stages.map(stage => stage.title), ["第一章", "分块 2"]);
+	assert.deepEqual(extracted.package.stages.map(stage => stage.order), [0, 1]);
 	assert.equal(extracted.package.nodes[0].sourceRefs[0].start, 0);
 	assert.equal(extracted.package.nodes[0].sourceRefs[0].end, "甲推开门。".length);
 	assert.equal(extracted.package.nodes[1].visibility, "secret");
@@ -73,7 +74,7 @@ test("retries invalid JSON and stops after at most two attempts", async () => {
 test("rejects duplicate and nonmatching evidence quotes", async () => {
 	const duplicateSource: NovelSource = {
 		...source,
-		chunks: [{ index: 0, chars: 8, chapters: ["重复"], text: "门开。门开。" }],
+		chunks: [{ index: 0, chars: 6, chapters: ["重复"], text: "门开。门开。" }],
 	};
 	const duplicateCalls = { count: 0 };
 	await assert.rejects(extractNovelEvents(duplicateSource, {
@@ -90,13 +91,97 @@ test("rejects duplicate and nonmatching evidence quotes", async () => {
 	}), /quote must occur exactly once/);
 });
 
-test("fails a chunk explicitly when it has no evidenced events", async () => {
+test("accepts an empty prefix and omits its stage without inventing an event", async () => {
+	const sparse: NovelSource = {
+		...source,
+		chunks: [
+			{ index: 0, chars: 4, chapters: ["版权"], text: "版权说明" },
+			{ index: 1, chars: source.chunks[0].text.length, chapters: ["第一章"], text: source.chunks[0].text },
+		],
+	};
 	const calls = { count: 0 };
+	const extracted = await extractNovelEvents(sparse, {
+		skillBody,
+		modelCall: sequence([result([]), result([event()])], calls),
+	});
+	assert.equal(calls.count, 2);
+	assert.deepEqual(extracted.package.stages.map(stage => ({ id: stage.id, order: stage.order })), [{ id: "chunk-1", order: 0 }]);
+	assert.equal(extracted.package.nodes.length, 1);
+	assert.equal(extracted.package.nodes[0].stageId, "chunk-1");
+});
+
+test("omits an empty chunk between event stages and keeps stage order contiguous", async () => {
+	const sparse: NovelSource = {
+		...source,
+		chunks: [
+			source.chunks[0],
+			{ index: 1, chars: 3, chapters: ["题记"], text: "题记。" },
+			{ index: 2, chars: source.chunks[1].text.length, chapters: ["第二章"], text: source.chunks[1].text },
+		],
+	};
+	const calls = { count: 0 };
+	const extracted = await extractNovelEvents(sparse, {
+		skillBody,
+		modelCall: sequence([
+			result([event()]),
+			result([]),
+			result([event({ key: "bell", title: "钟响", summary: "钟声响起。", quote: "钟声响起。" })]),
+		], calls),
+	});
+	assert.deepEqual(extracted.package.stages.map(stage => ({ id: stage.id, order: stage.order })), [
+		{ id: "chunk-0", order: 0 },
+		{ id: "chunk-2", order: 1 },
+	]);
+	assert.deepEqual(extracted.package.nodes.map(node => node.order), [0, 1]);
+});
+
+test("caches an empty successful chunk and resumes without another model call", async () => {
+	const sparse: NovelSource = {
+		...source,
+		chunks: [
+			{ index: 0, chars: 4, chapters: ["版权"], text: "版权说明" },
+			{ index: 1, chars: source.chunks[0].text.length, chapters: ["第一章"], text: source.chunks[0].text },
+		],
+	};
+	const calls = { count: 0 };
+	const first = await extractNovelEvents(sparse, {
+		skillBody,
+		modelCall: sequence([result([]), result([event()])], calls),
+	});
+	assert.equal(first.checkpoint.completed["0"], result([]));
+	let resumedCalls = 0;
+	const resumed = await extractNovelEvents(sparse, {
+		skillBody,
+		checkpoint: first.checkpoint,
+		modelCall: async () => { resumedCalls++; throw new Error("must not run"); },
+	});
+	assert.equal(resumedCalls, 0);
+	assert.equal(resumed.package.revision, first.package.revision);
+});
+
+test("rejects a complete source with no playable events after checkpointing empty chunks", async () => {
+	const emptySource: NovelSource = {
+		...source,
+		chunks: [
+			{ index: 0, chars: 4, chapters: ["版权"], text: "版权说明" },
+			{ index: 1, chars: 3, chapters: ["题记"], text: "题记。" },
+		],
+	};
+	const checkpoints: NovelExtractionCheckpoint[] = [];
+	await assert.rejects(extractNovelEvents(emptySource, {
+		skillBody,
+		modelCall: async () => result([]),
+		onCheckpoint: checkpoint => { checkpoints.push(checkpoint); },
+	}), /found no playable events in the complete source/);
+	assert.equal(checkpoints.length, 2);
+	assert.deepEqual(Object.keys(checkpoints.at(-1)!.completed), ["0", "1"]);
+});
+
+test("rejects an all-secret package because it has no public starting point", async () => {
 	await assert.rejects(extractNovelEvents({ ...source, chunks: [source.chunks[0]] }, {
 		skillBody,
-		maxAttempts: 1,
-		modelCall: sequence([result([])], calls),
-	}), /chunk must contain between 1 and 100 evidenced events/);
+		modelCall: async () => result([event({ visibility: "secret" })]),
+	}), /no public starting point; all evidenced events are secret/);
 });
 
 test("honors an already aborted signal without calling the model", async () => {
@@ -203,6 +288,28 @@ test("rejects and retries a forward dependency before publishing a checkpoint", 
 	assert.equal(checkpoints.length, 1);
 	assert.equal(checkpoints[0].completed["0"], valid);
 	assert.deepEqual(extracted.package.nodes[1].dependsOn, [extracted.package.nodes[0].id]);
+});
+
+test("rejects out-of-source-order events and retries before checkpointing", async () => {
+	const outOfOrder = result([
+		event({ key: "rain", title: "下雨", summary: "雨开始落下。", quote: "雨落下来。" }),
+		event(),
+	]);
+	const valid = result([
+		event(),
+		event({ key: "rain", title: "下雨", summary: "雨开始落下。", quote: "雨落下来。" }),
+	]);
+	const calls = { count: 0 };
+	const checkpoints: NovelExtractionCheckpoint[] = [];
+	const extracted = await extractNovelEvents({ ...source, chunks: [source.chunks[0]] }, {
+		skillBody,
+		modelCall: sequence([outOfOrder, valid], calls),
+		onCheckpoint: checkpoint => { checkpoints.push(checkpoint); },
+	});
+	assert.equal(calls.count, 2);
+	assert.equal(checkpoints.length, 1);
+	assert.equal(checkpoints[0].completed["0"], valid);
+	assert.deepEqual(extracted.package.nodes.map(node => node.key), ["door", "rain"]);
 });
 
 test("rejects a non-finite maxAttempts value before calling the model", async () => {
