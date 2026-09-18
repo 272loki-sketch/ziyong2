@@ -21,6 +21,7 @@
 | 上游模型 | `deepseek-v4-flash` |
 | 搜索代理 | `http://127.0.0.1:7890`（VPS 宿主机 mihomo，仅联网查证使用） |
 
+
 ## 2. SSH 连接
 
 Windows PowerShell 示例：
@@ -37,6 +38,7 @@ ssh -i "C:\Users\86186\Downloads\miyao\47.98.210.60_id_ed25519" -p 44272 root@47
 ```bash
 curl -x http://127.0.0.1:7890 -fsSL https://nodejs.org/dist/...
 ```
+
 
 ## 3. 部署结构
 
@@ -60,6 +62,7 @@ curl -x http://127.0.0.1:7890 -fsSL https://nodejs.org/dist/...
 /www/server/nginx/conf/htpasswd/liyuan-8788      Basic Auth 凭据文件
 /www/server/panel/vhost/cert/47.98.210.60/       自签证书（与 Luker 共用）
 ```
+
 
 ## 4. 访问方式
 
@@ -130,10 +133,11 @@ Restart=always
 RestartSec=5
 ```
 
+
 ## 6. 健康检查
 
 ```bash
-# 本机盶连（跳过 Nginx）
+# 本机直连（跳过 Nginx）
 curl -fsS http://127.0.0.1:7620/healthz
 
 # 通过公网入口
@@ -201,6 +205,7 @@ Nginx 8788 虚拟主机配置：
 nginx -t && /etc/init.d/nginx reload
 ```
 
+
 ## 9. 联网查证与代理
 
 只有 `web_research`（按需联网查证工具）真正发起外部搜索请求时才使用代理，模型调用、文学画像、场记、压缩、预设分拣都不走该代理。
@@ -211,10 +216,11 @@ NO_PROXY=localhost,127.0.0.1
 ```
 
 - 默认代理是宿主机 mihomo 的 `7890` 端口。
-- 设置 `LIYUAN_WEB_RESEARCH_PROXY=direct` 可改为盶连。
+- 设置 `LIYUAN_WEB_RESEARCH_PROXY=direct` 可改为直连。
 - 无公开作品出处的私人角色名会在发网前被拒绝。
 
 修改代理需编辑 `/etc/systemd/system/liyuan.service` 的 `Environment` 并重启。
+
 
 ## 10. 数据与备份
 
@@ -240,6 +246,7 @@ cp -a /root/Liyuan/liyuan.config.json /root/Liyuan/liyuan.agent.json /root/Liyua
 tar -czf /root/Liyuan-backups/$TS/agent-data.tgz -C /var/lib/liyuan agent
 ```
 
+
 ## 10.1 研究搜索自动任务
 
 普通研究搜索与小说消化的自动选书是两条独立任务：研究搜索读取 `liyuan.config.json` 的 `researchSearchSchedule`，按 VPS 本地时间每日运行；导演室研究搜索页的“自动搜索主题”按钮可立即运行同一主题列表。任务状态保存在 `.liyuan/outline/research/search-schedule.json`，可用以下接口检查：
@@ -250,6 +257,7 @@ curl -fsS -X POST http://127.0.0.1:7620/api/outline/research/search/schedule/run
 ```
 
 默认配置关闭自动任务；开启后建议限制 `maxPerRun` 和主题数量。任务共用运行锁，同日定时任务只执行一次；单个主题失败会记录错误并继续其他主题。
+
 
 ## 11. 更新部署
 
@@ -265,9 +273,8 @@ local          VPS 实际运行版本（官方 + 本地增强）
 
 ```bash
 cd /root/Liyuan
-./scrpts/update-local.sh
+./scripts/update-local.sh
 ```
-
 
 脚本会先备份 Git、配置、世界/生态数据、Skill 覆盖和会话树，再把 `origin/master` 合并到 `local`；完整测试和前端构建通过后才重启服务并执行 HTTP 健康检查。它不会向 GitHub 推送代码。
 
@@ -284,6 +291,7 @@ cd /root/Liyuan
 - 工作区不干净：拒绝运行，不自动 stash、不丢弃改动。
 
 用户配置和运行数据均被 `.gitignore` 排除，不参与代码合并；脚本仍会在每次更新前另行备份。完整说明、手工冲突处理和恢复步骤见 `docs/LOCAL-UPSTREAM-UPDATES.md`。
+
 
 ## 12. 故障排查
 
@@ -321,6 +329,7 @@ journalctl -u liyuan -n 100 --no-pager
 - 在网页“连接”面板测试连接。
 - 查看服务日志是否有 provider 错误。
 
+
 ### 小说研究长时间不完成
 
 ```bash
@@ -334,7 +343,8 @@ journalctl -u liyuan --since "30 minutes ago" --no-pager | grep -E "\[corpus\]|�
 - `liyuan.config.json` 的 `stepModels.novelDigest` 是否为已验证的模型。模型名称带 `flash` 不代表一定兼容当前中转站的 reasoning/结构化协议。
 - `最终消息无文本` 通常表示 provider 返回了空 `content` 或最终消息未从 `stream.result()` 读取，不应盲目等待数小时。
 - 当前 Corpus 单次调用最多 4 次、硬超时 60 秒；研究旁路不叠加 SDK 的隐式 9 次重试。增强提炼失败会降级为 ready。
-- 详细根因和修复记彑见 `docs/INCIDENT-20260901-NOVEL-DIGEST.md`。
+- 详细根因和修复记录见 `docs/INCIDENT-20260901-NOVEL-DIGEST.md`。
+
 
 ## 13. 回滚
 
@@ -360,6 +370,7 @@ D:\zhuce\_non_reg\Liyuan\docs\STANDALONE-INTEGRATION-BASELINE.md  脱离 Luker �
 D:\zhuce\_non_reg\Liyuan\deploy\README.md               官方部署说明
 D:\zhuce\_non_reg\Liyuan\deploy\VPS-OPERATIONS.md       本文档
 ```
+
 
 
 ## 研究搜索结果异常
