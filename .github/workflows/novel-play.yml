@@ -1,24 +1,40 @@
-name: fixed compatibility repair
-on: [push]
+name: novel-play verification
+on:
+  push:
+    branches: [feat/novel-play-foundation]
+    paths:
+      - 'src/**'
+      - 'server/**'
+      - 'web/**'
+      - 'test/**'
+      - 'skills/**'
+      - 'scripts/test-summary.mjs'
+      - '.github/workflows/novel-play.yml'
+  workflow_dispatch:
 permissions:
-  contents: write
+  contents: read
 jobs:
-  repair:
+  verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: feat/novel-play-foundation
-      - name: Apply fixed repairs
-        shell: bash
-        run: |
-          python3 -c 'from pathlib import Path; p=Path("src/novel-play/application.ts"); s=p.read_text(); a=s.index("function awaitFingerprint"); b=s.index("\n\nexport function startOptions", a); r="function awaitFingerprint(text: string): string {\n\treturn createSha256(text);\n}\n\nimport { createHash } from \"node:crypto\";\nconst createSha256 = (value: string): string => createHash(\"sha256\").update(value, \"utf8\").digest(\"hex\");"; p.write_text(s[:a]+r+s[b:])'
-          python3 -c 'from pathlib import Path; p=Path("test/novel-play-api.test.ts"); s=p.read_text(); a="\tconst ref = { chunkIndex: 0, start: text.indexOf(\"晨钟\"), end: text.indexOf(\"晨钟\") + 4, quote: \"晨钟响起\" };"; r="\tconst quote = \"晨钟响起。旅人推开城门。\";\n\tconst ref = { chunkIndex: 0, start: text.indexOf(quote), end: text.indexOf(quote) + quote.length, quote };"; assert s.count(a)==1; p.write_text(s.replace(a,r))'
-          test "$(git diff --name-only | sort)" = "$(printf 'src/novel-play/application.ts\ntest/novel-play-api.test.ts')"
-      - name: Commit repairs
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/novel-play/application.ts test/novel-play-api.test.ts
-          git commit -m 'Fix native TypeScript API test compatibility'
-          git push origin HEAD:feat/novel-play-foundation
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Novel play tests
+        run: node --test --test-reporter=./scripts/test-summary.mjs test/novel-play*.test.ts
+      - name: Full domain regression
+        if: ${{ !cancelled() }}
+        run: node --test --test-reporter=./scripts/test-summary.mjs test/*.test.ts
+      - name: Install frontend
+        if: ${{ !cancelled() }}
+        run: npm --prefix web ci
+      - name: Frontend build
+        if: ${{ !cancelled() }}
+        run: npm run web:build
