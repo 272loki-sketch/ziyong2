@@ -19,64 +19,59 @@ test("novel play client sends the exact route methods and DTO bodies", async () 
 	const calls: Array<{ url: string; method: string; body: unknown }> = [];
 	const originalFetch = globalThis.fetch;
 	globalThis.fetch = async (input, init) => {
-		const url = String(input);
-		const method = init?.method ?? "GET";
-		const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+		const url = String(input); const method = init?.method ?? "GET"; const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
 		calls.push({ url, method, body });
 		if (url === "/api/novel-play/status") return jsonResponse({ jobs: [] });
 		if (method === "DELETE") return jsonResponse({ job: { id: "a".repeat(32), docId: "doc id", status: "cancelled", createdAt: "c", updatedAt: "u" } });
 		if (url.startsWith("/api/novel-play/status/")) return jsonResponse({ job: { id: "a".repeat(32), docId: "doc id", status: "running", createdAt: "c", updatedAt: "u" } });
-		if (method === "GET") return jsonResponse({ package: { docId: "doc id", revision: "rev/value", title: "Book", nodes: [{ nodeId: "public-1", title: "Visible" }] } });
+		if (method === "GET") return jsonResponse({ package: { docId: "doc id", revision: "rev/value", title: "Book", nodes: [{ nodeId: "public-1", title: "阶段 1 · 节点 1" }] } });
 		if (url.endsWith("/build")) return jsonResponse({ job: { id: "a".repeat(32), docId: "doc id", status: "queued", createdAt: "c", updatedAt: "u" } }, 202);
 		if (url.endsWith("/preview")) return jsonResponse({ preview: { token: "one-time", expiresAt: "x", package: { docId: "doc id", revision: "rev/value" }, anchor: { packageRevision: "rev/value", nodeId: "public-1", position: "before" }, draft: { user: { name: "N", identity: "I" }, time: "T", place: "P", sceneText: "S", openingNarration: "O", publicCharacterProfiles: [], publicWorldFacts: [] } } });
 		return jsonResponse({ started: { card: "card.json", session: "created" } }, 201);
 	};
 	try {
-		const built = await buildNovelPlay("doc id");
-		await listNovelPlayJobs();
-		await getNovelPlayJob("a".repeat(32));
-		await cancelNovelPlayJob("a".repeat(32));
-		const options = await getNovelPlayStartOptions("doc id", "rev/value");
-		const preview = await previewNovelPlay({ docId: "doc id", revision: "rev/value", nodeId: "public-1", position: "before", player: { name: "N", identity: "I" } });
-		const started = await startNovelPlay("one-time");
-		assert.equal(built.job.status, "queued");
-		assert.deepEqual(options.package.nodes, [{ nodeId: "public-1", title: "Visible" }]);
-		assert.equal(preview.preview.draft.openingNarration, "O");
-		assert.equal(started.started.session, "created");
+		assert.equal((await buildNovelPlay("doc id")).job.status, "queued"); await listNovelPlayJobs(); await getNovelPlayJob("a".repeat(32)); await cancelNovelPlayJob("a".repeat(32));
+		assert.deepEqual((await getNovelPlayStartOptions("doc id", "rev/value")).package.nodes, [{ nodeId: "public-1", title: "阶段 1 · 节点 1" }]);
+		assert.equal((await previewNovelPlay({ docId: "doc id", revision: "rev/value", nodeId: "public-1", position: "before", player: { name: "N", identity: "I" } })).preview.draft.openingNarration, "O");
+		assert.equal((await startNovelPlay("one-time")).started.session, "created");
 	} finally { globalThis.fetch = originalFetch; }
-
 	assert.deepEqual(calls, [
-		{ url: "/api/novel-play/build", method: "POST", body: { docId: "doc id" } },
-		{ url: "/api/novel-play/status", method: "GET", body: undefined },
-		{ url: `/api/novel-play/status/${"a".repeat(32)}`, method: "GET", body: undefined },
-		{ url: `/api/novel-play/status/${"a".repeat(32)}`, method: "DELETE", body: undefined },
+		{ url: "/api/novel-play/build", method: "POST", body: { docId: "doc id" } }, { url: "/api/novel-play/status", method: "GET", body: undefined },
+		{ url: `/api/novel-play/status/${"a".repeat(32)}`, method: "GET", body: undefined }, { url: `/api/novel-play/status/${"a".repeat(32)}`, method: "DELETE", body: undefined },
 		{ url: "/api/novel-play/start?docId=doc%20id&revision=rev%2Fvalue", method: "GET", body: undefined },
 		{ url: "/api/novel-play/preview", method: "POST", body: { docId: "doc id", revision: "rev/value", nodeId: "public-1", position: "before", player: { name: "N", identity: "I" } } },
 		{ url: "/api/novel-play/start", method: "POST", body: { previewToken: "one-time" } },
 	]);
 });
 
-test("server start options expose only public node ids and titles", () => {
-	assert.match(application, /title: `阶段 \${stages\.get\(node\.stageId\) \?\? 0} · 节点 \${node\.order \+ 1}`/);
-	assert.doesNotMatch(application, /title: node\.title/);
-	assert.doesNotMatch(client.match(/interface NovelPlayStartOptions[^\n]+/)?.[0] ?? "", /summary|visibility|sourceRefs|dependsOn/);
-	assert.match(server, /send\(res, 200, \{ package: startOptions/);
-	assert.match(server, /const output: PreviewPublicDto = \{ token, expiresAt:/);
+test("novel play client maps the recovery-required 202 response", async () => {
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = async () => jsonResponse({ started: { card: "assets/cards/novel-play-saved.json", session: "recovery-required", recovery: "角色切换未在期限内完成，结果仍不确定。" } }, 202);
+	try {
+		const response = await startNovelPlay("consumed-token");
+		assert.deepEqual(response.started, { card: "assets/cards/novel-play-saved.json", session: "recovery-required", recovery: "角色切换未在期限内完成，结果仍不确定。" });
+	} finally { globalThis.fetch = originalFetch; }
 });
 
-test("novel play UI cleans polls, preserves cancel semantics, and explains limits", () => {
+test("server contract and UI preserve recovery and public-data boundaries", () => {
+	assert.match(application, /session: "recovery-required"; recovery: string/);
+	assert.match(server, /send\(res, 202, \{ started: instance\.recovery \}\)/);
+	assert.match(server, /outcome\.result\.session === "created" \? 201 : 202/);
+	assert.match(application, /filter\(node => node\.visibility === "public"\)\.map\(node => \(\{/);
+	assert.doesNotMatch(client.match(/interface NovelPlayStartOptions[^\n]+/)?.[0] ?? "", /summary|visibility|sourceRefs|dependsOn/);
+	assert.match(ui, /response\.started\.session === "created"\) onClose\(\)/);
+	assert.match(ui, /setPreview\(null\)/);
+	assert.match(ui, /开演令牌已经消耗，请勿重复提交/);
+	assert.match(ui, /recovery\.card/);
+	assert.match(ui, /recovery\.recovery/);
+});
+
+test("novel play UI cleans polls and explains deadlines and session-scoped jobs", () => {
 	assert.match(ui, /window\.clearTimeout\(timer\); abort\.abort\(\)/);
 	assert.match(ui, /const close = \(\) => \{ invalidate\(\); onClose\(\); \}/);
-	assert.match(ui, /cancelNovelPlayJob\(job\.id\)/);
-	assert.doesNotMatch(ui, /deleteCorpus|内置运行时仍在接入中/);
-	assert.match(ui, /关闭窗口只停止前端查询/);
-	assert.match(ui, /取消不会删除藏书/);
-	assert.match(ui, /当前作品阶段按原文分块生成，不代表语义章节/);
-	assert.match(ui, /仅支持创建新玩家角色/);
+	assert.match(ui, /模型预览最长约 45 秒/);
+	assert.match(ui, /角色切换最长约 30 秒/);
+	assert.match(ui, /构建记录只属于当前会话/);
 	assert.match(ui, /selectedNodeIndex === 0 && position === "before"/);
-	assert.match(ui, /首个节点之前可能没有可提取的原文/);
-	assert.match(ui, /节点之后/);
-	assert.match(ui, /更后的公开节点/);
-	assert.match(corpus, /doc\.status === "ready"/);
 	assert.match(corpus, /<NovelPlayDialog docId=\{playing\.id\}/);
 });

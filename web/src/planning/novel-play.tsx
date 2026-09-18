@@ -2,9 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import {
 	buildNovelPlay, cancelNovelPlayJob, getNovelPlayJob, getNovelPlayStartOptions, listNovelPlayJobs,
 	previewNovelPlay, startNovelPlay, type NovelPlayJob, type NovelPlayPreview, type NovelPlayStartOptions,
+	type NovelPlayStartResult,
 } from "./novel-play-client.ts";
 
-type Step = "build" | "setup" | "preview";
+type Step = "build" | "setup" | "preview" | "recovery";
 const terminal = (job: NovelPlayJob) => ["succeeded", "failed", "cancelled"].includes(job.status);
 const errorText = (cause: unknown) => cause instanceof Error ? cause.message : String(cause);
 
@@ -17,6 +18,7 @@ export function NovelPlayDialog({ docId, title, onClose }: { docId: string; titl
 	const [name, setName] = useState("");
 	const [identity, setIdentity] = useState("");
 	const [preview, setPreview] = useState<NovelPlayPreview | null>(null);
+	const [recovery, setRecovery] = useState<Extract<NovelPlayStartResult, { session: "recovery-required" }> | null>(null);
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState("");
 	const generation = useRef(0);
@@ -92,8 +94,13 @@ export function NovelPlayDialog({ docId, title, onClose }: { docId: string; titl
 	const confirmStart = async () => {
 		if (busy || !preview) return;
 		invalidate(); const request = generation.current; const abort = new AbortController(); controller.current = abort; setBusy(true); setError("");
-		try { await startNovelPlay(preview.token, abort.signal); if (request === generation.current) onClose(); }
-		catch (cause) { if (request === generation.current && !abort.signal.aborted) setError(errorText(cause)); }
+		try {
+			const response = await startNovelPlay(preview.token, abort.signal);
+			if (request !== generation.current) return;
+			setPreview(null);
+			if (response.started.session === "created") onClose();
+			else { setRecovery(response.started); setStep("recovery"); }
+		} catch (cause) { if (request === generation.current && !abort.signal.aborted) setError(errorText(cause)); }
 		finally { if (request === generation.current) setBusy(false); }
 	};
 	const close = () => { invalidate(); onClose(); };
@@ -109,7 +116,7 @@ export function NovelPlayDialog({ docId, title, onClose }: { docId: string; titl
 
 			{step === "build" && <section>
 				<h3>1. 构建作品包</h3>
-				{!job && <p>先从已消化原文构建可开演节点。此过程不会删除或修改藏书。</p>}
+				{!job && <><p>先从已消化原文构建可开演节点。此过程不会删除或修改藏书。</p><p>构建记录只属于当前会话。切换会话或角色卡后，任务列表可能为空。</p></>}
 				{job && <div className="planning-warning">状态：{job.status === "queued" ? "排队中" : job.status === "running" ? "构建中" : job.status === "succeeded" ? "已完成" : job.status === "cancelled" ? "已取消" : "失败"}{job.error ? ` · ${job.error}` : ""}</div>}
 				{active ? <button className="drawer-btn" disabled={busy} onClick={() => void cancel()}>{busy ? "正在取消…" : "取消构建"}</button>
 					: <button className="drawer-btn primary" disabled={busy} onClick={() => void build()}>{busy ? "正在提交…" : job?.status === "failed" || job?.status === "cancelled" ? "重试构建" : "开始构建"}</button>}
@@ -138,8 +145,16 @@ export function NovelPlayDialog({ docId, title, onClose }: { docId: string; titl
 				{preview.draft.publicCharacterProfiles.length > 0 && <div><h4>公开人物</h4>{preview.draft.publicCharacterProfiles.map((item, index) => <article className="planning-research-card" key={`${item.name}-${index}`}><b>{item.name}</b><p>{item.profile}</p></article>)}</div>}
 				{preview.draft.publicWorldFacts.length > 0 && <div><h4>公开世界信息</h4><ul>{preview.draft.publicWorldFacts.map((fact, index) => <li key={`${index}-${fact}`}>{fact}</li>)}</ul></div>}
 				<article className="planning-research-card"><h4>开场旁白</h4><p>{preview.draft.openingNarration}</p></article>
-				<div className="planning-warning">点击确认会消耗服务器一次性令牌，创建角色卡并切换到新会话。令牌于 {new Date(preview.expiresAt).toLocaleTimeString()} 过期。</div>
+				<div className="planning-warning">点击确认会消耗服务器一次性令牌，创建角色卡并切换到新会话。模型预览最长约 45 秒，角色切换最长约 30 秒；超时或模型错误会在此窗口显示。令牌于 {new Date(preview.expiresAt).toLocaleTimeString()} 过期。</div>
 				<div className="planning-corpus-acts"><button className="drawer-btn" disabled={busy} onClick={() => { invalidate(); setPreview(null); setStep("setup"); }}>返回修改</button><button className="drawer-btn primary" disabled={busy} onClick={() => void confirmStart()}>{busy ? "正在开演…" : "确认并开演"}</button></div>
+			</section>}
+
+			{step === "recovery" && recovery && <section>
+				<h3>需要恢复角色切换</h3>
+				<div className="planning-warning" role="status">{recovery.recovery}</div>
+				{recovery.card && <p><b>已保存角色卡：</b><code>{recovery.card}</code></p>}
+				<p>开演令牌已经消耗，请勿重复提交。先检查当前会话是否已经切换。若仍卡住，请按服务器提示重启服务后恢复。角色卡和配置已保留。</p>
+				<button className="drawer-btn primary" onClick={close}>关闭并检查会话</button>
 			</section>}
 		</section>
 	</div>;
