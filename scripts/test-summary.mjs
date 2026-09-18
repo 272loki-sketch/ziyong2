@@ -1,8 +1,8 @@
 // Compact node:test reporter for remote CI inspection. Exit status remains node:test's.
 import { inspect } from 'node:util';
 
-const DETAIL_LIMIT = 1600;
-const DETAIL_BUDGET = 32_000;
+const DETAIL_LIMIT = 600;
+const DETAIL_BUDGET = 24_000;
 
 export default async function* report(events) {
   let passed = 0;
@@ -19,8 +19,8 @@ export default async function* report(events) {
       const rendered = inspect(details?.error, {
         depth: 4,
         colors: false,
-        maxArrayLength: 20,
-        maxStringLength: 1200,
+        maxArrayLength: 10,
+        maxStringLength: 500,
       });
       const available = Math.max(0, Math.min(DETAIL_LIMIT, DETAIL_BUDGET - detailChars));
       const detail = available > 0 ? rendered.slice(0, available) : '';

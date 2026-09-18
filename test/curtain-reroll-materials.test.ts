@@ -13,7 +13,7 @@ function withCurtainFixture(run: (cwd: string) => void): void {
 		const card = {
 			data: {
 				name: "测试角色",
-				description: "巨型卡填充".repeat(100_000),
+				description: "巨型卡填充".repeat(200_000),
 				character_book: {
 					entries: [
 						{
@@ -82,7 +82,7 @@ test("状态栏重Roll：巨型卡只送有界格式材料，不送完整 rawCar
 		assert.ok(compact.formatPlan.nativeTags.includes("calendar"));
 		assert.ok(compact.formatPlan.modelTags.includes("Small_theater"));
 		assert.ok(compact.formatPlan.modelTags.includes("options"));
-		assert.ok(compact.loreFormats.some((entry) => /AI日历生成器|完整输出当月每一天/.test(entry.content)) === false, "旧日历规则不再进模型谢幕模板");
+		assert.equal(compact.loreFormats.some((entry) => /AI日历生成器|完整输出当月每一天/.test(entry.content)), false, "旧日历规则不再进模型谢幕模板");
 		assert.ok(compact.loreFormats.some((entry) => /百度贴吧|Small_theater|校园BBS/i.test(`${entry.title}\n${entry.content}`)), "挂载世界书的BBS格式进入重Roll素材");
 	});
 });
