@@ -96,13 +96,15 @@ export function NovelPlayDialog({ docId, title, onClose }: { docId: string; titl
 		catch (cause) { if (request === generation.current && !abort.signal.aborted) setError(errorText(cause)); }
 		finally { if (request === generation.current) setBusy(false); }
 	};
-	const close = () => { if (busy && step !== "build") controller.current?.abort(); onClose(); };
+	const close = () => { invalidate(); onClose(); };
 	const active = job && !terminal(job);
+	const selectedNodeIndex = options?.nodes.findIndex((node) => node.nodeId === nodeId) ?? -1;
+	const emptyPrefixRisk = selectedNodeIndex === 0 && position === "before";
 
 	return <div className="planning-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) close(); }}>
 		<section className="planning-proposal planning-digest" role="dialog" aria-modal="true" aria-labelledby="novel-play-title" style={{ maxWidth: 760, maxHeight: "90vh", overflow: "auto", margin: "5vh auto", padding: 20 }}>
 			<header><div><span>NOVEL PLAY</span><h2 id="novel-play-title">从《{title}》开演</h2></div><button className="drawer-btn" onClick={close} aria-label="关闭">关闭</button></header>
-			<div className="planning-page-note">开演只使用服务器从原文提取的有界公开资料。预览不是当前事实，确认后才会创建并切换到新会话。内置运行时仍在接入中，开演后的完整原著候选调度暂不可保证。</div>
+			<div className="planning-page-note">开演只使用服务器从原文提取的有界公开资料。预览不是当前事实，确认后才会创建并切换到新会话。运行时会按当前分支筛选原著候选。当前作品阶段按原文分块生成，不代表语义章节；仅支持创建新玩家角色。</div>
 			{error && <div className="panel-error planning-error" role="alert">{error}</div>}
 
 			{step === "build" && <section>
@@ -111,6 +113,7 @@ export function NovelPlayDialog({ docId, title, onClose }: { docId: string; titl
 				{job && <div className="planning-warning">状态：{job.status === "queued" ? "排队中" : job.status === "running" ? "构建中" : job.status === "succeeded" ? "已完成" : job.status === "cancelled" ? "已取消" : "失败"}{job.error ? ` · ${job.error}` : ""}</div>}
 				{active ? <button className="drawer-btn" disabled={busy} onClick={() => void cancel()}>{busy ? "正在取消…" : "取消构建"}</button>
 					: <button className="drawer-btn primary" disabled={busy} onClick={() => void build()}>{busy ? "正在提交…" : job?.status === "failed" || job?.status === "cancelled" ? "重试构建" : "开始构建"}</button>}
+				{active && <p>关闭窗口只停止前端查询。要停止服务器构建，请使用“取消构建”。取消不会删除藏书。</p>}
 				{job?.status === "failed" && <p>失败结果会保留。你可以直接重试，不需要重新上传原文。</p>}
 			</section>}
 
@@ -123,6 +126,7 @@ export function NovelPlayDialog({ docId, title, onClose }: { docId: string; titl
 					<label>位置<select className="planning-input" value={position} onChange={(event) => setPosition(event.target.value as "before" | "after")}><option value="before">节点之前</option><option value="after">节点之后</option></select></label>
 				</div>
 				{options.nodes.length === 0 && <div className="planning-warning">作品包没有可选的公开节点。</div>}
+				{emptyPrefixRisk && <div className="planning-warning">首个节点之前可能没有可提取的原文，因此预览可能失败。可改选“节点之后”，或选择更后的公开节点。</div>}
 				<button className="drawer-btn primary" disabled={busy || !nodeId || !name.trim() || !identity.trim()} onClick={() => void makePreview()}>{busy ? "正在提取开场…" : "生成有界预览"}</button>
 			</section>}
 
