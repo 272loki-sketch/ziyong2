@@ -10,6 +10,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".woff", ".woff2", ".ico"}
+SELF_TEST_FIXTURE_FILES = {"scripts/_privacy_scan.py"}
+LINE_ALLOW_MARKER = "privacy-scan: allow-line"
 
 HTTP_BASIC_URL = re.compile(
     r"\bhttps?://(?P<username>[^:/\s@]+):(?P<password>[^/\s@]+)@(?P<host>[^\s/?#:]+)(?::\d{1,5})?(?:[/?#][^\s]*)?",
@@ -28,35 +30,80 @@ PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("http_basic_url", HTTP_BASIC_URL),
 ]
 
-# Placeholder-ish allowed substrings near matches
-ALLOW = re.compile(
-    r"YOUR_|your_|example|placeholder|<[^>\n]+>|\$\{[^}\n]+\}|process\.env|API_KEY_HERE|xxxx|TODO|changeme|privacy-scan:\s*allow-test-fixture",
-    re.I,
-)
+LINE_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
+    (
+        "deploy_password_field",
+        re.compile(r"(?i)^\s*\|\s*(?:basic auth\s+)?(?:password|passwd|密码)\s*\|\s*`?(?P<value>[^`\n|]+)`?\s*\|\s*$"),
+        "value",
+    ),
+    (
+        "deploy_password_field",
+        re.compile(r"(?i)^\s*(?:[-*]\s*)?(?:basic auth(?:\s+password)?|password|passwd|密码)\s*[:：=]\s*`?(?P<value>[^`\n]+?)`?\s*$"),
+        "value",
+    ),
+    (
+        "deploy_ssh_target",
+        re.compile(r"(?i)\bssh\b[^\n]*\b(?P<value>[A-Za-z0-9._-]+@(?:\d{1,3}\.){3}\d{1,3})\b"),
+        "value",
+    ),
+]
 
-PLACEHOLDER_PASSWORD = re.compile(
-    r"(?:pass(?:word)?(?:\d{0,4})?|passwd|changeme|example(?:[-_ ]?(?:pass(?:word)?|secret|token|key))?|your[-_ ]?(?:pass(?:word)?|secret|token|key)|sample|demo|test|x{3,})",
+PLACEHOLDER_VALUE = re.compile(
+    r"^(?:<[^>\n]+>|\$\{[^}\n]+\}|process\.env(?:\.[A-Za-z0-9_]+)?|YOUR_[A-Z0-9_]+|your_[a-z0-9_]+|API_KEY_HERE|x{3,}|example(?:[-_ ]?(?:pass(?:word)?|secret|token|key|user|account))?|placeholder(?:[-_ ]?(?:pass(?:word)?|secret|token|key|user|account))?|changeme|todo|pass(?:word)?(?:\d{0,4})?|passwd|secret|token|key|sample|demo|test)$",
     re.I,
 )
 
 
 class PrivacyScanSelfTest(unittest.TestCase):
     def test_flags_explicit_http_basic_url(self) -> None:
-        text = "remote " + "https://alice:" + "RealSecret_123456@internal.local/repo.git"  # privacy-scan: allow-test-fixture
+        password = "Real" + "Secret_123456"
+        text = "remote https://alice:" + password + "@internal.local/repo.git"
         hits = find_hits_in_text("docs.txt", text)
         self.assertEqual(1, len(hits))
         self.assertIn("[http_basic_url]", hits[0])
         self.assertNotIn("RealSecret_123456", hits[0])
 
+    def test_real_basic_url_still_hits_with_example_or_todo_nearby(self) -> None:
+        password = "Alpha" + "Bravo_123456"
+        text = "example TODO remote https://alice:" + password + "@internal.local/repo.git"
+        hits = find_hits_in_text("docs.txt", text)
+        self.assertEqual(1, len(hits))
+        self.assertIn("[http_basic_url]", hits[0])
+
     def test_ignores_placeholder_http_basic_url(self) -> None:
-        text = "remote " + "https://alice:" + "password@example.com/repo.git"
+        password = "pass" + "word"
+        text = "remote https://alice:" + password + "@example.com/repo.git"
         self.assertEqual([], find_hits_in_text("docs.txt", text))
 
-    def test_ignores_plain_ip_without_credentials(self) -> None:
+    def test_flags_deploy_password_field(self) -> None:
+        password = "Deploy" + "Secret_456789"
+        text = "| 密码 | `" + password + "` |"
+        hits = find_hits_in_text("deploy/VPS-OPERATIONS.md", text)
+        self.assertEqual(1, len(hits))
+        self.assertIn("[deploy_password_field]", hits[0])
+
+    def test_ignores_placeholder_deploy_password_field(self) -> None:
+        password = "pass" + "word"
+        text = "| Password | `" + password + "` |"
+        self.assertEqual([], find_hits_in_text("deploy/template.md", text))
+
+    def test_flags_ssh_user_at_ipv4(self) -> None:
+        text = "ssh -i key -p 22 root@" + "203.0.113.10"
+        hits = find_hits_in_text("deploy/VPS-OPERATIONS.md", text)
+        self.assertEqual(1, len(hits))
+        self.assertIn("[deploy_ssh_target]", hits[0])
+
+    def test_ignores_plain_ip_without_login(self) -> None:
         self.assertEqual([], find_hits_in_text("notes.txt", "service at http://10.0.0.8:7620/"))
 
     def test_ignores_private_key_path(self) -> None:
         self.assertEqual([], find_hits_in_text("notes.txt", "/Users/alice/.ssh/id_ed25519"))
+
+    def test_exact_line_allow_comment_is_fixture_only(self) -> None:
+        password = "Allow" + "Me_123456"
+        text = "https://alice:" + password + "@internal.local/repo.git # privacy-scan: allow-line"
+        self.assertEqual([], find_hits_in_text("scripts/_privacy_scan.py", text))
+        self.assertEqual(1, len(find_hits_in_text("docs.txt", text)))
 
 
 def git_files() -> list[Path]:
@@ -73,21 +120,63 @@ def line_col(text: str, offset: int) -> tuple[int, int]:
 
 
 
-def is_placeholder_http_basic(match: re.Match[str]) -> bool:
-    return bool(PLACEHOLDER_PASSWORD.fullmatch(match.group("password")))
+def iter_lines_with_offsets(text: str) -> list[tuple[int, str]]:
+    lines: list[tuple[int, str]] = []
+    offset = 0
+    for raw_line in text.splitlines(keepends=True):
+        lines.append((offset, raw_line.rstrip("\r\n")))
+        offset += len(raw_line)
+    if not text:
+        return [(0, "")]
+    if not text.endswith(("\n", "\r")):
+        return lines
+    return lines
 
 
 
-def iter_secret_hits(text: str) -> list[tuple[str, int]]:
+def is_placeholder_value(value: str) -> bool:
+    return bool(PLACEHOLDER_VALUE.fullmatch(value.strip()))
+
+
+
+def has_fixture_line_allow(rel: str, line: str) -> bool:
+    return rel in SELF_TEST_FIXTURE_FILES and LINE_ALLOW_MARKER in line
+
+
+
+def matched_value(name: str, match: re.Match[str]) -> str:
+    if name == "http_basic_url":
+        return match.group("password")
+    return match.group(0)
+
+
+
+def iter_secret_hits(rel: str, text: str) -> list[tuple[str, int]]:
     hits: list[tuple[str, int]] = []
+    line_offsets = iter_lines_with_offsets(text)
+    line_index: dict[int, str] = {start: line for start, line in line_offsets}
+
     for name, pat in PATTERNS:
         for match in pat.finditer(text):
-            span = text[max(0, match.start() - 40) : match.end() + 40]
-            if name == "http_basic_url" and is_placeholder_http_basic(match):
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            line = line_index.get(line_start, text[line_start : text.find("\n", match.start()) if text.find("\n", match.start()) != -1 else len(text)])
+            if is_placeholder_value(matched_value(name, match)):
                 continue
-            if ALLOW.search(span) or ALLOW.search(match.group()):
+            if has_fixture_line_allow(rel, line):
                 continue
             hits.append((name, match.start()))
+
+    for line_start, line in line_offsets:
+        for name, pat, value_group in LINE_PATTERNS:
+            for match in pat.finditer(line):
+                value = match.group(value_group).strip()
+                if is_placeholder_value(value):
+                    continue
+                if has_fixture_line_allow(rel, line):
+                    continue
+                hits.append((name, line_start + match.start(value_group)))
+
+    hits.sort(key=lambda item: item[1])
     return hits
 
 
@@ -99,7 +188,7 @@ def format_hit(rel: str, name: str, text: str, offset: int) -> str:
 
 
 def find_hits_in_text(rel: str, text: str) -> list[str]:
-    return [format_hit(rel, name, text, offset) for name, offset in iter_secret_hits(text)]
+    return [format_hit(rel, name, text, offset) for name, offset in iter_secret_hits(rel, text)]
 
 
 
