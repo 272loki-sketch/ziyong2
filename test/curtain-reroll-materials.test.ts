@@ -30,6 +30,13 @@ function withCurtainFixture(run: (cwd: string) => void): void {
 							content: "<calendar>AI日历生成器：完整输出当月每一天</calendar>",
 							enabled: true,
 						},
+						{
+							id: 3,
+							name: "行动选项格式",
+							keys: ["选项"],
+							content: "<options>1. 继续</options>",
+							enabled: true,
+						},
 					],
 				},
 				extensions: {
@@ -82,7 +89,7 @@ test("状态栏重Roll：巨型卡只送有界格式材料，不送完整 rawCar
 		assert.ok(compact.formatPlan.nativeTags.includes("calendar"));
 		assert.ok(compact.formatPlan.modelTags.includes("Small_theater"));
 		assert.ok(compact.formatPlan.modelTags.includes("options"));
-		assert.equal(compact.loreFormats.some((entry) => /AI日历生成器|完整输出当月每一天/.test(entry.content)), false, "旧日历规则不再进模型谢幕模板");
+		assert.equal(compact.loreFormats.some((entry) => /AI日历生成器|完整输出当月每一天/.test(entry.content)), false, "旧日历规则不再送给模型谢幕模板");
 		assert.ok(compact.loreFormats.some((entry) => /百度贴吧|Small_theater|校园BBS/i.test(`${entry.title}\n${entry.content}`)), "挂载世界书的BBS格式进入重Roll素材");
 	});
 });
@@ -101,7 +108,7 @@ test("谢幕收口：当前卡前端由代码补齐，禁止别卡学生证并�
 	withCurtainFixture((cwd) => {
 		const { compact } = compactMaterials(cwd);
 		const output = finalizeCurtainText(`<user_now_status>错误学生证</user_now_status>\n<calendar>模型乱造日历</calendar>\n<options>1. 继续</options>`, compact.formatPlan);
-		assert.match(output, /<user_now_status>错误学生证<\/user_now_status>/, "当前卡声明的状态栏由模型保留");
+		assert.match(output, /<user_now_status>错误学生证<\/user_now_status>/, "当前卡明确的状态栏由模型保留");
 		assert.doesNotMatch(output, /<calendar>|模型乱造日历/);
 		assert.match(output, /<options>1\. 继续<\/options>/);
 	});
