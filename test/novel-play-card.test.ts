@@ -22,6 +22,7 @@ function fixture() {
 	};
 	const input = {
 		mode: "new-character" as const,
+		workTitle: "雨夜藏书楼",
 		pkg,
 		anchor: { packageRevision: pkg.revision, nodeId: "node-start", position: "before" as const },
 		snapshot: {
@@ -39,13 +40,17 @@ function fixture() {
 	return { pkg, input };
 }
 
-test("小说开演卡：返回 V2 原始卡且现有 normalizeCard 保留标准字段", () => {
+test("小说开演卡：V2 卡名表示作品演出而非玩家，现有 normalizeCard 保留标准字段", () => {
 	const { input } = fixture();
 	const raw = buildNovelPlayCard(input);
 	const normalized = normalizeCard(raw);
 	assert.equal(raw.spec, "chara_card_v2");
-	assert.equal(normalized.name, "林岚");
-	assert.equal(normalized.personality, "新来的图书管理员");
+	assert.equal(normalized.name, "雨夜藏书楼·小说演出");
+	assert.notEqual(normalized.name, input.snapshot.user.name);
+	assert.equal(normalized.personality, "");
+	assert.notEqual(normalized.personality, input.snapshot.user.identity);
+	assert.match(normalized.description, /用户角色：林岚/);
+	assert.match(normalized.description, /身份：新来的图书管理员/);
 	assert.match(normalized.description, /周姨/);
 	assert.match(normalized.description, /图书馆九点开门/);
 	assert.match(normalized.scenario, /九月清晨/);
@@ -53,6 +58,7 @@ test("小说开演卡：返回 V2 原始卡且现有 normalizeCard 保留标准�
 	assert.equal(normalized.systemPrompt, input.skillBody);
 	assert.deepEqual(raw.data.extensions.liyuanNovelPlay, {
 		docId: "doc-public", revision: "revision-1", startNodeId: "node-start", position: "before",
+		playerName: "林岚", playerMode: "new-character",
 	});
 	assert.equal((normalized as unknown as { extensions?: unknown }).extensions, undefined);
 });
@@ -70,8 +76,9 @@ test("小说开演卡：拒绝未确认快照、版本不匹配和不存在节�
 	}), /节点不存在/);
 });
 
-test("小说开演卡：逐字段和总预算超限时拒绝", () => {
+test("小说开演卡：作品标题及快照逐字段和总预算超限时拒绝", () => {
 	const { input } = fixture();
+	assert.throws(() => buildNovelPlayCard({ ...input, workTitle: "x".repeat(201) }), /作品标题超过长度上限/);
 	assert.throws(() => buildNovelPlayCard({
 		...input, snapshot: { ...input.snapshot, sceneText: "x".repeat(5_001) },
 	}), /开场场景超过长度上限/);
@@ -100,8 +107,9 @@ test("小说开演卡：不修改输入", () => {
 	assert.deepEqual(input, before);
 });
 
-test("小说开演卡：拒绝用户字段中的角色宏，避免运行时身份替换", () => {
+test("小说开演卡：拒绝输入字段中的角色宏，避免运行时身份替换", () => {
 	const { input } = fixture();
+	assert.throws(() => buildNovelPlayCard({ ...input, workTitle: "{{char}} 的故事" }), /可能意外改变身份文本/);
 	assert.throws(() => buildNovelPlayCard({
 		...input, snapshot: { ...input.snapshot, user: { ...input.snapshot.user, identity: "我是 {{char}} 的朋友" } },
 	}), /可能意外改变身份文本/);

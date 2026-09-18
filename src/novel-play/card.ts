@@ -32,6 +32,8 @@ export interface NovelPlayCardExtensions {
 	revision: string;
 	startNodeId: string;
 	position: NovelAnchor["position"];
+	playerName: string;
+	playerMode: NovelPlayMode;
 }
 
 export interface NovelPlayRawCard {
@@ -55,6 +57,8 @@ export interface NovelPlayRawCard {
 
 export interface BuildNovelPlayCardInput {
 	mode: NovelPlayMode;
+	/** Public work title used for the AI ensemble card identity, not the player identity. */
+	workTitle: string;
 	pkg: NovelPackage;
 	anchor: NovelAnchor;
 	snapshot: ConfirmedNovelOpeningSnapshot;
@@ -63,6 +67,7 @@ export interface BuildNovelPlayCardInput {
 }
 
 const LIMITS = {
+	workTitle: 200,
 	userName: 120,
 	userIdentity: 1_500,
 	time: 240,
@@ -119,6 +124,7 @@ export function buildNovelPlayCard(input: BuildNovelPlayCardInput): NovelPlayRaw
 	validatePackageAnchor(input.pkg, input.anchor);
 	if (!input.snapshot || input.snapshot.confirmed !== true) throw new Error("开场快照尚未由用户确认");
 
+	const workTitle = boundedText("作品标题", input.workTitle, LIMITS.workTitle);
 	const userName = boundedText("用户角色名", input.snapshot.user?.name, LIMITS.userName);
 	const userIdentity = boundedText("用户角色身份", input.snapshot.user?.identity, LIMITS.userIdentity);
 	const time = boundedText("开场时间", input.snapshot.time, LIMITS.time);
@@ -141,7 +147,7 @@ export function buildNovelPlayCard(input: BuildNovelPlayCardInput): NovelPlayRaw
 	const facts = input.snapshot.publicWorldFacts.map((item, index) =>
 		boundedText(`公开世界事实 ${index + 1}`, item, LIMITS.worldFact));
 
-	const boundedPublic = { userName, userIdentity, time, place, sceneText, openingNarration, profiles, facts };
+	const boundedPublic = { workTitle, userName, userIdentity, time, place, sceneText, openingNarration, profiles, facts };
 	if (JSON.stringify(boundedPublic).length > LIMITS.totalPublicSnapshot) {
 		throw new Error(`公开开场快照总长度超过上限 ${LIMITS.totalPublicSnapshot}`);
 	}
@@ -156,15 +162,15 @@ export function buildNovelPlayCard(input: BuildNovelPlayCardInput): NovelPlayRaw
 		spec: "chara_card_v2",
 		spec_version: "2.0",
 		data: {
-			name: userName,
+			name: `${workTitle}·小说演出`,
 			description,
-			personality: userIdentity,
+			personality: "",
 			scenario,
 			first_mes: openingNarration,
 			mes_example: "",
 			system_prompt: skillBody,
 			post_history_instructions: "",
-			creator_notes: "梨园小说开演内部角色卡。会话运行时必须从原始卡读取 liyuanNovelPlay 扩展。",
+			creator_notes: "梨园小说开演内部角色卡。会话集成必须从原始卡读取 liyuanNovelPlay 扩展。",
 			alternate_greetings: [],
 			tags: ["liyuan", "novel-play", "internal"],
 			extensions: {
@@ -173,6 +179,8 @@ export function buildNovelPlayCard(input: BuildNovelPlayCardInput): NovelPlayRaw
 					revision: input.pkg.revision,
 					startNodeId: input.anchor.nodeId,
 					position: input.anchor.position,
+					playerName: userName,
+					playerMode: input.mode,
 				},
 			},
 		},
