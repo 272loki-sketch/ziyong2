@@ -25,6 +25,7 @@ import type { CharacterCard, LorebookEntry, MacroContext, RpConfig, WorldState }
 // ---------------- 分支 → 历史 ----------------
 
 /** 会话树条目的结构子集（不引 @liyuan/agent-runtime 类型，保持 src/ 独立） */
+
 export interface BranchEntryLike {
 	/** 树上条目 id（前情摘要用它锚定「覆盖到哪」） */
 	id?: string;
@@ -72,6 +73,7 @@ export interface RebuiltHistory {
 export const SUMMARY_ENTRY_TYPE = "rp-summary";
 
 /** rp-summary 条目的 data 形状 */
+
 export interface RpSummaryData {
 	/** 接力摘要正文（已合并更早的摘要） */
 	summary: string;
@@ -97,6 +99,7 @@ const summaryDataOf = (e: BranchEntryLike): RpSummaryData | null => {
  * 兼容旧会话里 pi 写的 `compaction` 条目：覆盖边界取 firstKeptEntryId 的前一条。
  * 返回 cut = 需要从历史里去掉的条目数（分支前缀长度）。
  */
+
 export function activeSummary(branch: BranchEntryLike[]): { summary: string; cut: number } | null {
 	for (let i = branch.length - 1; i >= 0; i--) {
 		const e = branch[i];
@@ -119,6 +122,7 @@ export function activeSummary(branch: BranchEntryLike[]): { summary: string; cut
 	return null;
 }
 
+
 /**
  * 分支条目 → 往拍历史。
  * 补丁（rp-draft-op）先套用；assistant 文本过 cleanAssistantText；
@@ -137,6 +141,7 @@ export function activeSummary(branch: BranchEntryLike[]): { summary: string; cut
  *
  * M4：有 rp-summary 时，被覆盖的早期条目整段不进历史，改由 summary 字段回读为【前情提要】。
  */
+
 export function rebuildHistory(branch: BranchEntryLike[], promptRules: DisplayRule[] = []): RebuiltHistory 
 {
 	const active = activeSummary(branch);
