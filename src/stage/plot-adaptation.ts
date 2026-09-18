@@ -24,6 +24,24 @@ export function selectRelevantEcologyRows<T>(rows: T[], input: { state: WorldSta
 	}).sort((a, b) => b.score - a.score || a.index - b.index).slice(0, limit).map((item) => item.row);
 }
 
+/** Reuse the established plot-adaptation channel when ecology is disabled. */
+export function plotAdaptationFromNovelProjection(value: NovelPlayProjection | undefined): PlotAdaptation | undefined {
+	if (!value?.candidates.length) return undefined;
+	const rows = value.candidates.slice(0, 3).map((item, index): PlotEventCandidate => ({
+		id: `novel:${item.nodeId}`,
+		templateId: item.nodeId,
+		name: item.title,
+		adaptedEvent: item.summary,
+		whyNow: "当前分支仍允许该原著节点作为同阶段候选",
+		involvedCharacters: [], causalLinks: [], foreshadowing: [],
+		entryPoint: "由导演结合当前场景决定是否自然接入",
+		progressLimit: "只推进当前场景的一次互动",
+		playerAgency: "候选不得覆盖玩家选择或当前分支事实",
+		status: index === 0 ? "selected" : "reserve",
+	}));
+	return { version: 1, cardGrammar: "当前分支事实优先；原著只提供同阶段公开候选。", selected: rows[0], reserves: rows.slice(1, 3), rejected: [] };
+}
+
 function objectOf(value: unknown): Record<string, unknown> | null { if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>; if (typeof value !== "string") return null; const source = value.trim(), fenced = source.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1], json = source.match(/\{[\s\S]*\}/)?.[0]; for (const candidate of [source, fenced, json]) { if (!candidate) continue; try { const parsed = JSON.parse(candidate); if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>; } catch {} } return null; }
 function candidate(value: unknown, status: PlotEventCandidate["status"], index: number): PlotEventCandidate | undefined { if (!value || typeof value !== "object" || Array.isArray(value)) return undefined; const row = value as Record<string, unknown>, name = clean(row.name, 120), adaptedEvent = clean(row.adaptedEvent, 600); if (!name || !adaptedEvent) return undefined; return { id: clean(row.id, 80) || `plot-${status}-${index + 1}`, templateId: clean(row.templateId, 120) || undefined, name, adaptedEvent, whyNow: clean(row.whyNow, 360), involvedCharacters: strings(row.involvedCharacters), causalLinks: strings(row.causalLinks), foreshadowing: strings(row.foreshadowing), entryPoint: clean(row.entryPoint, 360), progressLimit: clean(row.progressLimit, 360), playerAgency: clean(row.playerAgency, 240), status }; }
 

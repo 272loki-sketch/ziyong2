@@ -7,6 +7,10 @@ const replacements = [
 		'import { worldModuleSkillPacks } from "./skill-store.ts";\nimport { commitNovelPlayState, prepareNovelPlayTurn, type NovelPlayProjection, type PreparedNovelPlayTurn } from "../novel-play/runtime.ts"; // novel-play-runtime-integration-v1',
 	],
 	[
+		'\tparsePlotAdaptation,\n\ttype PlotAdaptation,',
+		'\tparsePlotAdaptation,\n\tplotAdaptationFromNovelProjection,\n\ttype PlotAdaptation,',
+	],
+	[
 		'\tsceneConductor?: SceneConductor;\n}',
 		'\tsceneConductor?: SceneConductor;\n\tnovelProjection?: NovelPlayProjection;\n}',
 	],
@@ -16,7 +20,7 @@ const replacements = [
 	],
 	[
 		'\t\t// 剧情卡—生态适配：卡池是长期卡级语法，运行态给出眼前人物/地点；本步骤把抽象模板',
-		'\t\t// 小说开演独立于生态开关。它只读取原始卡扩展、不可变作品包和当前权威分支。\n\t\tif (!rerollPrep && !legacyBackstage) {\n\t\t\tconst novelSkill = materials.skillFiles.find(skill => skill.dir === "小说分支校准");\n\t\t\tif (novelSkill) {\n\t\t\t\tpreparedNovelPlay = await prepareNovelPlayTurn({\n\t\t\t\t\tcwd, rawCard: materials.rawCard, branch, expectedLeafId: prepLeafId, skillBody: novelSkill.body,\n\t\t\t\t\tgetLeafId: () => sm.getLeafId(),\n\t\t\t\t\tmodelCall: async (systemPrompt, modelInput) => {\n\t\t\t\t\t\tconst result = await this.#sideText("plotAdaptation", systemPrompt, modelInput, 4096, "off", prepController.signal);\n\t\t\t\t\t\treturn typeof result === "string" ? result : undefined;\n\t\t\t\t\t},\n\t\t\t\t});\n\t\t\t\tnovelProjection = preparedNovelPlay?.projection;\n\t\t\t\tif (!novelProjection) ev.onActivity?.("小说分支校准：本拍无可用候选，按当前事实继续");\n\t\t\t}\n\t\t}\n\n\t\t// 剧情卡—生态适配：卡池是长期卡级语法，运行态给出眼前人物/地点；本步骤把抽象模板',
+		'\t\t// 小说开演独立于生态开关。它只读取原始卡扩展、不可变作品包和当前权威分支。\n\t\tif (!rerollPrep && !legacyBackstage) {\n\t\t\tconst novelSkill = materials.skillFiles.find(skill => skill.dir === "小说分支校准");\n\t\t\tif (novelSkill) {\n\t\t\t\tpreparedNovelPlay = await prepareNovelPlayTurn({\n\t\t\t\t\tcwd, rawCard: materials.rawCard, branch, expectedLeafId: prepLeafId, skillBody: novelSkill.body,\n\t\t\t\t\tgetLeafId: () => sm.getLeafId(),\n\t\t\t\t\tmodelCall: async (systemPrompt, modelInput) => {\n\t\t\t\t\t\tconst result = await this.#sideText("plotAdaptation", systemPrompt, modelInput, 4096, "off", prepController.signal);\n\t\t\t\t\t\treturn typeof result === "string" ? result : undefined;\n\t\t\t\t\t},\n\t\t\t\t});\n\t\t\t\tnovelProjection = preparedNovelPlay?.projection;\n\t\t\t\tif (novelProjection) plotAdaptation = plotAdaptationFromNovelProjection(novelProjection);\n\t\t\t\telse ev.onActivity?.("小说分支校准：本拍无可用候选，按当前事实继续");\n\t\t\t}\n\t\t}\n\n\t\t// 剧情卡—生态适配：卡池是长期卡级语法，运行态给出眼前人物/地点；本步骤把抽象模板',
 	],
 	[
 		'\t\t\t\tuserText: lastUserText, userName: config.userName,\n\t\t\t});',
