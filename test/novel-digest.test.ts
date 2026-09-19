@@ -43,7 +43,7 @@ function sampleText(): string {
 	const lines: string[] = [];
 	for (let c = 1; c <= 6; c++) {
 		lines.push(`第${c}章 风波`);
-		for (let p = 0; p < 20; p++) lines.push(`　　$(c)章第$(p)段。林默走出巷口，夜色压下来，手里攒着那封没有署名的信。`);
+		for (let p = 0; p < 20; p++) lines.push(`　　$(c)章第$(p)段。林默走出巷口，夜色压下来，手里攥着那封没有署名的信。`);
 	}
 	return lines.join("\n");
 }
@@ -97,7 +97,7 @@ test("分块：贪心装箱不超 CHUNK_CHARS，章节名正确携带", () => {
 	assert.equal(chunks[0]?.chapters.length > 0, true);
 });
 
-test("分块：块数上限拒绍超大文档", () => {
+test("分块：块数上限拒绝超大文档", () => {
 	const big = Array.from({ length: 10_000 }, (_, i) => `第${i + 1}章\n${"段落".repeat(120)}`).join("\n");
 	const { chapters } = splitChapters(big);
 	assert.throws(() => chunkText(chapters, 100, 60), /文档过大/);
@@ -115,18 +115,16 @@ test("管道：faux 返回合法 JSON → 文档到 ready，研究库有套路�
 		const research = new OutlineResearchStore(cwd);
 		mkdirSync(join(cwd, ".liyuan-uploads"), { recursive: true });
 		writeFileSync(join(cwd, ".liyuan-uploads", "novel.txt"), sampleText());
-		const engine = new CorpusEngine(corpusDeps(cwd, (task) => 
-{
+		const engine = new CorpusEngine(corpusDeps(cwd, (task) => {
 			if (task === "digest-map") return JSON.stringify({ summary: "一段摘要内容", chapters: ["第1章"] });
 			if (task === "digest-reduce-arc") return JSON.stringify({ summary: "弧线摘要" });
 			if (task === "digest-reduce-final") return JSON.stringify({ synopsis: "全书梗概", structure: { plotSpine: "主线", characterArcs: "弧", hooksAndPacing: "节奏" } });
 			if (task === "digest-extract-mechanisms") return JSON.stringify({ tropes: [{ mechanism: "来信制造悬念", appliesWhen: "关系刚建立时", failureWarning: "久不回收会拖节奏", evidenceIds: ["chunk-1"] }] });
 			if (task === "digest-extract-daily") return JSON.stringify({ dailyPatterns: [{ title: "借物归还", setting: "放学后", surfaceActivity: "归还物品", initiative: "角色借归还之名制造独处", sweetBeat: "记得对方习惯", friction: "时间安排冲突", misunderstanding: "误以为对方在躲避", microChange: "关系更主动", escalationLimit: "不升级为表白", naturalStop: "物品归还后停住", failureWarning: "过度巧合", evidenceIds: ["chunk-1"] }] });
-			if (task === "digest-extract-assets") return JSON.stringify({ assets: [{ kind: "relationship-beat", title: "试探式靖近", mechanism: "借一个低风险事务试探关系", appliesWhen: "双方有好感但不确认", failureWarning: "连续使用会显得拖沓", opening: "从具体事务开口", progression: ["制造短暂独处", "让对方误读动机"], turn: "对方主动追问", stopPoint: "得到半个回答后停笔", relationshipStage: "暗昧初期", pressure: "轻", desiredExperience: "发糖与期待", evidenceIds: ["chunk-1"] }] });
+			if (task === "digest-extract-assets") return JSON.stringify({ assets: [{ kind: "relationship-beat", title: "试探式靠近", mechanism: "借一个低风险事务试探关系", appliesWhen: "双方有好感但不确认", failureWarning: "连续使用会显得拖沓", opening: "从具体事务开口", progression: ["制造短暂独处", "让对方误读动机"], turn: "对方主动追问", stopPoint: "得到半个回答后停笔", relationshipStage: "暧昧初期", pressure: "轻", desiredExperience: "发糖与期待", evidenceIds: ["chunk-1"] }] });
 			if (task === "digest-audit") return JSON.stringify({ results: [{ index: 0, verdict: "supported" }, { index: 1, verdict: "supported" }, { index: 2, verdict: "supported" }] });
 			return AUDIT_OK;
-		
-}));
+		}));
 		const { doc } = await engine.create(".liyuan-uploads/novel.txt");
 		await engine.waitIdle();
 		assert.equal(engine.getDoc(doc.id)?.status, "ready");
@@ -248,7 +246,7 @@ test("投影：按导演 focus 选择结构化素材，而不是按落盘顺序�
 	const view = {
 		sources: [], mechanisms: [], cards: [], documents: [], dailyPatterns: [],
 		assets: [
-			{ kind: "dialogue-move", title: "对白试探", mechanism: "通过信息差试探对方", appliesWhen: "关系初期", failureWarning: "重复会机械", opening: "从公开话题切入", progression: ["留白", "追问"], turn: "对方反问", stopPoint: "留下未答问题", relationshipStage: "初识", pressure: "轻", desiredExperience: "暗昧", locator: "第1章" },
+			{ kind: "dialogue-move", title: "对白试探", mechanism: "通过信息差试探对方", appliesWhen: "关系初期", failureWarning: "重复会机械", opening: "从公开话题切入", progression: ["留白", "追问"], turn: "对方反问", stopPoint: "留下未答问题", relationshipStage: "初识", pressure: "轻", desiredExperience: "暧昧", locator: "第1章" },
 			{ kind: "scene-pattern", title: "日常偶遇", mechanism: "用共同活动制造自然接触", appliesWhen: "需要低烈度推进", failureWarning: "缺少主动目的会空转", opening: "从活动开始", progression: ["共同做事", "出现小摩擦"], turn: "一方改变安排", stopPoint: "关系发生微变", relationshipStage: "熟悉", pressure: "低", desiredExperience: "轻松", locator: "第3章" },
 		],
 	} as any;
