@@ -581,7 +581,6 @@ export class CorpusEngine {
 				const fetched = await fetchKakuyomuWork(doc.originName, this.#deps.fetchText, this.#signal(docId));
 				rawBytes = Buffer.from(fetched.text, "utf8");
 				doc.title = fetched.work.title.slice(0, 120);
-				doc.chars = fetched.text.length;
 				doc.encoding = "utf-8";
 				mkdirSync(join(corpusRoot(this.#deps.cwd), "work"), { recursive: true });
 				writeFileSync(rawPath, rawBytes);
@@ -603,6 +602,15 @@ export class CorpusEngine {
 		if (!text) { this.#fail(doc, "清洗后文本为空"); return; }
 		const { chapters, detected } = splitChapters(text);
 		const chunks = chunkText(chapters, CHUNK_CHARS, MAX_CHUNKS);
+		// 元数据唯一权威是落盘正文：URL 抓取原文与旧版恢复留下的计数都可能偏大，
+		// 在进入 mapping 前对齐并落盘，让恢复中的旧元数据自愈。
+		const chapterCount = detected ? chapters.length : 0;
+		if (doc.chars !== text.length || doc.chunkCount !== chunks.length || doc.chapterCount !== chapterCount) {
+			doc.chars = text.length;
+			doc.chunkCount = chunks.length;
+			doc.chapterCount = chapterCount;
+			this.#persistDocuments();
+		}
 
 		const job = this.#jobs.get(docId);
 		if (!job) return;

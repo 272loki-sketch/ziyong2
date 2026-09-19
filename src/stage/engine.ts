@@ -84,6 +84,7 @@ import {
 	buildPlotAdaptationPrompt,
 	formatPlotAdaptation,
 	parsePlotAdaptation,
+	plotAdaptationFromNovelProjection,
 	type PlotAdaptation,
 } from "./plot-adaptation.ts";
 import {
@@ -151,6 +152,7 @@ import { outlineFromBranch } from "../outline/state.ts";
 import { projectOutline } from "../outline/projection.ts";
 import { workflowSkill } from "./skill-store.ts";
 import { worldModuleSkillPacks } from "./skill-store.ts";
+import { commitNovelPlayState, prepareNovelPlayTurn, type NovelPlayProjection, type PreparedNovelPlayTurn } from "../novel-play/runtime.ts"; // novel-play-runtime-integration-v2
 import {
 	WORLD_MANIFEST_ENTRY_TYPE,
 	buildWorldProfilePrompt,
@@ -1316,6 +1318,8 @@ export class StageEngine {
 		let literaryDirection = rerollPrep?.literaryDirection;
 		let plotAdaptation = rerollPrep?.plotAdaptation;
 		let sceneConductor = rerollPrep?.sceneConductor;
+		let novelProjection: NovelPlayProjection | undefined;
+		let preparedNovelPlay: PreparedNovelPlayTurn | undefined;
 		let planFact: PlanFactComparison | undefined;
 		const directorRequested = !rerollPrep && config.literaryQuality === "guided" && !isBackstageText(lastUserText);
 		if (!history.some((m) => m.role === "user")) {
@@ -1527,6 +1531,24 @@ export class StageEngine {
 			this.#startEcologyPoolPrep({ cardPath: config.card, card, entries: materials.entries, state, history, userText: lastUserText, userName: config.userName, globalSkill: ecologyGlobalSkill, cardSkill: ecologyCardSkill, pools: ecologyPools, signal: poolSignal.signal });
 			ev.onActivity?.("鲜活世界：已在后台搜索并准备下一拍素材");
 		}
+		// 小说开演独立于生态开关。它只读取原始卡扩展、不可变作品包和当前权威分支。
+		if (!rerollPrep && !legacyBackstage) {
+			const novelSkill = materials.skillFiles.find(skill => skill.dir === "小说分支校准");
+			if (novelSkill) {
+				preparedNovelPlay = await prepareNovelPlayTurn({
+					cwd, rawCard: materials.rawCard, branch, expectedLeafId: prepLeafId, skillBody: novelSkill.body,
+					getLeafId: () => sm.getLeafId(),
+					modelCall: async (systemPrompt, modelInput) => {
+						const result = await this.#sideText("plotAdaptation", systemPrompt, modelInput, 4096, "off", prepController.signal);
+						return typeof result === "string" ? result : undefined;
+					},
+				});
+				novelProjection = preparedNovelPlay?.projection;
+				if (novelProjection) plotAdaptation = plotAdaptationFromNovelProjection(novelProjection);
+				else ev.onActivity?.("小说分支校准：本拍无可用候选，按当前事实继续");
+			}
+		}
+
 		// 剧情卡—生态适配：卡池是长期卡级语法，运行态给出眼前人物/地点；本步骤把抽象模板
 		// 变形成当前故事可用的因果候选。候选不落事实，正文实际发生后才由场记/大纲校准。
 		const plotAdaptationRequested = !rerollPrep && config.literaryEcologyEnabled === true && !legacyBackstage;
@@ -1536,7 +1558,7 @@ export class StageEngine {
 			const prompt = buildPlotAdaptationPrompt({
 				card, cardPool: ecologyPools.card, globalPool: ecologyPools.global, ecology: literaryEcology,
 				outline: projectOutline(outlineFromBranch(branch), "director"), state, history, summary,
-				userText: lastUserText, userName: config.userName,
+				userText: lastUserText, userName: config.userName, novelProjection,
 			});
 			const result = await this.#sideText("plotAdaptation", prompt.systemPrompt, prompt.userText, 8192, undefined, prepController.signal);
 			if (typeof result === "string" && sm.getLeafId() === sourceLeafId) {
@@ -2078,6 +2100,11 @@ export class StageEngine {
 				details,
 			});
 			sm.flush();
+			// A reroll reuses rpPrep and must not create new novel metadata.
+			if (!aborted && userText !== null) {
+				commitNovelPlayState({ prepared: preparedNovelPlay, expectedLeafId: entryId, getLeafId: () => sm.getLeafId(), appendCustomEntry: (type, data) => sm.appendCustomEntry(type, data) });
+				sm.flush();
+			}
 		} else if (final && finalText) generationLeafChanged = true;
 
 		// 留档条目必须落在正文**之后**：append 会把叶移到自己身上（_appendEntry），

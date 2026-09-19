@@ -4,12 +4,23 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { CorpusEngine, cleanTextLayer, chunkText, decodeText, estimateCallsForChunks, splitChapters, MAX_CHUNKS } from "../src/outline/corpus.ts";
+import { CorpusEngine, cleanTextLayer, chunkText, corpusDocumentsFile, corpusRoot, corpusTextsDir, decodeText, estimateCallsForChunks, splitChapters, CHUNK_CHARS, MAX_CHUNKS } from "../src/outline/corpus.ts";
 import { OutlineResearchStore } from "../src/outline/research.ts";
 import { projectCorpusWorkspace } from "../src/outline/projection.ts";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "novel-digest-"));
 const AUDIT_OK = JSON.stringify({ version: 1, verdict: "approve", issues: [], summary: "ok" });
+
+/** 最小成功模型：只负责让管道走到 ready，不参与元数据断言。 */
+const successModel = (task: string): string => {
+	if (task === "digest-map") return JSON.stringify({ summary: "块摘要", chapters: [] });
+	if (task === "digest-reduce-arc") return JSON.stringify({ summary: "弧线" });
+	if (task === "digest-reduce-final") return JSON.stringify({ synopsis: "梗概", structure: { plotSpine: "a", characterArcs: "b", hooksAndPacing: "c" } });
+	if (task === "digest-extract-mechanisms") return JSON.stringify({ tropes: [] });
+	if (task === "digest-extract-daily") return JSON.stringify({ dailyPatterns: [] });
+	if (task === "digest-extract-assets") return JSON.stringify({ assets: [] });
+	return AUDIT_OK;
+};
 
 function corpusDeps(cwd: string, onCall: (task: string, text: string) => string | { error: string } | Promise<string | { error: string }>) {
 	const research = new OutlineResearchStore(cwd);
@@ -37,6 +48,7 @@ function sampleText(): string {
 	return lines.join("\n");
 }
 
+
 test("解码：utf-8 优先，gb18030 命中，坏字节退 lossy", () => {
 	const enc = new TextEncoder();
 	const utf8 = enc.encode("这是章节标题");
@@ -61,6 +73,7 @@ test("清洗：水印行与导航行删除，正文对白保留", () => {
 	assert.equal(cleaned.includes("想去吃饭"), true);
 	assert.equal(cleaned.includes("下一行是正文"), true);
 });
+
 
 test("分章：标准「第N章」识别", () => {
 	const { chapters, detected } = splitChapters("第1章 初见\n第一段。\n第2章 重逢\n第二段。\n第3章 别离\n第三段。\n第4章 决裂\n第四段。\n第5章 和解\n第五段。\n第6章 结局\n第六段。\n");
@@ -89,6 +102,7 @@ test("分块：块数上限拒绝超大文档", () => {
 	const { chapters } = splitChapters(big);
 	assert.throws(() => chunkText(chapters, 100, 60), /文档过大/);
 });
+
 
 test("调用预估：块数越大预估越高", () => {
 	assert.equal(estimateCallsForChunks(50), 50 + 1 + 2);
@@ -127,6 +141,7 @@ test("管道：faux 返回合法 JSON → 文档到 ready，研究库有套路�
 	} finally { rmSync(cwd, { recursive: true, force: true }); }
 });
 
+
 test("管道：map 返回非法 JSON → 模型层+文档层双重自动重试后成功穿到 ready", async () => {
 	const cwd = tmp();
 	try {
@@ -149,6 +164,7 @@ test("管道：map 返回非法 JSON → 模型层+文档层双重自动重试�
 		assert.ok(mapCalls >= 3);
 	} finally { rmSync(cwd, { recursive: true, force: true }); }
 });
+
 
 test("管道：reduce 失败 → 文档自动重试 → 最终 ready，已完成块保留", async () => {
 	const cwd = tmp();
@@ -176,6 +192,7 @@ test("管道：reduce 失败 → 文档自动重试 → 最终 ready，已完成
 	} finally { rmSync(cwd, { recursive: true, force: true }); }
 });
 
+
 test("入库：mergeCorpus 机制入研究库；删除只删该 doc 独占条目", async () => {
 	const cwd = tmp();
 	try {
@@ -201,6 +218,7 @@ test("入库：mergeCorpus 机制入研究库；删除只删该 doc 独占条目
 	} finally { rmSync(cwd, { recursive: true, force: true }); }
 });
 
+
 test("投影：同卡 view 里 documents 包含 ready 文档，非该卡不混入", async () => {
 	// 通过 corpus 引擎 + research 钩子验证卡级隔离由 cardKey 快照实现
 	const cwd = tmp();
@@ -223,6 +241,7 @@ test("投影：同卡 view 里 documents 包含 ready 文档，非该卡不混�
 	} finally { rmSync(cwd, { recursive: true, force: true }); }
 });
 
+
 test("投影：按导演 focus 选择结构化素材，而不是按落盘顺序整包倾倒", () => {
 	const view = {
 		sources: [], mechanisms: [], cards: [], documents: [], dailyPatterns: [],
@@ -234,6 +253,7 @@ test("投影：按导演 focus 选择结构化素材，而不是按落盘顺序�
 	const projection = projectCorpusWorkspace(view, { focus: "dialogue", query: "潜台词 信息差" });
 	assert.equal(projection.assets[0]?.title, "对白试探");
 });
+
 
 test("管道：多部文档串行消化，避免长请求并发挤占模型网关", async () => {
 	const cwd = tmp();
@@ -260,5 +280,65 @@ test("管道：多部文档串行消化，避免长请求并发挤占模型网�
 		await engine.waitIdle();
 		assert.equal(maxActive, 1);
 		assert.equal(engine.view().documents.every((doc) => doc.status === "ready"), true);
+	} finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
+
+test("URL 文档：chars 对齐落盘正文，不是抓取原文长度", async () => {
+	const cwd = tmp();
+	const workUrl = "https://kakuyomu.jp/works/16816927859000000000";
+	const workHtml = `<h1><a href="/works/16816927859000000000" title="测试作品">测试作品</a></h1><script>{"Episode:111":{"id":"111","title":"第1章 初见"}}</script>`;
+	// 抓取原文里混有会被 cleanTextLayer 删掉的水印行与导航行
+	const episodeHtml = [
+		`<p id="p1">林默走出巷口，夜色压下来。</p>`,
+		`<p id="p2">本书首发于某站，请记住本站域名。</p>`,
+		`<p id="p3">上一章 返回目录 下一章</p>`,
+		`<p id="p4">他把那封没有署名的信收进口袋。</p>`,
+	].join("\n");
+	try {
+		const engine = new CorpusEngine({
+			...corpusDeps(cwd, successModel),
+			fetchText: async (url: URL) => url.pathname.includes("/episodes/") ? episodeHtml : workHtml,
+		});
+		const { doc } = await engine.createUrl(workUrl);
+		await engine.waitIdle();
+		assert.equal(engine.getDoc(doc.id)?.status, "ready");
+		const persisted = readFileSync(join(corpusTextsDir(cwd), `${doc.id}.txt`), "utf8");
+		const fetchedRaw = readFileSync(join(corpusRoot(cwd), "work", `${doc.id}.raw`), "utf8");
+		// 水印/导航被删：落盘正文严格短于抓取原文
+		assert.equal(persisted.includes("本书首发"), false);
+		assert.equal(persisted.includes("上一章"), false);
+		assert.ok(persisted.length < fetchedRaw.length);
+		assert.equal(engine.getDoc(doc.id)?.chars, persisted.length);
+	} finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
+
+test("恢复：documents.json 旧元数据在 restore 后按落盘正文自愈", async () => {
+	const cwd = tmp();
+	try {
+		const docId = "doc-selfheal0000";
+		const text = sampleText();
+		mkdirSync(corpusTextsDir(cwd), { recursive: true });
+		writeFileSync(join(corpusTextsDir(cwd), `${docId}.txt`), text, "utf8");
+		const now = new Date().toISOString();
+		// 旧版残留：chars/chunkCount/chapterCount 全错，但 texts/<id>.txt 已存在
+		writeFileSync(corpusDocumentsFile(cwd), `${JSON.stringify([{
+			id: docId, title: "旧文档", sourceKind: "upload", originName: "novel.txt",
+			chars: 999999, encoding: "utf-8", chapterCount: 77, chunkCount: 99,
+			status: "pending", cardKey: "card-a", createdAt: now, updatedAt: now,
+		}], null, 2)}\n`, "utf8");
+		const { chapters, detected } = splitChapters(text);
+		const expectedChunks = chunkText(chapters, CHUNK_CHARS, MAX_CHUNKS).length;
+		const engine = new CorpusEngine(corpusDeps(cwd, successModel));
+		engine.restore();
+		await engine.waitIdle();
+		const healed = engine.getDoc(docId);
+		assert.equal(healed?.status, "ready");
+		assert.equal(healed?.chars, text.length);
+		assert.equal(healed?.chunkCount, expectedChunks);
+		assert.equal(healed?.chapterCount, detected ? chapters.length : 0);
+		// 自愈值已落盘，不依赖内存对象
+		assert.equal(JSON.parse(readFileSync(corpusDocumentsFile(cwd), "utf8"))[0].chars, text.length);
 	} finally { rmSync(cwd, { recursive: true, force: true }); }
 });

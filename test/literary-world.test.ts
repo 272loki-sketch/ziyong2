@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
@@ -48,10 +51,28 @@ test("literary world：主演注入不泄露黑盒具体内容", () => {
 });
 
 test("literary world：用户 Skill 是规则权威且位于 Git 忽略目录", () => {
-	const repo = new URL("..", import.meta.url).pathname;
-	const skill = workflowSkill(scanSkillFiles(repo), "world");
-	assert.equal(skill?.source, "user");
-	assert.match(skill?.body ?? "", /因果与信息边界/);
+	const repo = mkdtempSync(join(tmpdir(), "liyuan-literary-world-skill-"));
+	try {
+		const skillDir = join(repo, ".liyuan-stage-skills", "world-rules");
+		mkdirSync(skillDir, { recursive: true });
+		writeFileSync(join(skillDir, "SKILL.md"), [
+			"---",
+			"name: 世界规则覆盖",
+			"description: 测试世界规则边界",
+			"workflow: world",
+			"resident: false",
+			"每轮: false",
+			"---",
+			"",
+			"因果与信息边界由本规则定义。",
+		].join("\n"));
+		const skill = workflowSkill(scanSkillFiles(repo), "world");
+		assert.equal(skill?.source, "user");
+		assert.match(skill?.body ?? "", /因果与信息边界/);
+		assert.match(skill?.dir ?? "", /world-rules/);
+	} finally {
+		rmSync(repo, { recursive: true, force: true });
+	}
 });
 
 test("literary world：快照可直接作为 wire 展示数据且黑盒只需计数", () => {
@@ -72,5 +93,5 @@ test("literary world：推演 prompt 收到角色卡独立适配，但仍由世�
 	assert.ok(profile);
 	const prompt = buildLiteraryWorldPrompt({ skillBody: "规则", world: defaultLiteraryWorldState(), rpState: { time: "", location: "", characters: {}, inventory: [], flags: {}, plot_threads: [] }, history: [], userText: "你好", narrativeText: "她点头。", charName: "她", userName: "我", manifest: manifestFromProfile(profile) });
 	assert.match(prompt.userText, /relationship-dynamics/);
-	assert.match(prompt.systemPrompt, /Skill 是本任务规则的唯一权威/);
+	assert.match(prompt.systemPrompt, /工作流 Skill 是本任务规则的唯一权威/);
 });
