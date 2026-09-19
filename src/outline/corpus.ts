@@ -31,6 +31,7 @@ export const ESTIMATE_FORMULA_TAIL = 2;
 
 export type CorpusDocStatus = "pending" | "cleaning" | "mapping" | "reducing" | "extracting" | "ready" | "failed" | "paused";
 
+
 export interface CorpusDocument {
 	id: string;
 	title: string;
@@ -105,6 +106,7 @@ export interface CorpusTrope {
 }
 export interface CorpusDailyPattern { title: string; setting: string; surfaceActivity: string; initiative: string; sweetBeat: string; friction: string; misunderstanding: string; microChange: string; escalationLimit: string; naturalStop: string; failureWarning: string; locator: string; evidenceIds?: string[] }
 export type NarrativeAssetKind = "scene-pattern" | "relationship-beat" | "dialogue-move";
+
 export interface NarrativeAsset {
 	kind: NarrativeAssetKind;
 	title: string;
@@ -146,6 +148,7 @@ const cleanList = (value: unknown, maxItems = 40, maxChars = 200): string[] => A
 	? value.flatMap((item) => typeof item === "string" && item.trim() ? [item.trim().slice(0, maxChars)] : []).slice(0, maxItems)
 	: [];
 
+
 const parseObject = (text: string): Record<string, unknown> | null => {
 	for (const candidate of [text.trim(), text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1], text.match(/\{[\s\S]*\}/)?.[0]]) {
 		if (!candidate) continue;
@@ -186,6 +189,7 @@ export function decodeText(bytes: Buffer): { text: string; encoding: string } {
 	return { text: new TextDecoder("utf-8").decode(bytes), encoding: "utf-8(lossy)" };
 }
 
+
 const WATERMARK_BLOCK_RE = /(?:本书首发|首发域名|笔趣|leshu|feiku|最新章节|请记住|无弹窗|广告|域名一|域名二)/i;
 const NAV_BLOCK_RE = /(?:上一章|下一章|返回目录|目录\s*页|加入书签|书页|章节错误|点此举报|报错)/i;
 
@@ -216,6 +220,7 @@ const CHAPTER_RE = /^\s*(?:第\s*[0-9〇零一二三四五六七八九十百千�
 export interface ChapterBlock { title: string; lines: string[] }
 
 /** 逐行扫描切章；命中 <5 视为无章节结构。 */
+
 export function splitChapters(text: string): { chapters: ChapterBlock[]; detected: boolean } {
 	const lines = text.split(/\r?\n/);
 	const blocks: ChapterBlock[] = [];
@@ -241,7 +246,8 @@ export function splitChapters(text: string): { chapters: ChapterBlock[]; detecte
 export interface TextChunk { index: number; chars: number; chapters: string[]; text: string }
 
 /** 贪心装箱分块：整章累加，超限封块；单章超限在段落边界二分。 */
-export function chunkText(chapters: ChapterBlock[], chunkChars = CHUNK_CHARS, maxChunks = MAX_CHUNKS): TextChunk[] {
+export function chunkText(chapters: ChapterBlock[], chunkChars = CHUNK_CHARS, maxChunks = MAX_CHUNKS): TextChunk[] 
+{
 	const chunks: TextChunk[] = [];
 	let buffer: string[] = [];
 	let bufferChars = 0;
@@ -296,6 +302,7 @@ export function chunkText(chapters: ChapterBlock[], chunkChars = CHUNK_CHARS, ma
 	return chunks.map((c, index) => ({ ...c, index }));
 }
 
+
 /** epub → 同 txt 结构的纯文本（复用 ziplite，零新依赖）。 */
 export function epubToText(data: Buffer): string {
 	const container = firstZipEntry(data, (entry) => /^META-INF\/container\.xml$/i.test(entry.name));
@@ -326,6 +333,7 @@ export function epubToText(data: Buffer): string {
 	if (text.trim().length < 100) throw new Error("epub 正文过短，无法解析");
 	return text;
 }
+
 
 function spineXhtmlToText(xhtml: string): string {
 	// 章节标题：h1-h6
@@ -366,6 +374,7 @@ export function estimateCallsForChunks(chunkCount: number): number {
 
 function safeKey(value: string): string { return createHash("sha256").update(value).digest("hex").slice(0, 24); }
 
+
 export class CorpusEngine {
 	// 大块摘要请求耗时较长；单飞避免同一网关并发时互相挤掉，三部仍会依次处理。
 	static readonly MAX_ACTIVE_DOCUMENTS = 1;
@@ -401,7 +410,8 @@ export class CorpusEngine {
 	getDoc(id: string): CorpusDocument | undefined { return this.#docs.get(id); }
 
 	/** 服务重启恢复：把未完成的活跃任务重新入队（断点续跑，跳过已完成块）。 */
-	restore(): void {
+	
+restore(): void {
 		for (const doc of this.#docs.values()) {
 			if (["pending", "cleaning", "mapping", "reducing", "extracting"].includes(doc.status)) {
 				doc.status = "pending";
@@ -418,7 +428,8 @@ export class CorpusEngine {
 	}
 
 	/** 建档：校验存在/类型/大小 → 复制 → 落 documents.json → 唤醒并行池。幂等按 originName+size。 */
-	async create(uploadName: string): Promise<{ doc: CorpusDocument; estimatedCalls: number }> {
+	async create(uploadName: string): Promise<{ doc: CorpusDocument; estimatedCalls: number }> 
+{
 		const dir = join(this.#deps.cwd, ".liyuan-uploads");
 		const stripped = uploadName.replace(/\\/g, "/").replace(/^\.(?:liyuan|rp)-uploads\//, "");
 		const base = basename(stripped);
@@ -461,12 +472,14 @@ export class CorpusEngine {
 			updatedAt: now,
 		};
 		this.#docs.set(doc.id, doc);
-		this.#persistDocuments();
+		
+this.#persistDocuments();
 		this.#enqueue(doc.id);
 		return { doc, estimatedCalls };
 	}
 
-	/** 建立 Kakuyomu URL 文档：抓取完成后进入与上传文件相同的消化链。 */
+	
+/** 建立 Kakuyomu URL 文档：抓取完成后进入与上传文件相同的消化链。 */
 	async createUrl(value: string): Promise<{ doc: CorpusDocument; estimatedCalls: number }> {
 		if (!this.#deps.fetchText) throw new Error("当前环境未配置网页抓取能力");
 		const normalizedUrl = normalizeKakuyomuWorkUrl(value).toString(), id = kakuyomuDocumentId(normalizedUrl), existing = this.#docs.get(id);
@@ -503,7 +516,8 @@ export class CorpusEngine {
 		this.#enqueue(docId);
 	}
 
-	async remove(docId: string): Promise<number> {
+	
+async remove(docId: string): Promise<number> {
 		const doc = this.#docs.get(docId);
 		if (!doc) throw new Error("文档不存在");
 		// 中断正在运行的任务
@@ -547,7 +561,8 @@ export class CorpusEngine {
 		this.#pump();
 	}
 
-	#pump(): void {
+	
+#pump(): void {
 		while (this.#jobs.size < CorpusEngine.MAX_ACTIVE_DOCUMENTS && this.#queue.size) {
 			const docId = this.#queue.values().next().value as string;
 			this.#queue.delete(docId);
@@ -564,7 +579,8 @@ export class CorpusEngine {
 		}
 	}
 
-	async #process(docId: string): Promise<void> {
+	
+async #process(docId: string): Promise<void> {
 		const doc = this.#docs.get(docId);
 		if (!doc) return;
 		const skill = this.#deps.loadSkill();
@@ -581,7 +597,6 @@ export class CorpusEngine {
 				const fetched = await fetchKakuyomuWork(doc.originName, this.#deps.fetchText, this.#signal(docId));
 				rawBytes = Buffer.from(fetched.text, "utf8");
 				doc.title = fetched.work.title.slice(0, 120);
-				doc.chars = fetched.text.length;
 				doc.encoding = "utf-8";
 				mkdirSync(join(corpusRoot(this.#deps.cwd), "work"), { recursive: true });
 				writeFileSync(rawPath, rawBytes);
@@ -602,7 +617,17 @@ export class CorpusEngine {
 		}
 		if (!text) { this.#fail(doc, "清洗后文本为空"); return; }
 		const { chapters, detected } = splitChapters(text);
-		const chunks = chunkText(chapters, CHUNK_CHARS, MAX_CHUNKS);
+		
+const chunks = chunkText(chapters, CHUNK_CHARS, MAX_CHUNKS);
+		// 元数据唯一权威是落盘正文：URL 抓取原文与旧版恢复留下的计数都可能偏大，
+		// 在进入 mapping 前对齐并落盘，让恢复中的旧元数据自愈。
+		const chapterCount = detected ? chapters.length : 0;
+		if (doc.chars !== text.length || doc.chunkCount !== chunks.length || doc.chapterCount !== chapterCount) {
+			doc.chars = text.length;
+			doc.chunkCount = chunks.length;
+			doc.chapterCount = chapterCount;
+			this.#persistDocuments();
+		}
 
 		const job = this.#jobs.get(docId);
 		if (!job) return;
@@ -643,7 +668,8 @@ export class CorpusEngine {
 			}
 			const found2 = this.#docs.get(docId);
 			if (!found2) return;
-			if (!summary) {
+			
+if (!summary) {
 				console.error(`[corpus] 块 ${chunk.index} 摘要输出不可解析：${(typeof attempt === "string" ? attempt : (attempt as { error?: string }).error ?? "error")?.slice(0, 300)}`);
 				const failedSummary = `(本块摘要生成失败，仅保留章节列表)`;
 				const previous = digest.chunks.findIndex((c) => c.index === chunk.index);
@@ -657,7 +683,8 @@ export class CorpusEngine {
 			digest.updatedAt = new Date().toISOString();
 			this.#writeDigest(docId, digest);
 		}
-		if (doc.status === "paused") return;
+		
+if (doc.status === "paused") return;
 
 		// reduce-arc：每 ~50 块一组归并弧线摘要
 		doc.status = "reducing"; this.#persistDocuments();
@@ -682,7 +709,8 @@ export class CorpusEngine {
 		let finalParsed = typeof finalRaw === "string" ? parseObject(finalRaw) : null;
 		if (!finalParsed) { finalRaw = await this.#call(docId, skill, finalUser, 8192); finalParsed = typeof finalRaw === "string" ? parseObject(finalRaw) : null; }
 		const synopsis = typeof finalRaw === "string" ? textField(finalRaw, "synopsis", 3000) : "";
-		if (!finalParsed && !synopsis) { console.error(`[corpus] 全书梗概输出不可解析：${(typeof finalRaw === "string" ? finalRaw : (finalRaw as { error?: string }).error ?? "error")?.slice(0, 300)}`); this.#fail(doc, "全书梗概生成失败"); return; }
+		
+if (!finalParsed && !synopsis) { console.error(`[corpus] 全书梗概输出不可解析：${(typeof finalRaw === "string" ? finalRaw : (finalRaw as { error?: string }).error ?? "error")?.slice(0, 300)}`); this.#fail(doc, "全书梗概生成失败"); return; }
 		digest.synopsis = synopsis;
 		const s = finalParsed?.structure && typeof finalParsed.structure === "object" && !Array.isArray(finalParsed.structure) ? finalParsed.structure as Record<string, unknown> : {};
 		digest.structure = {
@@ -707,7 +735,8 @@ export class CorpusEngine {
 		}));
 		if (this.#signal(docId).aborted || !this.#docs.has(docId)) return;
 		const failedExtracts = ["digest-extract-mechanisms", "digest-extract-daily", "digest-extract-assets"].filter((_, index) => !extractParts[index]);
-		if (failedExtracts.length) console.error(`[corpus] 结构化素材部分降级 doc=${docId}: ${failedExtracts.join(",")}`);
+		
+if (failedExtracts.length) console.error(`[corpus] 结构化素材部分降级 doc=${docId}: ${failedExtracts.join(",")}`);
 		// 提炼属于研究增强层；某一子任务格式异常时保留其余结果，不能让整部文档反复重跑。
 		const extractParsed = Object.assign({}, ...extractParts.filter((part): part is Record<string, unknown> => !!part));
 		const tropes: CorpusTrope[] = Array.isArray(extractParsed?.tropes)
@@ -728,7 +757,8 @@ export class CorpusEngine {
 			value.locator = evidenceLocator(value.evidenceIds ?? [], evidenceById);
 			return value.title && value.surfaceActivity && value.microChange && value.evidenceIds?.length ? [value] : [];
 		}).slice(0, 20) : [];
-		const assets: NarrativeAsset[] = Array.isArray(extractParsed.assets) ? extractParsed.assets.flatMap((item): NarrativeAsset[] => {
+		
+const assets: NarrativeAsset[] = Array.isArray(extractParsed.assets) ? extractParsed.assets.flatMap((item): NarrativeAsset[] => {
 			if (!item || typeof item !== "object" || Array.isArray(item)) return [];
 			const row = item as Record<string, unknown>;
 			const kind = row.kind === "scene-pattern" || row.kind === "relationship-beat" || row.kind === "dialogue-move" ? row.kind : null;
@@ -747,7 +777,8 @@ export class CorpusEngine {
 		}).slice(0, 30) : [];
 		const auditRows = [...tropes.map((item) => ({ kind: "mechanism", text: item.mechanism, evidenceIds: item.evidenceIds })), ...dailyPatterns.map((item) => ({ kind: "daily", text: `${item.title} ${item.surfaceActivity} ${item.microChange}`, evidenceIds: item.evidenceIds })), ...assets.map((item) => ({ kind: "asset", text: `${item.title} ${item.mechanism}`, evidenceIds: item.evidenceIds }))];
 		let auditResult = new Map<number, "supported" | "weak" | "unsupported">();
-		if (auditRows.length) {
+		
+if (auditRows.length) {
 			const auditRaw = await this.#call(docId, skill, JSON.stringify({ task: "digest-audit", evidence_index: evidenceIndex, items: auditRows.map((item, index) => ({ index, ...item })) }), 8192);
 			const auditParsed = typeof auditRaw === "string" ? parseObject(auditRaw) : null;
 			if (Array.isArray(auditParsed?.results)) for (const raw of auditParsed.results) {
@@ -779,7 +810,8 @@ export class CorpusEngine {
 			evidenceSummary: (t.evidenceIds ?? []).flatMap((id) => evidenceById.get(id)?.summary ?? []).join("\n").slice(0, 800),
 			confidence: verdict(tropes.indexOf(t)) === "supported" ? "audited" : "system-grounded",
 		}));
-		doc.status = "ready"; doc.chunkCount = chunks.length; doc.chapterCount = detected ? chapters.length : 0; doc.synopsisPreview = digest.synopsis.slice(0, 400); doc.tropeCount = approvedTropes.length; doc.dailyPatternCount = approvedDaily.length; doc.assetCount = approvedAssets.length; delete doc.error; delete (doc as Record<string, unknown>)._retries; this.#persistDocuments();
+		doc.status = "ready"; doc.chunkCount = chunks.length; doc.chapterCount = detected ? chapters.length : 0; doc.synopsisPreview = digest.synopsis.slice(0, 400); doc.tropeCount = approvedTropes.length; doc.dailyPatternCount = approvedDaily.length; 
+doc.assetCount = approvedAssets.length; delete doc.error; delete (doc as Record<string, unknown>)._retries; this.#persistDocuments();
 
 		// 入库（宿主挂 onReady → research store.mergeCorpus）
 		if (this.#deps.onReady) {
@@ -794,7 +826,8 @@ export class CorpusEngine {
 
 	#signal(docId: string): AbortSignal { return this.#abort.get(docId)?.signal ?? AbortSignal.abort(); }
 
-	async #call(docId: string, skill: string, user: string, maxTokens: number): Promise<string | { error: string }> {
+	async #call(docId: string, skill: string, user: string, maxTokens: number): Promise<string | { error: string }> 
+{
 		const call = async (attempt: number): Promise<string | { error: string }> => {
 			const signal = AbortSignal.any([this.#signal(docId), AbortSignal.timeout(CorpusEngine.MODEL_CALL_TIMEOUT_MS)]);
 			console.log(`[corpus] 模型调用开始 doc=${docId} attempt=${attempt + 1}/${CorpusEngine.MODEL_MAX_RETRIES + 1}`);
@@ -830,7 +863,8 @@ export class CorpusEngine {
 				return { error: "调用异常已耗尽重试" };
 			}
 		};
-		return call(0);
+		
+return call(0);
 	}
 
 	#readDigest(docId: string): CorpusDigest | null {
@@ -858,6 +892,7 @@ export class CorpusEngine {
 		this.#persistDocuments();
 	}
 }
+
 
 function chapterTitles(chapters: string[], text: string): string[] {
 	const t = chapters.filter(Boolean).slice(0, 8).map((c) => c.slice(0, 30));
