@@ -53,6 +53,7 @@ jobs:
 
       - name: Domain unit tests
         run: npm test
+        timeout-minutes: 20
 
   smoke-web:
     name: smoke-web (${{ matrix.os }})
