@@ -79,7 +79,10 @@ test("GET start returns public node titles and preview token is immutable and si
 	writeFileSync(join(root, "liyuan.config.json"), JSON.stringify({ card: "assets/cards/default_Qingwu.json", userName: "old", userPersona: "", language: "zh-CN", scanDepth: 6, maxLoreInjections: 5 }));
 	const h = host(root, () => JSON.stringify({ time: { text: "晨钟响起", quote: "晨钟响起" }, place: { text: "城门", quote: "城门" }, sceneText: { text: "晨钟响起", quote: "晨钟响起" }, openingNarration: { text: "旅人推开城门", quote: "旅人推开城门" }, publicCharacterProfiles: [], publicWorldFacts: [] }));
 	const options = await request(h, "GET", `/api/novel-play/start?docId=${input.docId}&revision=${revision}`);
-	assert.deepEqual(options.body.package.nodes, [{ nodeId: options.body.package.nodes[0].nodeId, title: "阶段 1 · 节点 1" }]);
+	assert.equal(options.body.package.nodes[0].title, "晨钟");
+	assert.equal(options.body.package.nodes[0].summary, "晨钟响起");
+	assert.equal(options.body.package.nodes[0].stageTitle, "第一章");
+	assert.equal(options.body.package.nodes[0].source.chunkIndex, 0);
 	const preview = await request(h, "POST", "/api/novel-play/preview", { docId: input.docId, revision, nodeId: options.body.package.nodes[0].nodeId, position: "before", player: { name: "阿岚", identity: "异乡旅人" } });
 	assert.equal(preview.status, 200, JSON.stringify(preview.body)); assert.equal(JSON.stringify(preview.body).includes("quote"), false);
 	const started = await request(h, "POST", "/api/novel-play/start", { previewToken: preview.body.preview.token, draft: { user: { name: "篡改" } } });
@@ -144,4 +147,20 @@ test("created switch with stale runtime binding requires recovery", async () => 
 	(fixture.h as unknown as { switchToCard(): Promise<string> }).switchToCard = async () => "created";
 	const result = await startFromConfirmedProposal(fixture.h as never, fixture.generated, fixture.expected);
 	assert.equal(result.session, "recovery-required");
+});
+
+test("upgrade preview token is single-use and cannot be replayed", async () => {
+	const fixture = await directStartFixture();
+	let commits = 0;
+	const upgradeHost = fixture.h as unknown as RestHost & { novelPlayUpgradePreview: RestHost["novelPlayUpgradePreview"]; novelPlayUpgradeCommit: RestHost["novelPlayUpgradeCommit"] };
+	upgradeHost.novelPlayUpgradePreview = () => ({ from: { revision: "old" }, to: { revision: "new" }, leafId: "leaf-1", newNodes: 2 });
+	upgradeHost.novelPlayUpgradeCommit = (_doc, _revision, leaf) => { commits++; assert.equal(leaf, "leaf-1"); return { ok: true }; };
+	const preview = await request(upgradeHost, "POST", "/api/novel-play/upgrade/preview", { targetDocId: "new-doc", targetRevision: "new-revision" });
+	assert.equal(preview.status, 200, JSON.stringify(preview.body));
+	const token = preview.body.preview.token;
+	const committed = await request(upgradeHost, "POST", "/api/novel-play/upgrade/commit", { previewToken: token });
+	assert.equal(committed.status, 200, JSON.stringify(committed.body));
+	assert.equal(commits, 1);
+	const replay = await request(upgradeHost, "POST", "/api/novel-play/upgrade/commit", { previewToken: token });
+	assert.equal(replay.status, 409);
 });

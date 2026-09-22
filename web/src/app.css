@@ -7389,6 +7389,21 @@ label.drawer-btn {
 
 /* 导演室：冷静的创作控制台，与台前的暖色叙事界面保持同一套主题。 */
 body.planning-open { overflow: hidden; }
+.novel-guide-panel { position: absolute; z-index: 8; top: 14px; right: 18px; width: min(360px, calc(100% - 36px)); padding: 13px; border: 1px solid var(--hairline-strong); border-radius: 12px; background: color-mix(in srgb, var(--surface) 94%, var(--accent)); box-shadow: 0 10px 28px rgb(0 0 0 / 12%); }
+.novel-guide-panel header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.novel-guide-panel header div { display: grid; gap: 3px; }
+.novel-guide-panel header span { color: var(--text-faint); font-size: 10px; letter-spacing: .12em; }
+.novel-guide-panel header strong { color: var(--text-strong); }
+.novel-guide-panel button { border: 1px solid var(--hairline-strong); border-radius: 7px; padding: 4px 8px; background: var(--surface); color: var(--text); cursor: pointer; }
+.novel-guide-meta { margin-top: 10px; color: var(--accent); font-size: 12px; }
+.novel-guide-note, .novel-guide-empty { margin: 8px 0; color: var(--text-faint); font-size: 12px; line-height: 1.5; }
+.novel-guide-candidates { display: grid; gap: 8px; max-height: 300px; overflow: auto; }
+.novel-guide-candidates article { padding: 9px; border: 1px solid var(--hairline); border-radius: 8px; background: var(--surface); }
+.novel-guide-candidates article b, .novel-guide-candidates article strong { display: block; }
+.novel-guide-candidates article b { color: var(--accent); font-size: 11px; }
+.novel-guide-candidates article strong { margin-top: 3px; color: var(--text-strong); }
+.novel-guide-candidates article p { margin: 5px 0 8px; color: var(--text-faint); font-size: 12px; line-height: 1.45; }
+.novel-guide-modify { width: 100%; margin-top: 9px; }
 .planning-overlay { position: fixed; inset: 0; z-index: 1200; display: grid; place-items: center; padding: 24px; background: rgb(18 15 13 / 62%); backdrop-filter: blur(14px) saturate(.8); }
 .planning-workbench { width: min(1480px,97vw); height: min(940px,95vh); display: grid; grid-template-rows: 74px minmax(0,1fr); overflow: hidden; color: var(--text); background: var(--surface); border: 1px solid var(--hairline-strong); border-radius: 20px; box-shadow: 0 36px 100px rgb(14 11 9 / 45%); }
 .planning-workbench.is-full { width: 100vw; height: 100dvh; border: 0; border-radius: 0; }
@@ -7541,6 +7556,18 @@ body.planning-open { overflow: hidden; }
 .planning-arc summary { display: flex; justify-content: space-between; gap: 10px; color: var(--text-strong); cursor: pointer; }
 .planning-page-note.planning-page-note,.planning-page-note strong { color: inherit; }
 .planning-corpus-acts { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
+.planning-corpus-filters { display: flex; flex-wrap: wrap; gap: 5px; }
+.planning-corpus-filters button { border: 1px solid var(--hairline-strong); border-radius: 999px; padding: 5px 10px; background: var(--surface); color: var(--text-faint); cursor: pointer; }
+.planning-corpus-filters button.active { border-color: var(--accent); background: color-mix(in srgb,var(--accent) 14%,var(--surface)); color: var(--text); }
+.planning-corpus-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
+.planning-corpus-tags span { border-radius: 999px; padding: 3px 8px; background: color-mix(in srgb,var(--accent) 12%,var(--surface)); color: var(--text-faint); font-size: 11px; }
+.novel-play-progress { margin-top: 12px; }
+.novel-play-progress-head { display: flex; justify-content: space-between; gap: 12px; color: var(--text-faint); font-size: 12px; }
+.novel-play-progress-head b { color: var(--text); font-variant-numeric: tabular-nums; }
+.novel-play-progress-track { height: 8px; margin-top: 6px; overflow: hidden; border-radius: 999px; background: var(--hairline); }
+.novel-play-progress-fill { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width 300ms ease; }
+.novel-play-progress-fill.is-failed { background: var(--danger, #c45b55); }
+.novel-play-progress-fill.is-succeeded { background: #4d9b70; }
 .planning-corpus-actions { display: flex; align-items: center; gap: 12px; margin-top: 14px; padding: 13px 14px; border: 1px solid color-mix(in srgb,var(--accent) 22%,var(--hairline)); border-radius: 10px; background: var(--surface); }
 .planning-corpus-actions span { color: var(--text-faint); font-size: 11px; }
 .planning-page-note + .planning-research-refresh { margin-top: 14px; }
@@ -7694,4 +7721,3 @@ body.planning-open { overflow: hidden; }
 .planning-memory-diff-arc { color: var(--accent); font-size: 10px; }
 .planning-memory-diff-reason { color: var(--text-faint); font-size: 9px; }
 .planning-memory-diff-time { color: var(--text-faint); font-size: 10px; white-space: nowrap; }
-}

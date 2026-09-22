@@ -1,6 +1,6 @@
 # 梨园（Liyuan）架构总览
 
-> 当前实现基线：2026-09-18。本文描述已经落地的运行时；早期 PLAN 文档中的待办、旧实验数字和旧状态机不覆盖本文。
+> 当前实现基线：2026-09-21。本文描述已经落地的运行时；早期 PLAN 文档中的待办、旧实验数字和旧状态机不覆盖本文。
 
 > 面向 AI 助手与后续维护者的第一手结构说明：先读本文件，再按需深入各 PLAN 权威文档。
 > 更新准则：任何引擎/提示词改动都要能回答「离 `docs/PLAN-ROUND-FLOW.md` 近了多少」、
@@ -55,7 +55,7 @@ StageEngine              = 唯一正文所有者 + 独立谢幕格式轮唯一�
 | `src/stage/diagnostics.ts` | **本拍诊断只读投影**：从 Session Tree 动态构造回合诊断（关联、状态判定、安全裁剪、超大型截断与来源校验） |
 | `src/stage/literary-*.ts` | 文学工作流各步：连续性、Sogon/Sigon、director、world-profile、world-modular、world-transition、world-signals、ecology |
 | `src/outline/` | 独立大纲系统：Schema/runtime parser、分支恢复、Proposal/Audit/Commit、研究库、消费者安全投影与 OutlineEngine |
-| `src/outline/corpus.ts` | **小说长文消化管道**（PLAN-NOVEL-DIGEST）：解码/清洗/分章/分块纯函数 + 文档级最多 3 并行的 CorpusEngine（断点续跑、暂停/恢复/删除、独立取消、预算闸门、docId 幂等、单次调用最多 4 次、文档级最多 3 次重入队；研究旁路不叠加 SDK 隐式重试） |
+| `src/outline/corpus.ts` | **小说长文消化管道**（PLAN-NOVEL-DIGEST）：解码/清洗/分章/分块纯函数 + CorpusEngine（断点续跑、暂停/恢复/删除、独立取消、预算闸门、内容 fingerprint、append-only source version、冻结 layout 和旧 chunk 摘要复用；研究旁路不叠加 SDK 隐式重试） |
 | `src/outline/corpus-scheduler.ts` | 小说研究自动任务：按本地时间每日调度 Kakuyomu 搜索，候选去重后最多 3 部入 CorpusEngine；不进入正文关键路径 |
 | `src/outline/kakuyomu.ts` | Kakuyomu 作品页与搜索适配器：URL 校验、候选发现、Episode 列表提取、章节正文解析（Apollo State / ruby / 连续段落），用于手动 URL 与每日自动任务 |
 | `src/stage/calendar.ts` | 确定性历法/日期/跨月区间/年度重复投影（纯函数） |
@@ -99,6 +99,9 @@ StageEngine              = 唯一正文所有者 + 独立谢幕格式轮唯一�
 关键设计：
 
 - **正文唯一入口是稿纸**；`draft_append` 一次模型生成轮只接一段（硬门禁）。
+- **小说版本不可变**：新版完整原文必须逐字追加旧版；旧 Corpus、旧 package、旧卡和旧 Session 不覆盖。追加作品包只继承旧节点并提取新增分块。
+- **小说升级进分支树**：`rp-novel-play-upgrade` 只在一次性、绑定 session/card/leaf 的升级预览令牌确认后追加；不切卡、不新建 Session，回档自然恢复旧 revision。
+- **小说场景召回**：当前原著节点所在 stage 的公开事件会组成同场事件组，带标题、摘要和原文证据，作为候选同时交给导演、场面编排和主演；生态候选只能补充，不能覆盖原著候选。
 - API 声明或实际表明不支持工具调用时，主演自动切换为纯文本模式：不发送工具清单，第一份完整文本直接收稿；该模式不提供分段工具、主演主动检索或主演主动记账。
 - **计划是假设，不是剧本**：每段后重新评估，可重拟；明确长篇目标时计划上限按 `wordRange` 动态放宽至最多 8 条。
 - 字数目标支持区间、约数和“不少于”表达；正文明显低于目标时前两次 `draft_seal` 会软拒绝，要求继续当前场景。
@@ -107,6 +110,9 @@ StageEngine              = 唯一正文所有者 + 独立谢幕格式轮唯一�
 - 正文 `rpNarrative` 与格式 `rpCurtain` 分工件落树；历史只回读正文。
 - 拍后世界/生态在 `agent end` 前完成，保证下拍读到完整分支。
 - 诊断数据只从已落树的 assistant `details`、`rp-turn-diagnostic` 和拍后 custom 条目读取，不新增权威状态。
+- 人物画像允许读取完整人物剧情弧线以塑形；画像是条件资料，不是当前分支事实。具体原著事件、身份揭示和结局仍由作品包候选与当前分支校准处理。
+- **人物身份优先**：当前账本和角色卡中已确认的人物身份会作为确定性参考注入；生态或导演候选不得把已确认人物改写成陌生人、女仆或其他无证据身份。
+- **场记事实门禁**：场记只能从用户输入和主演定稿中提取事实；导演候选、生态候选、原著参考和推测不得直接写入 `rp-state`。
 - **人物主动性由导演统一分析**；正文关键路径不再按在场角色逐个调用排演模型。
 - 主 writer 每个流请求有 15 分钟硬超时；`ask` 等待有 30 分钟上限。超时、取消或坏网关不能永久占住回合锁。
 
@@ -249,6 +255,8 @@ StageEngine              = 唯一正文所有者 + 独立谢幕格式轮唯一�
 | `docs/PRESET-SPLIT-TAXONOMY.md` | 预设拆层：A–I 类去留 |
 | `docs/PLAN-RP-AGENT-EXEC.md` / `docs/PLAN-RP-AGENT.md` | RP agent 编排 |
 | `docs/WRITER-API-COMPATIBILITY.md` | 主演 API 能力矩阵、纯文本降级与运行时保护 |
+| `docs/NOVEL-PLAY.md` | 小说开演用户流程、API、边界、人物世界书与原著提示 |
+| `docs/NOVEL-PLAY-MAINTENANCE.md` | Novel Play 维护规约、故障复盘、增量人物资料和真实验收 |
 | `docs/PLAN-RP-TOOLING.md` | 工具 schema 与写入门禁 |
 | `docs/READING-THINKING.md` | 读思考记录的正确方法（先读再碰会话文件） |
 | `docs/THIRD-PARTY-INSPIRATION.md` | 参考过 ST-SevenDaysCal 与 world-backstage 的能力与来源说明 |

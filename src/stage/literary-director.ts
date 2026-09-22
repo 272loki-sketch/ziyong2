@@ -75,6 +75,7 @@ export function buildLiteraryDirectorPrompt(input: {
 	userText: string;
 	charName: string;
 	userName: string;
+	characterIdentityIndex?: string;
 }): { systemPrompt: string; userText: string } {
 	return {
 		systemPrompt: `你是梨园文学工作流唯一的拍前导演。你只给主演一块简短、受限的 Stitches 风格方向，不写正文、对白、状态补丁、输出格式或事件顺序，也不复述输入。
@@ -94,6 +95,7 @@ continuity 仅是连续性约束，research 仅是参考材料。不得创造新
 				recent_history: boundedHistory(input.history, 20),
 				latest_user_input: clipPromptText(input.userText, 8_000),
 				activated_lore: boundedLore(input.activatedLore, 6),
+				character_identity_reference: input.characterIdentityIndex ?? null,
 				literary_profile: input.literaryProfile ?? null,
 				continuity_constraints: input.continuity ?? null,
 				research_reference_only: input.research ?? null,

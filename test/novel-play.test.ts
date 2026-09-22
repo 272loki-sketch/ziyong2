@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { prepareNovelSource, novelNodeId, assertNovelEvidence } from "../src/novel-play/source.ts";
 import { buildNovelPackage, projectNovelCandidates } from "../src/novel-play/canon.ts";
+import { projectNovelSceneRecall } from "../src/novel-play/canon.ts";
 import type { NovelNode } from "../src/novel-play/canon.ts";
 
 function fixture() {
@@ -85,4 +86,12 @@ test("小说候选：预算包括序列化结构，超限省略且不截断事�
 	assert.equal(bounded.omittedNodeIds.length, 2);
 	assert.equal(projectNovelCandidates(f.pkg, f.anchor, { ...f.options, maxChars: 0 }).candidates.length, 0);
 	assert.deepEqual(f.pkg.nodes, buildNovelPackage(f.source, f.stages, f.nodes).nodes);
+});
+
+test("小说当前场景召回保留同阶段并行事件和原文证据，但仍标记为候选", () => {
+	const f = fixture();
+	const recall = projectNovelSceneRecall(f.pkg, f.anchor);
+	assert.equal(recall.length, 3);
+	assert.ok(recall.every(item => item.actuality === "candidate"));
+	assert.ok(recall.every(item => item.quote));
 });

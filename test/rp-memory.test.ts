@@ -213,6 +213,8 @@ test("rp-memory: 摘要 envelope 可解析；旧 Markdown 仍兼容；历史触�
 	assert.equal(parsed.events[0]!.kind, "rp-event-digest");
 	assert.equal(parseRpSummaryEnvelope("## Story Phase\n旧格式").summary, "## Story Phase\n旧格式");
 	assert.equal(shouldRecallHistory("今天放学后去体育馆。"), false);
+	assert.equal(shouldRecallHistory("阿黛尔、妮菲尔等你老婆以前的几个闺蜜。"), false);
+	assert.equal(shouldRecallHistory("你还记得以前我们第一次见面的事吗？"), true);
 	assert.equal(shouldRecallHistory("你还记得我们第一次见面吗？"), true);
 	assert.equal(shouldRecallHistory("这些年我们一路走来经历了什么"), true);
 	assert.equal(sideTextTimeoutMs("memoryEvents"), 60_000);

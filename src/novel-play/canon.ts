@@ -20,6 +20,7 @@ export interface NovelNode {
 	dependsOn: string[];
 	sourceRefs: NovelEvidence[];
 }
+export interface NovelSceneRecallItem { nodeId: string; title: string; summary: string; quote: string; actuality: "candidate"; }
 export interface NovelPackage {
 	version: 1;
 	docId: string;
@@ -28,10 +29,18 @@ export interface NovelPackage {
 	revision: string;
 	stages: NovelStage[];
 	nodes: NovelNode[];
+	/** Present only on an immutable append-only successor package. */
+	lineage?: {
+		parentDocId: string;
+		parentRevision: string;
+		relation: "append-only";
+		inheritedNodeIds: string[];
+		newNodeIds: string[];
+	};
 }
 
 /** Typed extraction boundary. Raw model JSON must be parsed before calling this. */
-export function buildNovelPackage(source: NovelSource, stages: NovelStage[], nodes: NovelNode[]): NovelPackage {
+export function buildNovelPackage(source: NovelSource, stages: NovelStage[], nodes: NovelNode[], lineage?: NovelPackage["lineage"]): NovelPackage {
 	if (!stages.length || !nodes.length) throw new Error("作品包必须包含阶段和节点");
 	const stageIds = new Set<string>();
 	const stageOrders = new Set<number>();
@@ -51,7 +60,7 @@ export function buildNovelPackage(source: NovelSource, stages: NovelStage[], nod
 			throw new Error("节点结构无效");
 		}
 		for (const ref of node.sourceRefs) assertNovelEvidence(source, ref);
-		if (node.id !== novelNodeId(source, node.sourceRefs[0], node.key)) throw new Error("节点标识与原文不匹配");
+		if (node.id !== novelNodeId(source, node.sourceRefs[0], node.key) && !lineage?.inheritedNodeIds.includes(node.id)) throw new Error("节点标识与原文不匹配");
 		byId.set(node.id, node); orders.add(node.order);
 	}
 	const stageOrder = new Map(stages.map(stage => [stage.id, stage.order]));
@@ -69,6 +78,7 @@ export function buildNovelPackage(source: NovelSource, stages: NovelStage[], nod
 	const data = {
 		version: 1 as const, docId: source.docId, sourceFingerprint: source.fingerprint,
 		sourceChunkChars: source.chunkChars,
+		...(lineage ? { lineage: { ...lineage, inheritedNodeIds: [...lineage.inheritedNodeIds].sort(), newNodeIds: [...lineage.newNodeIds].sort() } } : {}),
 		stages: [...stages].sort((a, b) => a.order - b.order).map(stage => ({ id: stage.id, order: stage.order, title: stage.title })),
 		nodes: [...nodes].sort((a, b) => a.order - b.order).map(node => ({
 			id: node.id, key: node.key, stageId: node.stageId, order: node.order,
@@ -81,10 +91,13 @@ export function buildNovelPackage(source: NovelSource, stages: NovelStage[], nod
 	return { ...data, revision };
 }
 
-export interface NovelAnchor {
-	packageRevision: string;
-	nodeId: string;
-	position: "before" | "after";
+export type NovelAnchor =
+	| { kind?: "node"; packageRevision: string; nodeId: string; position: "before" | "after" }
+	| { kind: "source-end"; packageRevision: string };
+export type NovelNodeAnchor = Extract<NovelAnchor, { nodeId: string }>;
+
+export function novelAnchorKind(anchor: NovelAnchor): "node" | "source-end" {
+	return anchor.kind === "source-end" ? "source-end" : "node";
 }
 /** Caller must derive this set from the actual Session Tree ancestor chain. */
 export interface NovelConflict {
@@ -98,7 +111,7 @@ export interface NovelConflict {
  * Bounded DIRECTOR candidates. Not a writer prompt, initial fact snapshot, or spoiler guarantee.
  * Conflict propagation follows explicit causal edges. Chronology alone never invalidates a node.
  */
-export function projectNovelCandidates(pkg: NovelPackage, anchor: NovelAnchor, options: {
+export function projectNovelCandidates(pkg: NovelPackage, anchor: NovelNodeAnchor, options: {
 	ancestorEntryIds: ReadonlySet<string>;
 	conflicts: NovelConflict[];
 	conflictsReady: boolean;
@@ -129,6 +142,22 @@ export function projectNovelCandidates(pkg: NovelPackage, anchor: NovelAnchor, o
 		const chars = JSON.stringify([...result.candidates, candidate]).length;
 		if (chars > options.maxChars) { result.omittedNodeIds.push(node.id); continue; }
 		result.candidates.push(candidate); result.usedChars = chars;
+	}
+	return result;
+}
+
+/** Same-stage event group for director context; candidates, never committed facts. */
+export function projectNovelSceneRecall(pkg: NovelPackage, anchor: NovelNodeAnchor, maxChars = 9000): NovelSceneRecallItem[] {
+	if (anchor.packageRevision !== pkg.revision) return [];
+	const current = pkg.nodes.find(node => node.id === anchor.nodeId);
+	if (!current) return [];
+	const nodes = pkg.nodes.filter(node => node.stageId === current.stageId && node.visibility === "public").sort((a, b) => a.order - b.order);
+	const result: NovelSceneRecallItem[] = [];
+	for (const node of nodes) {
+		const quote = node.sourceRefs[0]?.quote?.slice(0, 900) ?? "";
+		const item = { nodeId: node.id, title: node.title, summary: node.summary, quote, actuality: "candidate" as const };
+		if (JSON.stringify([...result, item]).length > maxChars) break;
+		result.push(item);
 	}
 	return result;
 }

@@ -53,6 +53,12 @@ export interface CorpusDocument {
 	assetCount?: number;
 	createdAt: string;
 	updatedAt: string;
+	/** Stable work/version metadata. Optional for documents created before v2. */
+	workId?: string;
+	sourceFingerprint?: string;
+	parentDocId?: string;
+	sourceVersion?: number;
+	updateRelation?: "initial" | "append-only" | "independent";
 }
 
 export interface CorpusProgress {
@@ -66,6 +72,7 @@ export interface CorpusChunkDigest {
 	chars: number;
 	chapters: string[];
 	summary: string;
+	fingerprint?: string;
 }
 
 export interface CorpusArcDigest {
@@ -94,6 +101,7 @@ export interface CorpusDigest {
 	assetCount?: number;
 	updatedAt: string;
 	audit?: { approved: number; weak: number; rejected: number };
+	layout?: TextChunk[];
 }
 
 export interface CorpusTrope {
@@ -365,6 +373,7 @@ export function estimateCallsForChunks(chunkCount: number): number {
 // ---------- 文档级有界并行 + 研究库串行提交 ----------
 
 function safeKey(value: string): string { return createHash("sha256").update(value).digest("hex").slice(0, 24); }
+function textFingerprint(value: string): string { return createHash("sha256").update(value, "utf8").digest("hex"); }
 
 export class CorpusEngine {
 	// 大块摘要请求耗时较长；单飞避免同一网关并发时互相挤掉，三部仍会依次处理。
@@ -439,6 +448,7 @@ export class CorpusEngine {
 
 		const { text, encoding } = decodeText(bytes);
 		const cleaned = ext === ".epub" ? cleanTextLayer(epubToText(bytes)) : cleanTextLayer(text);
+		const sourceFingerprint = textFingerprint(cleaned);
 		const { chapters, detected } = splitChapters(cleaned);
 		const chunks = chunkText(chapters, CHUNK_CHARS, MAX_CHUNKS);
 		const estimatedCalls = estimateCallsForChunks(chunks.length);
@@ -459,11 +469,73 @@ export class CorpusEngine {
 			cardKey,
 			createdAt: now,
 			updatedAt: now,
+			workId: `work-${sourceFingerprint.slice(0, 24)}`,
+			sourceFingerprint,
+			sourceVersion: 1,
+			updateRelation: "initial",
 		};
 		this.#docs.set(doc.id, doc);
 		this.#persistDocuments();
 		this.#enqueue(doc.id);
 		return { doc, estimatedCalls };
+	}
+
+	/** Creates an immutable append-only source version without touching the parent document. */
+	async createVersion(baseDocId: string, uploadName: string): Promise<{ doc: CorpusDocument; estimatedCalls: number; reusedChunks: number; newChunks: number }> {
+		const base = this.#docs.get(baseDocId);
+		if (!base) throw new Error("基础小说文档不存在");
+		if (base.status !== "ready") throw new Error("基础小说尚未消化完成");
+		const dir = join(this.#deps.cwd, ".liyuan-uploads");
+		const stripped = uploadName.replace(/\\/g, "/").replace(/^\.(?:liyuan|rp)-uploads\//, "");
+		const baseName = basename(stripped);
+		if (!baseName || baseName.includes("/") || baseName.includes("..") || baseName.startsWith(".")) throw new Error("非法文件名");
+		const src = join(dir, baseName);
+		if (!existsSync(src)) throw new Error("文件不存在（请先经上传区上传）");
+		const ext = extname(baseName).toLowerCase();
+		if (![".txt", ".epub"].includes(ext)) throw new Error("仅支持 .txt / .epub");
+		const bytes = readFileSync(src);
+		if (bytes.length > MAX_UPLOAD_BYTES) throw new Error(`文件超过 ${Math.round(MAX_UPLOAD_BYTES / 1024 / 1024)}MB 上限`);
+		const decoded = decodeText(bytes);
+		const cleaned = ext === ".epub" ? cleanTextLayer(epubToText(bytes)) : cleanTextLayer(decoded.text);
+		const oldTextPath = join(corpusTextsDir(this.#deps.cwd), `${base.id}.txt`);
+		if (!existsSync(oldTextPath)) throw new Error("基础小说原文不存在");
+		const oldText = readFileSync(oldTextPath, "utf8");
+		if (cleaned === oldText) return { doc: base, estimatedCalls: 0, reusedChunks: base.chunkCount, newChunks: 0 };
+		if (!cleaned.startsWith(oldText) || cleaned.length <= oldText.length) throw new Error("新版原文不是旧版原文的逐字追加版本");
+		const sourceFingerprint = textFingerprint(cleaned);
+		const workId = base.workId ?? `work-${textFingerprint(oldText).slice(0, 24)}`;
+		const docId = `doc-${safeKey(JSON.stringify(["corpus-v2", workId, sourceFingerprint])).slice(0, 16)}`;
+		const existing = this.#docs.get(docId);
+		if (existing) return { doc: existing, estimatedCalls: existing.chunkCount ? estimateCallsForChunks(existing.chunkCount) : 0, reusedChunks: existing.chunkCount, newChunks: 0 };
+		const { chapters, detected } = splitChapters(cleaned);
+		const oldChunks = chunkText(splitChapters(oldText).chapters, CHUNK_CHARS, MAX_CHUNKS);
+		const suffixChunks = chunkText([{ title: "", lines: [cleaned.slice(oldText.length)] }], CHUNK_CHARS, MAX_CHUNKS - oldChunks.length)
+			.map((chunk, index) => ({ ...chunk, index: oldChunks.length + index }));
+		const chunks = [...oldChunks, ...suffixChunks];
+		const estimatedCalls = estimateCallsForChunks(chunks.length);
+		if (estimatedCalls > this.#maxCallsPerDoc) throw new Error(`预计需要约 ${estimatedCalls} 次模型调用，超过上限 ${this.#maxCallsPerDoc}；请换更短文本`);
+		const oldDigest = this.#readDigest(base.id);
+		const reused = chunks.reduce((count, chunk, index) => count + (oldChunks[index]?.text === chunk.text && !!oldDigest?.chunks.find(item => item.index === index)?.summary ? 1 : 0), 0);
+		const now = new Date().toISOString();
+		const doc: CorpusDocument = {
+			id: docId, title: base.title, sourceKind: "upload", originName: baseName, chars: cleaned.length,
+			encoding: decoded.encoding, chapterCount: detected ? chapters.length : 0, chunkCount: chunks.length,
+			status: "pending", cardKey: base.cardKey, createdAt: now, updatedAt: now,
+			workId, sourceFingerprint, parentDocId: base.id, sourceVersion: (base.sourceVersion ?? 1) + 1, updateRelation: "append-only",
+		};
+		const workDir = join(corpusRoot(this.#deps.cwd), "work");
+		mkdirSync(workDir, { recursive: true });
+		writeFileSync(join(workDir, `${docId}.raw`), bytes);
+		mkdirSync(corpusTextsDir(this.#deps.cwd), { recursive: true });
+		writeFileSync(join(corpusTextsDir(this.#deps.cwd), `${docId}.txt`), cleaned, "utf8");
+		const inheritedChunks = chunks.flatMap((chunk, index) => {
+			const old = oldChunks[index];
+			const digest = oldDigest?.chunks.find(item => item.index === index);
+			return old?.text === chunk.text && digest?.summary ? [{ ...digest, chars: chunk.chars, chapters: chapterTitles(chunk.chapters, chunk.text), fingerprint: textFingerprint(chunk.text) }] : [];
+		});
+		this.#writeDigest(docId, { version: 1, docId, chunks: inheritedChunks, layout: chunks, arcs: [], synopsis: "", structure: { plotSpine: "", characterArcs: "", hooksAndPacing: "" }, extractedCount: 0, updatedAt: now });
+		this.#docs.set(docId, doc); this.#persistDocuments(); this.#enqueue(docId);
+		return { doc, estimatedCalls, reusedChunks: reused, newChunks: chunks.length - reused };
 	}
 
 	/** 建立 Kakuyomu URL 文档：抓取完成后进入与上传文件相同的消化链。 */
@@ -601,7 +673,7 @@ export class CorpusEngine {
 		}
 		if (!text) { this.#fail(doc, "清洗后文本为空"); return; }
 		const { chapters, detected } = splitChapters(text);
-		const chunks = chunkText(chapters, CHUNK_CHARS, MAX_CHUNKS);
+		const chunks = digest.layout?.length ? digest.layout : chunkText(chapters, CHUNK_CHARS, MAX_CHUNKS);
 		// 元数据唯一权威是落盘正文：URL 抓取原文与旧版恢复留下的计数都可能偏大，
 		// 在进入 mapping 前对齐并落盘，让恢复中的旧元数据自愈。
 		const chapterCount = detected ? chapters.length : 0;
@@ -624,7 +696,7 @@ export class CorpusEngine {
 		for (const chunk of chunks) {
 			if (this.#signal(docId).aborted) return;
 			if (doc.status === "paused") { doc.status = "paused"; this.#persistDocuments(); return; }
-			if (digest.chunks.some((c) => c.index === chunk.index && !isFailedChunkSummary(c.summary))) continue;
+			if (digest.chunks.some((c) => c.index === chunk.index && c.fingerprint === textFingerprint(chunk.text) && !isFailedChunkSummary(c.summary))) continue;
 			if (called >= budget) { this.#fail(doc, `调用预算超限（${budget}）`); return; }
 			called++;
 			const found = this.#docs.get(docId);
@@ -655,13 +727,13 @@ export class CorpusEngine {
 				console.error(`[corpus] 块 ${chunk.index} 摘要输出不可解析：${(typeof attempt === "string" ? attempt : (attempt as { error?: string }).error ?? "error")?.slice(0, 300)}`);
 				const failedSummary = `(本块摘要生成失败，仅保留章节列表)`;
 				const previous = digest.chunks.findIndex((c) => c.index === chunk.index);
-				const failedChunk = { index: chunk.index, chars: chunk.chars, chapters: chapterTitles(chunk.chapters, chunk.text), summary: failedSummary };
+				const failedChunk = { index: chunk.index, chars: chunk.chars, chapters: chapterTitles(chunk.chapters, chunk.text), summary: failedSummary, fingerprint: textFingerprint(chunk.text) };
 				if (previous >= 0) digest.chunks[previous] = failedChunk; else digest.chunks.push(failedChunk);
 				digest.updatedAt = new Date().toISOString(); this.#writeDigest(docId, digest);
 				this.#fail(doc, `第 ${chunk.index + 1} 块摘要生成失败，可重试`);
 				return;
 			}
-			digest.chunks.push({ index: chunk.index, chars: chunk.chars, chapters: chapterTitles(chunk.chapters, chunk.text), summary });
+			digest.chunks.push({ index: chunk.index, chars: chunk.chars, chapters: chapterTitles(chunk.chapters, chunk.text), summary, fingerprint: textFingerprint(chunk.text) });
 			digest.updatedAt = new Date().toISOString();
 			this.#writeDigest(docId, digest);
 		}

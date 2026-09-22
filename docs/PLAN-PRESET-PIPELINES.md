@@ -123,7 +123,25 @@
 | marker 归位 | 卡描述/性格/情景/示例/人设/世界书按预设作者的 `prompt_order` 位置填槽；**填原文不填梨园标题**（包装归 `*_format` 字段的主人）；未声明的槽位梨园按兜底版式补 | ✅ |
 | harness 骨架殿后 | 预设装配段是 system 主体排最前，`# 舞台`/`# 工作方式`/`# skill`/`# MCP`/`# 消息流约定` 接在后面 | ✅ |
 | 拆层三件套退场 | 删 `src/preset-split.ts`（三份写死手工表）、`src/preset-classify.ts`（正则四分）、`src/preset-sort.ts`（AI 分拣）、`src/preset-skill.ts`（skill 投影）及其测试与 REST 端点 | ✅ |
-| 前端 | `web/src/components/PresetPanel.tsx`：发补丁不发全量；通道改只读派生值；marker 槽位单列；页签收成 参数｜提示词｜状态栏 | ✅ |
+| 前端 | `web/src/components/PresetPanel.tsx`：发补丁不发全量；支持新增条目、名称/正文编辑、启用开关、历史前/历史后切换、上移/下移；marker 槽位仍不可编辑；页签为 参数｜提示词 | ✅ |
+
+### 四之五、预设编辑器的实际操作语义（2026-09-22）
+
+预设面板现在支持直接缝合不同预设的提示词内容：
+
+1. 在「提示词」页点击「新增条目」，填写名称和正文。
+2. 用「历史前 / 历史后」选择条目相对于 `chatHistory` 的位置。
+3. 用「上移 / 下移」调整条目在 `prompt_order` 中的真实顺序；可以连续上移到第一项或第二项，也可以跨过 `chatHistory`，跨越后条目的历史前后位置会随之改变。
+4. 点「保存」后才写入预设文件；未保存的修改只存在 `.liyuan/preset-override.json`，下一轮可用，但切换预设或还原会丢弃。
+
+实现边界：
+
+- ST 原始预设的权威顺序是 `prompt_order[].order`，不是前端数组顺序，也不是 `prompts[]` 的文件顺序。
+- 新增条目会同时写入 `prompts[]` 和当前 `prompt_order[].order`。
+- 历史前/历史后是由 `chatHistory` marker 的位置派生出来的；移动条目跨过 marker 才真正改变通道。
+- marker 槽位本身不是作者正文，不能编辑正文；它只负责声明梨园材料、角色卡、世界书和历史应插入的位置。
+- 「上移/下移」是单步操作，连续点击即可把需要优先的条目放到最前面。
+- 旧梨园 `{name, samplers, blocks}` 格式没有 ST 的 marker 骨架，仍支持新增和排序，但历史前后只能按旧格式的 `channel` 字段保存，不能获得 ST marker 的精确位置语义。
 
 **实弹对账**（双人成行 v10.0 / TGbreak V2.1.6 两份原始预设，`_verify-assemble.mts`）：
 

@@ -28,6 +28,7 @@ export interface ScribeRunDeps {
 	/** 磁盘缓存路径（.liyuan-state/<sessionId>.json）；给出则落盘（server fs.watch → state 帧） */
 	stateFile?: string;
 	onActivity?: (detail: string) => void;
+	identityHints?: Record<string, string>;
 }
 
 export interface ScribeRunInput {
@@ -55,7 +56,7 @@ export async function runScribeTurn(deps: ScribeRunDeps, input: ScribeRunInput):
 	if (!assistantText.trim()) return { kind: "skipped", reason: "no-text" };
 
 	const leafBefore = deps.getLeafId();
-	const prompt = buildScribeTurnPrompt({ state, userText, assistantText, charName, userName });
+	const prompt = buildScribeTurnPrompt({ state, userText, assistantText, charName, userName, identityHints: deps.identityHints });
 	const resp = await deps.sideText(prompt.systemPrompt, prompt.userText);
 	if (typeof resp !== "string") return { kind: "failed", error: resp.error };
 
@@ -75,7 +76,7 @@ export async function runScribeTurn(deps: ScribeRunDeps, input: ScribeRunInput):
 	}
 
 	const knownNames = [charName, userName, ...Object.keys(state.characters)];
-	const result = applyPatch(state, canonicalizeCharacterKeys(parsed.patch, knownNames));
+	const result = applyPatch(state, protectKnownCharacterIdentity(canonicalizeCharacterKeys(parsed.patch, knownNames), deps.identityHints));
 	deps.appendStateEntry(result.state);
 	if (deps.stateFile) {
 		try {
@@ -102,4 +103,38 @@ function summarizeApplied(applied: string[]): string {
 	const names = [...new Set(applied.map(label))];
 	const shown = names.slice(0, 3).join("、");
 	return names.length > 3 ? `${shown} 等 ${names.length} 项` : shown;
+}
+
+export function protectKnownCharacterIdentity(patch: Record<string, unknown>, identityHints: Record<string, string> | undefined): Record<string, unknown> {
+	if (!identityHints || !patch.characters || typeof patch.characters !== "object" || Array.isArray(patch.characters)) return patch;
+	const characters = { ...(patch.characters as Record<string, unknown>) };
+	for (const [name, value] of Object.entries(characters)) {
+		const hint = identityHints[name];
+		if (!hint || !/家族|贵族|挚友|朋友|小姐|夫人/u.test(hint) || !value || typeof value !== "object" || Array.isArray(value)) continue;
+		const next = { ...(value as Record<string, unknown>) };
+		for (const field of ["status", "notes"] as const) {
+			if (typeof next[field] === "string") next[field] = next[field].replace(/塞勒尼斯家(?:族)?女仆|女仆|侍女/gu, "").replace(/\s{2,}/g, " ").trim();
+		}
+		characters[name] = next;
+	}
+	return { ...patch, characters };
+}
+
+export function repairKnownCharacterIdentityState(state: WorldState, identityHints: Record<string, string> | undefined): { state: WorldState; changed: boolean } {
+	if (!identityHints) return { state, changed: false };
+	let changed = false;
+	const characters = { ...state.characters };
+	for (const [name, current] of Object.entries(characters)) {
+		const hint = identityHints[name];
+		if (!hint || !/家族|贵族|挚友|朋友|小姐|夫人/u.test(hint)) continue;
+		const next = { ...current };
+		for (const field of ["status", "notes"] as const) {
+			if (typeof next[field] === "string") {
+				const repaired = next[field].replace(/塞勒尼斯家(?:族)?女仆|女仆|侍女/gu, "").replace(/\s{2,}/g, " ").trim();
+				if (repaired !== next[field]) { next[field] = repaired; changed = true; }
+			}
+		}
+		characters[name] = next;
+	}
+	return changed ? { state: { ...state, characters }, changed } : { state, changed: false };
 }

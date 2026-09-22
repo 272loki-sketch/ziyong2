@@ -115,3 +115,26 @@ test("diagnostics reads settled curtain override", () => {
 	assert.match(view?.artifacts.curtain ?? "", /最终状态/);
 	assert.equal(view?.stages.find((stage) => stage.id === "curtain")?.status, "success");
 });
+
+test("diagnostics projects a failed text-only turn without an assistant entry", () => {
+	const branch: BranchEntryLike[] = [{
+		id: "debug-1",
+		type: "custom",
+		customType: "rp-text-debug",
+		data: {
+			beatLog: [
+				{ ev: "activity", data: "文学连续性：生成失败（超时）" },
+				{ ev: "text", data: "<content>已收到的正文</content>" },
+				{ ev: "provider_error", data: "Stream ended without finish_reason" },
+			],
+			draft: "",
+			loopTail: "",
+			finalText: "",
+		},
+	}];
+	const turn = diagnosticsFromBranch(branch).turns[0]!;
+	assert.equal(turn.stages.find((stage) => stage.id === "writer")?.status, "failed");
+	assert.match(turn.stages.find((stage) => stage.id === "writer")?.summary ?? "", /已收到/);
+	assert.equal(turn.stages.find((stage) => stage.id === "ledger")?.status, "skipped");
+	assert.match(JSON.stringify(turn), /finish_reason/);
+});

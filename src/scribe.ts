@@ -19,6 +19,8 @@ export interface ScribePromptInput {
 	charName: string;
 	/** 用户角色名 */
 	userName: string;
+	/** Deterministic character identity references from card/lorebook. */
+	identityHints?: Record<string, string>;
 	/**
 	 * @deprecated 已不再做先斩后奏检测；保留字段以免旧调用方报错，忽略。
 	 */
@@ -41,6 +43,7 @@ export function buildScribeTurnPrompt(input: ScribePromptInput): { systemPrompt:
 		? `名字必须使用账本中已有的写法（当前已有：${knownCharacters.join("、")}；用户角色「${userName}」）`
 		: `用户角色写作「${userName}」`;
 
+	const identityText = Object.entries(input.identityHints ?? {}).map(([name, value]) => `- ${name}：${value}`).join("\n");
 	const systemPrompt = `你是一场角色扮演的场记。阅读【当前账本】与【本轮对话】，只做一件事：输出 JSON，更新需要记账的持久变化。
 
 输出唯一字段：
@@ -51,6 +54,12 @@ export function buildScribeTurnPrompt(input: ScribePromptInput): { systemPrompt:
 - "flags"：键值对，按键合并（值为字符串）。
 - "plot_threads"：字符串数组，整体替换——新增或了结剧情线时给出完整清单。
 要点：否定性事件也要记账（赠礼被拒→物品仍在原主处；承诺被收回→记入 flags）；新的承诺、约定、伏笔进 plot_threads；没有变化的字段不要出现在 patch 中；完全无变化则 "patch" 为 {}。
+只能记录本轮用户输入或助手定稿正文明确发生、明确观察到或明确说出的内容。导演候选、生态候选、原著参考、推测的幕后行动不能写入 patch。未知人物保持“未知/几个人”等原文粒度，不要自行命名、补职业或补组织；已有角色的身份以当前账本和角色卡资料为准，不得改写成未经证实的职业。
+
+【人物身份基线】
+${identityText || "（无额外身份基线）"}
+
+人物身份基线优先于正文中由动作推测出的职业。若正文写某人端茶、叩门、巡夜等动作，不得因此把其身份改成女仆/侍女；只记录本轮动作，不重写身份。
 
 只输出 JSON 对象，例如 {"patch":{...}} 或 {"patch":{}}。不要输出 warnings、不要输出其他文字。`;
 

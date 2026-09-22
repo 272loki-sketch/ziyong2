@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { linkSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { readJsonFile } from "../jsonio.ts";
 import { buildNovelPackage } from "./canon.ts";
@@ -51,6 +51,7 @@ function parseSource(value: unknown): NovelSource {
 		fingerprint: asString(raw.fingerprint, "source.fingerprint"),
 		chunkChars: asInteger(raw.chunkChars, "source.chunkChars", 1),
 		chunks,
+		...(typeof raw.workId === "string" && raw.workId.trim() ? { workId: raw.workId } : {}),
 	};
 	const indexes = new Set<number>();
 	for (const chunk of source.chunks) {
@@ -107,7 +108,19 @@ function validateStoredNovelPackage(value: unknown): StoredNovelPackage {
 		|| asInteger(pkg.sourceChunkChars, "package.sourceChunkChars", 1) !== source.chunkChars) {
 		throw new Error("package source identity does not match stored source evidence");
 	}
-	const rebuilt = buildNovelPackage(source, parseStages(pkg.stages), parseNodes(pkg.nodes));
+	let lineage: NovelPackage["lineage"];
+	if (pkg.lineage !== undefined) {
+		const value = asRecord(pkg.lineage, "package.lineage");
+		if (value.relation !== "append-only") throw new Error("package.lineage.relation is invalid");
+		lineage = {
+			parentDocId: asString(value.parentDocId, "package.lineage.parentDocId"),
+			parentRevision: asString(value.parentRevision, "package.lineage.parentRevision"),
+			relation: "append-only",
+			inheritedNodeIds: asStringArray(value.inheritedNodeIds, "package.lineage.inheritedNodeIds"),
+			newNodeIds: asStringArray(value.newNodeIds, "package.lineage.newNodeIds"),
+		};
+	}
+	const rebuilt = buildNovelPackage(source, parseStages(pkg.stages), parseNodes(pkg.nodes), lineage);
 	if (rebuilt.revision !== declaredRevision) throw new Error("package revision does not match canonical package content");
 	const result: StoredNovelPackage = { version: 1, source, package: rebuilt };
 	if (JSON.stringify(raw) !== JSON.stringify(result)) throw new Error("stored novel package is not in canonical form");
@@ -117,6 +130,34 @@ function validateStoredNovelPackage(value: unknown): StoredNovelPackage {
 const hashId = (kind: string, value: string): string => createHash("sha256").update(JSON.stringify([kind, value])).digest("hex");
 
 export const novelPlayStoreRoot = (cwd: string): string => join(cwd, ".liyuan", "novel-play");
+const packageIndexFile = (cwd: string): string => join(novelPlayStoreRoot(cwd), "package-index.json");
+export interface NovelPackageIndexEntry { docId: string; workId?: string; revision: string; sourceFingerprint: string; parentDocId?: string; parentRevision?: string; relation?: "append-only"; stageCount: number; nodeCount: number; createdAt: string; }
+export function listNovelPackageIndex(cwd: string): NovelPackageIndexEntry[] {
+	const known = new Map<string, NovelPackageIndexEntry>();
+	try { const value = JSON.parse(readFileSync(packageIndexFile(cwd), "utf8")); if (Array.isArray(value)) for (const item of value) if (item?.docId && item?.revision) known.set(`${item.docId}:${item.revision}`, item as NovelPackageIndexEntry); } catch { /* Rebuild from immutable package files below. */ }
+	const root = join(novelPlayStoreRoot(cwd), "packages");
+	const scan = (dir: string): void => {
+		let entries: ReturnType<typeof readdirSync>;
+		try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+		for (const entry of entries) {
+			const file = join(dir, entry.name);
+			if (entry.isDirectory()) { scan(file); continue; }
+			if (!entry.name.endsWith(".json")) continue;
+			try {
+				const raw = JSON.parse(readFileSync(file, "utf8")) as { source?: NovelSource; package?: NovelPackage };
+				if (!raw.source || !raw.package?.docId || !raw.package.revision) continue;
+				const pkg = raw.package, key = `${pkg.docId}:${pkg.revision}`, lineage = pkg.lineage;
+				known.set(key, { docId: pkg.docId, ...(raw.source.workId ? { workId: raw.source.workId } : {}), revision: pkg.revision, sourceFingerprint: pkg.sourceFingerprint, ...(lineage ? { parentDocId: lineage.parentDocId, parentRevision: lineage.parentRevision, relation: lineage.relation } : {}), stageCount: pkg.stages.length, nodeCount: pkg.nodes.length, createdAt: new Date(0).toISOString() });
+			} catch { /* Ignore unrelated or corrupt files; loadNovelPackage remains strict. */ }
+		}
+	};
+	scan(root);
+	return [...known.values()];
+}
+function writePackageIndex(cwd: string, entries: NovelPackageIndexEntry[]): void {
+	const file = packageIndexFile(cwd); mkdirSync(dirname(file), { recursive: true }); const temporary = `${file}.${randomBytes(12).toString("hex")}.tmp`;
+	try { writeFileSync(temporary, `${JSON.stringify(entries, null, 2)}\n`, "utf8"); renameSync(temporary, file); } finally { rmSync(temporary, { force: true }); }
+}
 
 /** IDs are only hash inputs. They are never interpreted as file-system paths. */
 export function novelPackageFile(cwd: string, docId: string, revision: string): string {
@@ -149,6 +190,10 @@ export function saveNovelPackage(cwd: string, source: NovelSource, pkg: NovelPac
 		writeFileSync(temporary, serialized, { encoding: "utf8", flag: "wx" });
 		try {
 			linkSync(temporary, file);
+			const lineage = pkg.lineage;
+			const entries = listNovelPackageIndex(cwd).filter(item => !(item.docId === pkg.docId && item.revision === pkg.revision));
+			entries.push({ docId: pkg.docId, ...(source.workId ? { workId: source.workId } : {}), revision: pkg.revision, sourceFingerprint: pkg.sourceFingerprint, ...(lineage ? { parentDocId: lineage.parentDocId, parentRevision: lineage.parentRevision, relation: lineage.relation } : {}), stageCount: pkg.stages.length, nodeCount: pkg.nodes.length, createdAt: new Date().toISOString() });
+			writePackageIndex(cwd, entries);
 			return file;
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;

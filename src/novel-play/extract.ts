@@ -7,6 +7,7 @@ export interface NovelExtractionModelInput {
 	source: { docId: string; title: string; fingerprint: string };
 	chunk: { index: number; chapters: string[]; text: string };
 	attempt: number;
+	previousValidationError?: string;
 	signal?: AbortSignal;
 }
 
@@ -80,7 +81,21 @@ function boundedString(value: unknown, name: string, max: number): string {
 
 function parseChunkResult(text: string, chunkText: string): RawNode[] {
 	let value: unknown;
-	try { value = JSON.parse(text); } catch { throw new Error("model result is not strict JSON"); }
+	const source = text.trim();
+	const candidates = [
+		source,
+		source.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1],
+		source.match(/\{[\s\S]*\}/)?.[0],
+	].filter((candidate): candidate is string => !!candidate?.trim());
+	for (const candidate of candidates) {
+		try {
+			value = JSON.parse(candidate);
+			break;
+		} catch {
+			// Keep trying only bounded JSON envelopes; strict schema validation follows.
+		}
+	}
+	if (value === undefined) throw new Error("model result is not JSON");
 	if (!value || typeof value !== "object" || Array.isArray(value) || !ownKeysAre(value as Record<string, unknown>, ROOT_KEYS)) {
 		throw new Error("model result has an invalid root shape");
 	}
@@ -166,6 +181,7 @@ export async function extractNovelEvents(source: NovelSource, options: ExtractNo
 					source: { docId: source.docId, title: source.title, fingerprint: source.fingerprint },
 					chunk: { index: chunk.index, chapters: [...chunk.chapters], text: chunk.text },
 					attempt,
+					...(lastError instanceof Error ? { previousValidationError: lastError.message } : {}),
 					signal: options.signal,
 				});
 				throwIfAborted(options.signal);

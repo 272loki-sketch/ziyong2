@@ -829,10 +829,10 @@ export function SettingsPanel({ toast }: { toast: (level: "info" | "warning" | "
 					<section className="sp-section">
 						<h4>模型插头</h4>
 						<div className="field-hint">
-							总插头是连接面板当前选择的剧情模型。下列每个步骤都可分别选择模型；鲜活世界可使用你专门配置的长上下文、知识丰富模型。
+							总插头是连接面板当前选择的剧情模型。保存“主演正文 / 小说开演”也会立即切换当前会话模型；Novel Play 内部卡始终跟随这个当前模型，不冻结创建角色卡时的旧路由。下列其他步骤可分别选择模型。
 						</div>
 						{([
-							["writer", "主演正文"],
+							["writer", "主演正文 / 小说开演"],
 							["literaryContinuity", "连续性补充"],
 							["literaryDirector", "文学导演"],
 							["literaryCharacter", "角色画像 Sogon"],

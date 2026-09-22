@@ -40,6 +40,7 @@ export interface BuildNovelEventsInput {
 	storedText: string;
 	modelCall: NovelExtractionModelCall;
 	signal?: AbortSignal;
+	onProgress?: (completed: number, total: number) => void;
 }
 
 /**
@@ -58,10 +59,13 @@ export async function buildNovelEvents(input: BuildNovelEventsInput): Promise<No
 	active.add(file);
 	try {
 		mkdirSync(root, { recursive: true });
+		const checkpoint = loadCheckpoint(file);
+		input.onProgress?.(Object.keys(checkpoint?.completed ?? {}).length, source.chunks.length);
 		const result = await extractNovelEvents(source, {
 			modelCall: input.modelCall, skillBody: skill.body, signal: input.signal,
-			checkpoint: loadCheckpoint(file),
+			checkpoint,
 			onCheckpoint: async checkpoint => {
+				input.onProgress?.(Object.keys(checkpoint.completed).length, source.chunks.length);
 				const temporary = join(root, `.${randomBytes(16).toString("hex")}.tmp`);
 				try {
 					writeFileSync(temporary, JSON.stringify(checkpoint), { encoding: "utf8", flag: "wx" });

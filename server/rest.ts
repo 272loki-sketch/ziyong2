@@ -13,7 +13,7 @@ import { copyFileSync, createReadStream, existsSync, mkdirSync, readdirSync, rea
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, dirname, isAbsolute, join } from "node:path";
 
-import { handleNovelPlayApiRequest } from "./novel-play-api.ts";
+import { handleNovelPlayApiRequest, isNovelPlayStartLocked } from "./novel-play-api.ts";
 
 import {
 	EMPTY_AGENT_CONFIG,
@@ -332,6 +332,7 @@ export interface RestHost {
 	/** 小说长文消化（导演室研究库扩容，阶段 1） */
 	corpus: {
 		create(file: string): Promise<{ doc: unknown; estimatedCalls: number }>;
+		createVersion(baseDocId: string, file: string): Promise<{ doc: unknown; estimatedCalls: number; reusedChunks: number; newChunks: number }>;
 		createUrl(url: string): Promise<{ doc: unknown; estimatedCalls: number }>;
 		discover(): Promise<unknown>;
 		view(): unknown;
@@ -340,6 +341,8 @@ export interface RestHost {
 		resume(id: string): unknown;
 		remove(id: string): Promise<{ removedMechanisms: number }>;
 	};
+	novelPlayUpgradePreview(targetDocId: string, targetRevision: string): unknown;
+	novelPlayUpgradeCommit(targetDocId: string, targetRevision: string, expectedLeafId?: string, expectedFromRevision?: string): unknown;
 }
 
 export interface SessionInfoLite {
@@ -1157,6 +1160,15 @@ export async function handleApiRequest(req: IncomingMessage, res: ServerResponse
 				const file = (body.file ?? "").trim();
 				if (!file) throw new Error("缺少 file（上传区文件名）");
 				sendJson(res, 201, await host.corpus.create(file)); return true;
+			}
+			case "POST /api/outline/corpus/version": {
+				const cfglite = loadConfig(host.cwd);
+				if (cfglite.novelDigest?.enabled === false) throw new Error("小说消化尚未启用");
+				const body = JSON.parse(await readBody(req)) as { baseDocId?: string; file?: string };
+				const baseDocId = (body.baseDocId ?? "").trim();
+				const file = (body.file ?? "").trim();
+				if (!baseDocId || !file) throw new Error("缺少 baseDocId 或 file");
+				sendJson(res, 201, await host.corpus.createVersion(baseDocId, file)); return true;
 			}
 			case "POST /api/outline/corpus/url": {
 				const cfglite = loadConfig(host.cwd);

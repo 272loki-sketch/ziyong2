@@ -400,6 +400,10 @@ export interface PresetBlockPatch {
 	enabled?: boolean;
 	name?: string;
 	content?: string;
+	role?: "system" | "user" | "assistant";
+	channel?: "system" | "postHistory";
+	add?: boolean;
+	move?: "up" | "down";
 	/** 从预设整块移除 */
 	remove?: boolean;
 }

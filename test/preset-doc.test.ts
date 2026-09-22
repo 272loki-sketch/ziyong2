@@ -126,3 +126,30 @@ test("闭环：改开关 → 重读 → 重拼，装配结果跟着变", () => {
 	const second = assemble(loadPresetDoc(next, "x").entries);
 	assert.deepEqual(second.after.map((p) => p.id), ["b"], "开了 b 就该出现在历史后");
 });
+
+test("写回：可新增条目并选择历史前/历史后，已有条目也可移动", () => {
+	const doc = loadPresetDoc(stRaw(), "x");
+	const next = patchPresetRaw(doc, {
+		blocks: [
+			{ id: "new-before", add: true, name: "拼接前置", role: "system", channel: "system", content: "前置内容" },
+			{ id: "new-after", add: true, name: "拼接后置", role: "system", channel: "postHistory", content: "后置内容" },
+			{ id: "a", channel: "postHistory" },
+		],
+	});
+	const view = presetDocView(loadPresetDoc(next, "x"));
+	assert.equal(view.find((b) => b.id === "new-before")?.channel, "system");
+	assert.equal(view.find((b) => b.id === "new-after")?.channel, "postHistory");
+	assert.equal(view.find((b) => b.id === "a")?.channel, "postHistory");
+	assert.deepEqual(assemble(loadPresetDoc(next, "x").entries).before.map((p) => p.id), ["new-before"]);
+	assert.deepEqual(assemble(loadPresetDoc(next, "x").entries).after.map((p) => p.id), ["new-after", "a"]);
+	assert.deepEqual(assemble(loadPresetDoc(next, "x").entries).depth.map((p) => p.id), ["d"]);
+});
+
+test("写回：上移下移按 prompt_order 换位，并可跨过 chatHistory", () => {
+	const doc = loadPresetDoc(stRaw(), "x");
+	const next = patchPresetRaw(doc, { blocks: [{ id: "b", enabled: true }, { id: "b", move: "up" }] });
+	const order = (next.prompt_order as any)[0].order.map((item: any) => item.identifier);
+	assert.deepEqual(order, ["a", "b", "chatHistory", "d"]);
+	const crossed = patchPresetRaw(doc, { blocks: [{ id: "b", enabled: true }, { id: "b", move: "up" }] });
+	assert.deepEqual((crossed.prompt_order as any)[0].order.map((item: any) => item.identifier), ["a", "b", "chatHistory", "d"]);
+});

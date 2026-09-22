@@ -108,6 +108,10 @@ export interface CorpusDocument {
 	assetCount?: number;
 	createdAt: string;
 	updatedAt: string;
+	workId?: string;
+	parentDocId?: string;
+	sourceVersion?: number;
+	updateRelation?: "initial" | "append-only" | "independent";
 }
 export interface CorpusChunkDigest { index: number; chars: number; chapters: string[]; summary: string }
 export interface CorpusArcDigest { title: string; chunkRange: [number, number]; summary: string }

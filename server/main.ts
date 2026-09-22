@@ -41,7 +41,7 @@ import {
 } from "../src/access.ts";
 import { loadAgentConfig, normalizeAgentConfig, syncAgentConfigToRuntime } from "../src/agent-config.ts";
 import { streamSimple } from "@liyuan/ai/compat";
-import { loadCardFile } from "../src/card.ts";
+import { loadCardFile, readCardRawJson } from "../src/card.ts";
 import { buildGreeting } from "../src/greeting.ts";
 import { StageEngine, type AssistantMsgLike, type StageModelLike, type StageRerollPrep, type StageStreamFn } from "../src/stage/engine.ts";
 import { stateFromBranch, type BranchEntryLike } from "../src/stage/assemble.ts";
@@ -154,8 +154,12 @@ import {
 	RP_MCP_TYPE,
 } from "../src/mcp.ts";
 import { mcpEnabledFromBranch } from "../src/stage/mcp-stage.ts";
+import { loadNovelPackage } from "../src/novel-play/store.ts";
+import { effectiveNovelPlayBinding, novelPlayCardBinding, novelPlayStateFromBranch, NOVEL_PLAY_UPGRADE_ENTRY_TYPE, type NovelPlayUpgradeEntry } from "../src/novel-play/runtime.ts";
+import { ensureNovelPlayLorebook } from "../src/novel-play/application.ts";
 
 const cwd = process.cwd();
+ensureNovelPlayLorebook(cwd);
 const HOST = process.env.HOST ?? "0.0.0.0";
 const PORT = Number(process.env.PORT ?? 7620);
 const newSessionFlag = process.argv.includes("--new");
@@ -674,11 +678,33 @@ const helloFrame = (): ServerFrame => {
 		panels: currentPanels(),
 		// 一档皮肤与消息同帧:首屏不得依赖二次 REST(缓存/竞态会让 StatusBlock 回落统一面板)
 		cardfront,
+		novelGuide: novelGuideForHello(),
 	};
 };
 
 /** 全量重放（斜杠命令 / 树导航 / 压缩后：让所有端与会话文件对齐） */
 const resyncAll = () => broadcast(helloFrame());
+
+function novelGuideForHello(): NonNullable<Extract<ServerFrame, { type: "hello" }>["novelGuide"]> | undefined {
+	try {
+		if (!cardPath) return undefined;
+		const raw = readCardRawJson(isAbsolute(cardPath) ? cardPath : join(cwd, cardPath)).raw;
+		const branch = session.sessionManager.getBranch() as BranchEntryLike[];
+		const binding = effectiveNovelPlayBinding(cwd, raw, branch);
+		if (!binding) return undefined;
+		const mode = ((raw.data as Record<string, unknown>)?.extensions as Record<string, unknown> | undefined)?.liyuanNovelPlay as Record<string, unknown> | undefined;
+		const stored = loadNovelPackage(cwd, binding.docId, binding.revision);
+		if (binding.anchorKind === "source-end") return { mode: binding.anchorKind === "source-end" ? "new-character" : "new-character", startKind: "source-end", visible: false, positionLabel: "导入原文终点之后", candidates: [], note: "这是导入文本终点之后的原创续写，没有原著后续走向可提示。" };
+		const state = novelPlayStateFromBranch(branch, binding, stored.package);
+		const anchor = state?.progress ?? { packageRevision: stored.package.revision, nodeId: binding.startNodeId!, position: binding.position! };
+		const current = stored.package.nodes.find(node => node.id === anchor.nodeId && node.visibility === "public");
+		if (!current) return undefined;
+		const conflicts = new Set((state?.conflicts ?? []).map(item => item.nodeId));
+		const candidates = stored.package.nodes.filter(node => node.visibility === "public" && node.order >= current.order && !conflicts.has(node.id)).sort((a, b) => a.order - b.order).slice(0, 3).map(node => ({ title: node.title, summary: node.summary }));
+		const playerMode = mode?.playerMode === "existing-character" ? "existing-character" : "new-character";
+		return { mode: playerMode, startKind: "node", visible: playerMode === "existing-character", positionLabel: anchor.position === "before" ? "当前事件发生前" : "当前事件发生后", candidates, note: playerMode === "existing-character" ? "原著走向提示仅供玩家参考，不等于角色已知事实；你可以随时改写当前节点。" : "当前为新角色模式，原著后续提示默认关闭；可在面板中手动打开。" };
+	} catch { return undefined; }
+}
 
 /** 会话树条目是否为开场白 */
 const isGreetingTreeEntry = (e: Record<string, unknown>): boolean => {
@@ -1776,6 +1802,7 @@ const restHost: RestHost = {
 	},
 	corpus: {
 		create: (file) => corpus!.create(file),
+		createVersion: (baseDocId, file) => corpus!.createVersion(baseDocId, file),
 		createUrl: (url) => corpus!.createUrl(url),
 		discover: () => corpusScheduler!.runNow(new Date(), 3),
 		view: () => corpus!.view(),
@@ -1783,6 +1810,44 @@ const restHost: RestHost = {
 		pause: (id) => (corpus!.pause(id), corpus!.view()),
 		resume: (id) => (corpus!.resume(id), corpus!.view()),
 		remove: async (id) => ({ removedMechanisms: await corpus!.remove(id) }),
+	},
+		novelPlayUpgradePreview(targetDocId, targetRevision) {
+		const branch = session.sessionManager.getBranch() as BranchEntryLike[];
+		const raw = loadStageMaterials(cwd).rawCard;
+		const from = effectiveNovelPlayBinding(cwd, raw, branch);
+		if (!from) throw new Error("当前会话不是小说开演");
+		const target = loadNovelPackage(cwd, targetDocId, targetRevision);
+		if (!target.package.lineage || target.package.lineage.parentRevision !== from.revision) throw new Error("目标作品包不是当前作品包的安全追加版本");
+		const currentPackage = loadNovelPackage(cwd, from.docId, from.revision).package;
+		const state = from.anchorKind === "source-end" ? undefined : novelPlayStateFromBranch(branch, from, currentPackage);
+		const anchor = state?.progress ?? (from.anchorKind === "source-end" ? undefined : { packageRevision: from.revision, nodeId: from.startNodeId!, position: from.position! });
+		const firstNew = target.package.nodes.filter(node => target.package.lineage!.newNodeIds.includes(node.id) && node.visibility === "public").sort((a, b) => a.order - b.order)[0];
+		if (!firstNew) throw new Error("追加版本没有可公开采用的新原著节点");
+		if (anchor && !target.package.lineage.inheritedNodeIds.includes(anchor.nodeId)) throw new Error("当前进度不在追加作品包的继承节点中");
+		const to = from.anchorKind === "source-end" ? { docId: targetDocId, revision: targetRevision, anchorKind: "node" as const, startNodeId: firstNew.id, position: "before" as const } : { ...from, docId: targetDocId, revision: targetRevision };
+		return { from, to, progress: anchor, newNodes: target.package.lineage.newNodeIds.length, leafId: session.sessionManager.getLeafId() };
+	},
+	novelPlayUpgradeCommit(targetDocId, targetRevision, expectedLeafId, expectedFromRevision) {
+		const branch = session.sessionManager.getBranch() as BranchEntryLike[];
+		if (expectedLeafId && session.sessionManager.getLeafId() !== expectedLeafId) throw new Error("当前分支已变化，请重新预览升级");
+		const raw = loadStageMaterials(cwd).rawCard;
+		const from = effectiveNovelPlayBinding(cwd, raw, branch);
+		if (!from) throw new Error("当前会话不是小说开演");
+		if (expectedFromRevision && from.revision !== expectedFromRevision) throw new Error("当前作品包已变化，请重新预览升级");
+		const target = loadNovelPackage(cwd, targetDocId, targetRevision);
+		const current = loadNovelPackage(cwd, from.docId, from.revision);
+		if (!target.package.lineage || target.package.lineage.parentRevision !== from.revision) throw new Error("目标作品包不是当前作品包的安全追加版本");
+		const state = from.anchorKind === "source-end" ? undefined : novelPlayStateFromBranch(branch, from, current.package);
+		const anchor = state?.progress ?? (from.anchorKind === "source-end" ? undefined : { packageRevision: from.revision, nodeId: from.startNodeId!, position: from.position! });
+		const firstNew = target.package.nodes.filter(node => target.package.lineage!.newNodeIds.includes(node.id) && node.visibility === "public").sort((a, b) => a.order - b.order)[0];
+		if (!firstNew) throw new Error("追加版本没有可公开采用的新原著节点");
+		if (anchor && !target.package.lineage.inheritedNodeIds.includes(anchor.nodeId)) throw new Error("当前进度不在追加作品包的继承节点中");
+		const to = from.anchorKind === "source-end" ? { docId: targetDocId, revision: targetRevision, anchorKind: "node" as const, startNodeId: firstNew.id, position: "before" as const } : { ...from, docId: targetDocId, revision: targetRevision };
+		const entry: NovelPlayUpgradeEntry = { version: 1, from, to, sourceLeafId: session.sessionManager.getLeafId() ?? "", confirmedAt: new Date().toISOString() };
+		session.sessionManager.appendCustomEntry(NOVEL_PLAY_UPGRADE_ENTRY_TYPE, entry);
+		session.sessionManager.flush();
+		resyncAll();
+		return { ok: true, entry };
 	},
 };
 

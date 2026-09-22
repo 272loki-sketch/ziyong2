@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { buildNovelPackage } from "../src/novel-play/canon.ts";
 import { novelNodeId, type NovelSource } from "../src/novel-play/source.ts";
-import { MAX_NOVEL_CALIBRATION_CANDIDATE_CHARS, commitNovelPlayState, novelPlayStateFromBranch, prepareNovelPlayTurn } from "../src/novel-play/runtime.ts";
+import { MAX_NOVEL_CALIBRATION_CANDIDATE_CHARS, NOVEL_PLAY_UPGRADE_ENTRY_TYPE, commitNovelPlayState, effectiveNovelPlayBinding, novelPlayStateFromBranch, prepareNovelPlayTurn } from "../src/novel-play/runtime.ts";
 import { apply as applyEnginePatch } from "../scripts/novel-integration/engine-patch.mjs";
 
 const sourceText = "Alpha Beta Gamma Delta Epsilon";
@@ -95,6 +95,17 @@ test("reroll reuses plot adaptation without a second calibration call or state w
 	let writes = 0;
 	commitNovelPlayState({ prepared: undefined, expectedLeafId: "assistant-reroll", getLeafId: () => "assistant-reroll", appendCustomEntry: () => { writes++; return "x"; } });
 	assert.equal(writes, 0);
+});
+test("append upgrade is branch-local and projects old progress into the child package", () => {
+	const child = { ...pkg, revision: "child-revision", lineage: { parentDocId: "book", parentRevision: pkg.revision, relation: "append-only" as const, inheritedNodeIds: pkg.nodes.map(node => node.id), newNodeIds: [] } };
+	const state = { id: "state-before-upgrade", type: "custom", customType: "rp-novel-play", data: { version: 1, card: { docId: "book", revision: pkg.revision, startNodeId: a, position: "before", anchorKind: "node" }, progress: { packageRevision: pkg.revision, nodeId: b, position: "after" }, conflicts: [], preparedFromLeafId: "u1" } };
+	const upgrade = { id: "upgrade", type: "custom", customType: NOVEL_PLAY_UPGRADE_ENTRY_TYPE, data: { version: 1, from: { docId: "book", revision: pkg.revision, startNodeId: a, position: "before", anchorKind: "node" }, to: { docId: "book", revision: "child-revision", startNodeId: a, position: "before", anchorKind: "node" }, sourceLeafId: "u1" } };
+	const branchEntries = [...branch, state, upgrade];
+	const binding = effectiveNovelPlayBinding("/unused", rawCard, branchEntries, () => ({ version: 1, source, package: child }));
+	assert.equal(binding?.revision, "child-revision");
+	const projected = novelPlayStateFromBranch(branchEntries, binding!, child);
+	assert.equal(projected?.progress.nodeId, b);
+	assert.equal(projected?.progress.packageRevision, "child-revision");
 });
 test("engine patch removes director-only projection from rpPrep and blocks aborted writes", () => {
 	const engine = readFileSync(new URL("../src/stage/engine.ts", import.meta.url), "utf8"), patched = applyEnginePatch(engine);

@@ -1,12 +1,19 @@
-import { normalizeCard } from "../card.ts";
-import type { CharacterCard } from "../types.ts";
+import { entriesToCharacterBook, normalizeCard } from "../card.ts";
+import type { CharacterCard, LorebookEntry } from "../types.ts";
 import type { NovelAnchor, NovelPackage } from "./canon.ts";
 
-export type NovelPlayMode = "new-character";
+export type NovelPlayMode = "new-character" | "existing-character";
 
 export interface NovelPlayPublicProfile {
 	name: string;
 	profile: string;
+}
+
+export interface NovelPlayCharacterProfile {
+	name: string;
+	keys: string[];
+	content: string;
+	evidenceQuotes: string[];
 }
 
 /**
@@ -18,6 +25,7 @@ export interface ConfirmedNovelOpeningSnapshot {
 	user: {
 		name: string;
 		identity: string;
+		mode?: NovelPlayMode;
 	};
 	time: string;
 	place: string;
@@ -25,13 +33,17 @@ export interface ConfirmedNovelOpeningSnapshot {
 	openingNarration: string;
 	publicCharacterProfiles: NovelPlayPublicProfile[];
 	publicWorldFacts: string[];
+	styleExcerpts?: string[];
+	characterVoiceExcerpts?: Array<{ characterName: string; quote: string }>;
+	characterProfiles?: NovelPlayCharacterProfile[];
 }
 
 export interface NovelPlayCardExtensions {
 	docId: string;
 	revision: string;
-	startNodeId: string;
-	position: NovelAnchor["position"];
+	startNodeId?: string;
+	position?: "before" | "after";
+	anchorKind?: "node" | "source-end";
 	playerName: string;
 	playerMode: NovelPlayMode;
 }
@@ -51,6 +63,7 @@ export interface NovelPlayRawCard {
 		creator_notes: string;
 		alternate_greetings: string[];
 		tags: string[];
+		character_book: Record<string, unknown>;
 		extensions: { liyuanNovelPlay: NovelPlayCardExtensions };
 	};
 }
@@ -64,6 +77,7 @@ export interface BuildNovelPlayCardInput {
 	snapshot: ConfirmedNovelOpeningSnapshot;
 	/** Body loaded from skills/小说开演边界/SKILL.md by the existing Skill scanner. */
 	skillBody: string;
+	characterProfiles?: NovelPlayCharacterProfile[];
 }
 
 const LIMITS = {
@@ -100,18 +114,54 @@ function validatePackageAnchor(pkg: NovelPackage, anchor: NovelAnchor): void {
 		throw new Error("作品包结构或版本无效");
 	}
 	if (!anchor || anchor.packageRevision !== pkg.revision) throw new Error("开演锚点与作品包版本不匹配");
+	if (anchor.kind === "source-end") return;
 	if (anchor.position !== "before" && anchor.position !== "after") throw new Error("无效开演位置");
-	if (!pkg.nodes.some(node => node && node.id === anchor.nodeId)) throw new Error("开演节点不存在");
+	const node = pkg.nodes.find(node => node && node.id === anchor.nodeId);
+	if (!node) throw new Error("开演节点不存在");
 }
 
-function formatProfiles(profiles: NovelPlayPublicProfile[]): string {
-	return profiles.length
-		? `公开人物资料：\n${profiles.map(item => `- ${item.name}：${item.profile}`).join("\n")}`
-		: "";
-}
-
-function formatFacts(facts: string[]): string {
-	return facts.length ? `公开世界事实：\n${facts.map(item => `- ${item}`).join("\n")}` : "";
+export function novelPlayOpeningLore(snapshot: ConfirmedNovelOpeningSnapshot): LorebookEntry[] {
+	const entries: LorebookEntry[] = [{
+		uid: 1,
+		keys: [snapshot.place, snapshot.time].filter(Boolean),
+		secondaryKeys: [],
+		comment: "小说开演·开场定位",
+		content: `时间：${snapshot.time}\n地点：${snapshot.place}\n\n${snapshot.sceneText}`,
+		constant: true,
+		enabled: true,
+		selective: false,
+		order: 10,
+	}];
+	for (const [index, item] of snapshot.publicCharacterProfiles.entries()) {
+		entries.push({
+			uid: index + 2,
+			keys: [item.name],
+			secondaryKeys: [],
+			comment: `小说开演·人物·${item.name}`,
+			content: `${item.name}：${item.profile}`,
+			constant: true,
+			enabled: true,
+			selective: false,
+			order: 20 + index,
+		});
+	}
+	if (snapshot.publicWorldFacts.length > 0) {
+		entries.push({
+			uid: entries.length + 1,
+			keys: ["公开世界事实", "世界设定"],
+			secondaryKeys: [],
+			comment: "小说开演·公开世界事实",
+			content: snapshot.publicWorldFacts.map(item => `- ${item}`).join("\n"),
+			constant: true,
+			enabled: true,
+			selective: false,
+			order: 100,
+		});
+	}
+	for (const [index, profile] of (snapshot.characterProfiles ?? []).entries()) {
+		entries.push({ uid: entries.length + 1, keys: profile.keys, secondaryKeys: [], comment: profile.name, content: profile.content, constant: false, enabled: true, selective: true, order: 120 + index });
+	}
+	return entries;
 }
 
 /**
@@ -120,13 +170,13 @@ function formatFacts(facts: string[]): string {
  * drops data.extensions, so session code must retain and read this raw card.
  */
 export function buildNovelPlayCard(input: BuildNovelPlayCardInput): NovelPlayRawCard {
-	if (input.mode !== "new-character") throw new Error("当前只支持新角色开演模式");
 	validatePackageAnchor(input.pkg, input.anchor);
 	if (!input.snapshot || input.snapshot.confirmed !== true) throw new Error("开场快照尚未由用户确认");
 
 	const workTitle = boundedText("作品标题", input.workTitle, LIMITS.workTitle);
 	const userName = boundedText("用户角色名", input.snapshot.user?.name, LIMITS.userName);
 	const userIdentity = boundedText("用户角色身份", input.snapshot.user?.identity, LIMITS.userIdentity);
+	const playerMode = input.mode;
 	const time = boundedText("开场时间", input.snapshot.time, LIMITS.time);
 	const place = boundedText("开场地点", input.snapshot.place, LIMITS.place);
 	const sceneText = boundedText("开场场景", input.snapshot.sceneText, LIMITS.sceneText);
@@ -146,17 +196,18 @@ export function buildNovelPlayCard(input: BuildNovelPlayCardInput): NovelPlayRaw
 	}
 	const facts = input.snapshot.publicWorldFacts.map((item, index) =>
 		boundedText(`公开世界事实 ${index + 1}`, item, LIMITS.worldFact));
+	const styleExcerpts = (input.snapshot.styleExcerpts ?? []).map((item, index) => boundedText(`叙述语料 ${index + 1}`, item, 600)).slice(0, 8);
+	const voiceExcerpts = (input.snapshot.characterVoiceExcerpts ?? []).map((item, index) => ({ characterName: boundedText(`对白语料 ${index + 1}角色`, item?.characterName, LIMITS.profileName), quote: boundedText(`对白语料 ${index + 1}`, item?.quote, 600) })).slice(0, 8);
+	const characterProfiles = (input.characterProfiles ?? input.snapshot.characterProfiles ?? []).map((profile, index) => ({ name: boundedText(`人物画像 ${index + 1}名称`, profile?.name, LIMITS.profileName), keys: profile.keys.map((key) => boundedText(`人物画像 ${index + 1}关键词`, key, 120)).slice(0, 8), content: boundedText(`人物画像 ${index + 1}正文`, profile?.content, 8_000), evidenceQuotes: profile.evidenceQuotes.map((quote) => boundedText(`人物画像 ${index + 1}证据`, quote, 800)).slice(0, 12) })).slice(0, 256);
 
+	// Full-card character profiles are a separate worldbook payload; they are not
+	// part of the small opening snapshot budget.
 	const boundedPublic = { workTitle, userName, userIdentity, time, place, sceneText, openingNarration, profiles, facts };
 	if (JSON.stringify(boundedPublic).length > LIMITS.totalPublicSnapshot) {
 		throw new Error(`公开开场快照总长度超过上限 ${LIMITS.totalPublicSnapshot}`);
 	}
 
-	const description = [
-		`用户角色：${userName}\n身份：${userIdentity}`,
-		formatProfiles(profiles),
-		formatFacts(facts),
-	].filter(Boolean).join("\n\n");
+	const description = `用户角色：${userName}\n身份：${userIdentity}`;
 	const scenario = `时间：${time}\n地点：${place}\n\n${sceneText}`;
 	const raw: NovelPlayRawCard = {
 		spec: "chara_card_v2",
@@ -167,18 +218,19 @@ export function buildNovelPlayCard(input: BuildNovelPlayCardInput): NovelPlayRaw
 			personality: "",
 			scenario,
 			first_mes: openingNarration,
-			mes_example: "",
+			mes_example: [...styleExcerpts.map(item => `【原文叙述语料】${item}`), ...voiceExcerpts.map(item => `【${item.characterName}原文对白语料】${item.quote}`)].join("\n\n"),
 			system_prompt: skillBody,
 			post_history_instructions: "",
 			creator_notes: "梨园小说开演内部角色卡。会话集成必须从原始卡读取 liyuanNovelPlay 扩展。",
 			alternate_greetings: [],
 			tags: ["liyuan", "novel-play", "internal"],
+			character_book: entriesToCharacterBook(novelPlayOpeningLore({ ...input.snapshot, time, place, sceneText, openingNarration, publicCharacterProfiles: profiles, publicWorldFacts: facts, characterProfiles })),
 			extensions: {
 				liyuanNovelPlay: {
 					docId: input.pkg.docId,
 					revision: input.pkg.revision,
-					startNodeId: input.anchor.nodeId,
-					position: input.anchor.position,
+					...(input.anchor.kind === "source-end" ? {} : { startNodeId: input.anchor.nodeId, position: input.anchor.position }),
+					...(input.anchor.kind === "source-end" ? { anchorKind: "source-end" as const } : {}),
 					playerName: userName,
 					playerMode: input.mode,
 				},

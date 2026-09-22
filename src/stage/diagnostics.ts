@@ -249,11 +249,61 @@ function diagnosticFor(branch: BranchEntryLike[], index: number, entry: BranchEn
 	};
 }
 
+function failedDebugDiagnostic(entry: BranchEntryLike): TurnDiagnosticView | undefined {
+	const data = customData(entry);
+	if (!data || text(data.finalText) || text(data.draft)) return undefined;
+	const beatLog = Array.isArray(data.beatLog) ? data.beatLog : [];
+	const rows = beatLog.map(recordOf).filter((row): row is Record<string, unknown> => !!row);
+	const receivedText = rows.filter((row) => text(row.ev) === "text").reduce((total, row) => total + text(row.data, 100_000).length, 0);
+	const activities = rows.filter((row) => text(row.ev) === "activity").map((row) => text(row.data)).filter(Boolean);
+	const providerErrors = rows.filter((row) => text(row.ev) === "provider_error").map((row) => text(row.data)).filter(Boolean);
+	const hasPrepFailure = activities.some((item) => /失败|超时|取消|无可用候选/.test(item));
+	const stages: TurnDiagnosticStage[] = [
+		stage("continuity", "文学连续性", undefined, hasPrepFailure ? "degraded" : "skipped", hasPrepFailure ? "拍前旁路失败或超时" : "本拍未产生工件"),
+		stage("plot-adaptation", "生态剧情适配", undefined, hasPrepFailure ? "degraded" : "skipped", hasPrepFailure ? "拍前旁路失败或超时" : "本拍未运行"),
+		stage("director", "Stitches 导演", undefined, hasPrepFailure ? "degraded" : "skipped", hasPrepFailure ? "拍前旁路失败或超时" : "本拍未运行"),
+		stage("scene-conductor", "场面编排", undefined, "skipped", "主演未进入可用正文工作流"),
+		stage("ecology-arrival", "生态抵达", undefined, hasPrepFailure ? "degraded" : "skipped", hasPrepFailure ? "拍前旁路失败或超时" : "本拍未运行"),
+		stage("memory-recall", "剧情记忆召回", undefined, activities.some((item) => item.includes("记忆召回") && /失败|超时/.test(item)) ? "degraded" : "skipped", "本拍失败，未形成正文输入结算"),
+		stage("writer", "主演分段演出", undefined, "failed", receivedText ? `已收到约 ${receivedText} 字流文本，但未形成可落树终态` : "未收到可用正文" , { receivedTextChars: receivedText, providerErrors: providerErrors.slice(0, 3) }),
+		stage("ledger", "角色账本", undefined, "skipped", "失败拍不记账"),
+		stage("world-facts", "拍后事实信封", undefined, "skipped", "失败拍不推进世界"),
+		stage("world-proposal", "世界转移提案", undefined, "skipped", "失败拍不推进世界"),
+		stage("world-audit", "世界转移审计", undefined, "skipped", "失败拍不推进世界"),
+		stage("world-commit", "世界原子提交", undefined, "skipped", "失败拍不提交世界"),
+		stage("ecology-aftermath", "生态 aftermath", undefined, "skipped", "失败拍不推进生态"),
+		stage("curtain", "独立谢幕格式", undefined, "skipped", "失败拍没有谢幕工件"),
+		stage("outline-reconcile", "大纲自动校准", undefined, "skipped", "失败拍不校准大纲"),
+		stage("memory-settlement", "记忆压缩与事件索引", undefined, "skipped", "失败拍不结算记忆"),
+	];
+	const counts = rows.reduce((result, row) => {
+		const kind = text(row.ev);
+		if (kind === "thinking") result.thinking++;
+		else if (kind === "tool") result.tools++;
+		else if (kind === "text") result.text++;
+		return result;
+	}, { thinking: 0, tools: 0, text: 0 });
+	return {
+		version: 1,
+		entryId: entry.id ?? "failed-turn",
+		narrativeChars: 0,
+		curtainChars: 0,
+		timeline: counts,
+		stages,
+		artifacts: { workflow: { receivedTextChars: receivedText, providerErrors: providerErrors.slice(0, 3), activities: activities.slice(-8) }, commits: [] },
+	};
+}
+
 export function diagnosticsFromBranch(branch: BranchEntryLike[], limit = MAX_TURNS, runtime: Record<string, TurnRuntimeDiagnostic> = {}): TurnDiagnosticsView {
 	const turns: TurnDiagnosticView[] = [];
 	const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(MAX_TURNS, Math.floor(limit))) : 12;
 	for (let i = branch.length - 1; i >= 0 && turns.length < safeLimit; i--) {
 		const entry = branch[i];
+		if (entry.type === "custom" && entry.customType === "rp-text-debug") {
+			const failed = failedDebugDiagnostic(entry);
+			if (failed) turns.push(failed);
+			continue;
+		}
 		if (entry.type !== "assistant" && entry.message?.role !== "assistant") continue;
 		const details = recordOf(recordOf(entry.message)?.details);
 		if (!details || !["rpWorkflow", "rpPrep", "rpTimeline", "rpNarrative", "rpCurtain"].some((key) => key in details)) continue;

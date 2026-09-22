@@ -10,6 +10,7 @@ export interface NovelSource {
 	fingerprint: string;
 	chunkChars: number;
 	chunks: TextChunk[];
+	workId?: string;
 }
 
 export interface NovelEvidence {
@@ -21,19 +22,20 @@ export interface NovelEvidence {
 }
 
 export function prepareNovelSource(
-	doc: Pick<CorpusDocument, "id" | "title" | "status" | "chars" | "chunkCount">,
+	doc: Pick<CorpusDocument, "id" | "title" | "status" | "chars" | "chunkCount" | "workId">,
 	storedText: string,
 	chunkChars = CHUNK_CHARS,
+	chunksOverride?: TextChunk[],
 ): NovelSource {
 	if (doc.status !== "ready") throw new Error("小说尚未消化完成");
 	if (!storedText.trim() || storedText.length !== doc.chars) throw new Error("小说原文与文档长度不一致");
 	if (!Number.isSafeInteger(chunkChars) || chunkChars <= 0) throw new Error("无效分块大小");
-	const chunks = chunkText(splitChapters(storedText).chapters, chunkChars);
+	const chunks = chunksOverride ? chunksOverride.map((chunk, index) => ({ ...chunk, index })) : chunkText(splitChapters(storedText).chapters, chunkChars);
 	if (chunks.length !== doc.chunkCount) throw new Error("小说分块布局不一致，需核对消化版本");
 	return {
 		version: 1, docId: doc.id, title: doc.title,
 		fingerprint: createHash("sha256").update(storedText, "utf8").digest("hex"),
-		chunkChars, chunks,
+		chunkChars, chunks, ...(doc.workId ? { workId: doc.workId } : {}),
 	};
 }
 

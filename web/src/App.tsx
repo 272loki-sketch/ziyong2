@@ -35,6 +35,7 @@ import { ConnectPanel } from "./components/ConnectPanel.tsx";
 import { WelcomePanel } from "./components/HomePage.tsx";
 import { UpdateModal, UpdateToast } from "./components/UpdateFlow.tsx";
 import { PanelRefreshContext } from "./components/kit.tsx";
+import { NovelGuidePanel, type NovelGuideData } from "./components/NovelGuidePanel.tsx";
 import { registerTavernChatBridge } from "./tavernShim.ts";
 import { setAtHome, shouldShowHomeOnBoot, touchVisit } from "./visit.ts";
 import {
@@ -230,6 +231,7 @@ export default function App() {
 	const [charAvatarUrl, setCharAvatarUrl] = useState<string | null>(null);
 	const [userAvatarUrl, setUserAvatarUrl] = useState<string | null>(null);
 	const [messages, setMessages] = useState<ChatMsg[]>([]);
+	const [novelGuide, setNovelGuide] = useState<NovelGuideData | null>(null);
 	const [streamText, setStreamText] = useState("");
 	const [streamThinking, setStreamThinking] = useState("");
 	/** 本轮时间线的实时渲染态（与 turnSegsRef 同内容） */
@@ -548,6 +550,12 @@ export default function App() {
 		for (let i = ms.length - 1; i > lastStoryUser; i--) {
 			if (ms[i].channel !== channel) continue;
 			const prev = ms[i];
+			// The server may deliver the same finalized assistant once as a live
+			// message and again in the hello resync. Do not concatenate identical
+			// finalized bodies, or their presentation/options will be duplicated.
+			if (prev.text.trim() === incoming.text.trim() && prev.text.trim()) {
+				return [...ms.slice(0, i), { ...prev, ...incoming }, ...ms.slice(i + 1)];
+			}
 			const text = [prev.text, incoming.text].map((s) => (s ?? "").trim()).filter(Boolean).join("\n\n");
 			const thinking = [prev.thinking, incoming.thinking].map((s) => (s ?? "").trim()).filter(Boolean).join("\n\n");
 			const activities = [...(prev.activities ?? []), ...(incoming.activities ?? [])];
@@ -626,6 +634,7 @@ export default function App() {
 		(frame: ServerFrame) => {
 			switch (frame.type) {
 				case "hello": {
+					setNovelGuide(frame.novelGuide ?? null);
 					setCharName(frame.charName);
 					setUserName(frame.userName);
 					// wire timeline → 本地 segments：持久化的时间线在刷新后仍按时序渲染
@@ -1898,6 +1907,7 @@ export default function App() {
 				{sidePanel(leftPanel, "left")}
 
 				<main className="center">
+					{novelGuide && <NovelGuidePanel guide={novelGuide} onUse={(text) => setInput(text)} onModify={() => setInput("我想修改原著这一节点：")}/>}
 					<div className="list" ref={listRef} onScroll={onScroll} onPointerDown={() => composerTools && setComposerTools(false)}>
 						<div className="flow">
 							{/* 欢迎区嵌在聊天流（学 ST）：顶栏/侧栏/输入框仍可用 */}

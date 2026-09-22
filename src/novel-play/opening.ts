@@ -31,17 +31,27 @@ export interface NovelOpeningProposal {
 export interface NovelOpeningModelRequest {
 	systemPrompt: string;
 	userText: string;
+	previousValidationError?: string;
 }
 
 export interface ExtractNovelOpeningInput {
 	stored: StoredNovelPackage;
 	anchor: NovelAnchor;
-	player: { name: string; identity: string };
+	player: { name: string; identity: string; mode?: "new-character" | "existing-character" };
 	/** Body loaded by the caller from skills/小说开场提取/SKILL.md through the existing Skill scanner. */
 	skillBody: string;
 	modelCall: (request: NovelOpeningModelRequest, options: { signal?: AbortSignal; attempt: number }) => Promise<unknown>;
 	signal?: AbortSignal;
 	contextChars?: number;
+	maxAttempts?: number;
+}
+
+export interface ExtractNovelCharacterProfilesInput {
+	stored: StoredNovelPackage;
+	proposal: NovelOpeningProposal;
+	skillBody: string;
+	modelCall: (request: NovelOpeningModelRequest, options: { signal?: AbortSignal; attempt: number }) => Promise<unknown>;
+	signal?: AbortSignal;
 	maxAttempts?: number;
 }
 
@@ -127,9 +137,15 @@ function validateStored(stored: StoredNovelPackage): void {
 function anchorCutoff(stored: StoredNovelPackage, anchor: NovelAnchor): { chunkIndex: number; offset: number } {
 	const pkg = stored.package;
 	if (!anchor || anchor.packageRevision !== pkg.revision) throw new Error("开演锚点与作品包版本不匹配");
+	if (anchor.kind === "source-end") {
+		const chunk = stored.source.chunks[stored.source.chunks.length - 1];
+		if (!chunk) throw new Error("作品包没有原文分块");
+		return { chunkIndex: chunk.index, offset: chunk.text.length };
+	}
 	if (anchor.position !== "before" && anchor.position !== "after") throw new Error("无效开演位置");
 	const node = pkg.nodes.find(item => item.id === anchor.nodeId);
 	if (!node) throw new Error("开演节点不存在");
+	if (node.visibility !== "public") throw new Error("不能从秘密节点开演");
 	if (node.sourceRefs.length !== 1) throw new Error("开演节点含多段证据，无法保证精确防剧透边界");
 	const ref = node.sourceRefs[0];
 	return { chunkIndex: ref.chunkIndex, offset: anchor.position === "before" ? ref.start : ref.end };
@@ -185,7 +201,8 @@ function quotedFact(value: unknown, label: string, field: NovelOpeningEvidence["
 
 function parseDraft(value: unknown, player: NovelOpeningDraft["user"], sourceText: string, segments: SourceSegment[]): { draft: NovelOpeningDraft; evidence: NovelOpeningEvidence[] } {
 	const raw = parseObject(value);
-	exactKeys(raw, ["time", "place", "sceneText", "openingNarration", "publicCharacterProfiles", "publicWorldFacts"], "开场提取结果");
+	const allowed = ["time", "place", "sceneText", "openingNarration", "controlledCharacterProfile", "publicCharacterProfiles", "publicWorldFacts", "styleExcerpts", "characterVoiceExcerpts"];
+	if (Object.keys(raw).some(key => !allowed.includes(key))) throw new Error("开场提取结果字段不符合严格 schema");
 	const evidence: NovelOpeningEvidence[] = [];
 	const fact = (key: "time" | "place" | "sceneText" | "openingNarration") => {
 		const parsed = quotedFact(raw[key], key, key, sourceText, segments);
@@ -211,8 +228,13 @@ function parseDraft(value: unknown, player: NovelOpeningDraft["user"], sourceTex
 		evidence.push(parsed.evidence);
 		return parsed.text;
 	});
+	const excerpts = (key: "styleExcerpts" | "characterVoiceExcerpts") => Array.isArray(raw[key]) ? raw[key].map((item, index) => {
+		const row = asRecord(item, `${key}[${index}]`);
+		const quote = locateQuote(row.quote, `${key}[${index}]`, sourceText, segments).quote;
+		return key === "styleExcerpts" ? quote : { characterName: boundedText(row.characterName, `${key}[${index}].characterName`, LIMITS.name), quote };
+	}) : [];
 	return {
-		draft: { user: player, time: fact("time"), place: fact("place"), sceneText: fact("sceneText"), openingNarration: fact("openingNarration"), publicCharacterProfiles, publicWorldFacts },
+		draft: { user: player, time: fact("time"), place: fact("place"), sceneText: fact("sceneText"), openingNarration: fact("openingNarration"), publicCharacterProfiles, publicWorldFacts, styleExcerpts: excerpts("styleExcerpts") as string[], characterVoiceExcerpts: excerpts("characterVoiceExcerpts") as Array<{ characterName: string; quote: string }> },
 		evidence,
 	};
 }
@@ -228,6 +250,7 @@ export async function extractNovelOpening(input: ExtractNovelOpeningInput): Prom
 	const player = {
 		name: boundedText(input.player?.name, "用户角色名", LIMITS.name),
 		identity: boundedText(input.player?.identity, "用户角色身份", LIMITS.identity),
+		...(input.player?.mode === "existing-character" ? { mode: "existing-character" as const } : {}),
 	};
 	const skillBody = boundedText(input.skillBody, "小说开场提取 Skill 正文", LIMITS.skillBody);
 	const contextChars = input.contextChars ?? LIMITS.contextChars;
@@ -237,16 +260,20 @@ export async function extractNovelOpening(input: ExtractNovelOpeningInput): Prom
 	const cutoff = anchorCutoff(input.stored, input.anchor);
 	const range = sourceTail(input.stored, cutoff, contextChars);
 	if (!range.text.trim()) throw new Error("锚点之前没有可用于开场提取的原文");
-	const userText = JSON.stringify({
+	const requestData = {
 		player_identity_external_to_source: player,
-		anchor: { nodeId: input.anchor.nodeId, position: input.anchor.position },
+		anchor: input.anchor.kind === "source-end" ? { kind: "source-end" } : { nodeId: input.anchor.nodeId, position: input.anchor.position },
 		source_range: { text: range.text, segments: range.segments.map(({ text: _text, ...segment }) => segment) },
-	}, null, 2);
+	};
 	let lastError: unknown;
 	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 		if (input.signal?.aborted) aborted(input.signal);
 		try {
-			const output = await input.modelCall({ systemPrompt: skillBody, userText }, { signal: input.signal, attempt });
+			const output = await input.modelCall({
+				systemPrompt: skillBody,
+				userText: JSON.stringify({ ...requestData, previous_validation_error: lastError instanceof Error ? lastError.message : undefined }, null, 2),
+				...(lastError instanceof Error ? { previousValidationError: lastError.message } : {}),
+			}, { signal: input.signal, attempt });
 			if (input.signal?.aborted) aborted(input.signal);
 			const parsed = parseDraft(output, player, range.text, range.segments);
 			const sourceRange = {
@@ -268,4 +295,41 @@ export async function extractNovelOpening(input: ExtractNovelOpeningInput): Prom
 	}
 	const detail = lastError instanceof Error ? `：${lastError.message}` : "";
 	throw new Error(`开场提取在 ${maxAttempts} 次尝试后失败${detail}`, { cause: lastError });
+}
+
+/** Add evidence-backed card-shaped character entries without changing the immutable package. */
+export async function extractNovelCharacterProfiles(input: ExtractNovelCharacterProfilesInput): Promise<NovelOpeningProposal> {
+	const segments = input.proposal.sourceRange.segments.map(segment => ({ ...segment, text: input.stored.source.chunks[segment.chunkIndex]!.text.slice(segment.start, segment.end) }));
+	const sourceText = segments.map(segment => segment.text).join("");
+	const maxAttempts = input.maxAttempts ?? 2;
+	if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 3) throw new Error("人物画像尝试次数必须在 1 到 3 之间");
+	let lastError: unknown;
+	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+		if (input.signal?.aborted) aborted(input.signal);
+		try {
+			const output = await input.modelCall({ systemPrompt: input.skillBody, userText: JSON.stringify({ source_range: { text: sourceText, segments: input.proposal.sourceRange.segments }, character_profile_template: { commonLayers: ["基本信息", "背景(秘密)", "外貌", "表象性格", "内核性格", "真实能力", "行为模式", "说话风格", "关系与当前状态"], instruction: "按当前小说题材和原文证据自适应增删层级；修炼/魔法、校园/职场、宫廷/组织、科幻等使用各自有意义的领域层，不适用或无证据的层级省略，不要套用其他作品内容。不要生成知情边界、系统规则、运行时指令或提示词。" }, already_extracted: input.proposal.draft.publicCharacterProfiles, previous_validation_error: lastError instanceof Error ? lastError.message : undefined }, null, 2), ...(lastError instanceof Error ? { previousValidationError: lastError.message } : {}) }, { signal: input.signal, attempt });
+			const raw = parseObject(output);
+			if (!Array.isArray(raw.profiles)) throw new Error("人物画像结果缺少 profiles 数组");
+			const profiles = raw.profiles.slice(0, 12).map((value, index) => {
+		const row = asRecord(value, `profiles[${index}]`);
+		const name = boundedText(row.name, `profiles[${index}].name`, LIMITS.name);
+		const keys = Array.isArray(row.keys) ? row.keys.map((key, keyIndex) => boundedText(key, `profiles[${index}].keys[${keyIndex}]`, LIMITS.name)).slice(0, 8) : [name];
+		const content = boundedText(row.content, `profiles[${index}].content`, 8_000);
+		const contentObject = parseObject(content);
+		if (!contentObject[name]) throw new Error(`profiles[${index}].content顶层人物名必须与 name 一致`);
+		const forbidden = /知情边界|系统规则|运行时|提示词|不要替|必须调用|未来剧情|后续剧情|candidate|activation|recipient|CoT|prompt/i;
+		if (forbidden.test(content)) throw new Error(`profiles[${index}].content含有非人物资料或未来剧情指令`);
+		const evidenceQuotes = Array.isArray(row.evidenceQuotes) ? row.evidenceQuotes.map((quote, quoteIndex) => locateQuote(quote, `profiles[${index}].evidenceQuotes[${quoteIndex}]`, sourceText, segments).quote).slice(0, 12) : [];
+		if (!evidenceQuotes.length) throw new Error(`profiles[${index}]缺少原文证据`);
+		const uniqueKeys = [...new Set([name, ...keys])].slice(0, 8);
+		return { name, keys: uniqueKeys, content, evidenceQuotes };
+			});
+			return { ...input.proposal, draft: { ...input.proposal.draft, characterProfiles: profiles } };
+		} catch (error) {
+			if (input.signal?.aborted || (error instanceof Error && error.name === "AbortError")) aborted(input.signal);
+			lastError = error;
+		}
+	}
+	const detail = lastError instanceof Error ? `：${lastError.message}` : "";
+	throw new Error(`人物画像提取在 ${maxAttempts} 次尝试后失败${detail}`, { cause: lastError });
 }

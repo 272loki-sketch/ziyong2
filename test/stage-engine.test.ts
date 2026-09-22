@@ -8,7 +8,7 @@ import { SessionManager } from "@liyuan/agent-runtime";
 import { fauxAssistantMessage, fauxText, fauxThinking, fauxToolCall } from "@liyuan/ai/providers/faux";
 import { registerFauxProvider, streamSimple } from "@liyuan/ai/compat";
 
-import { DEFAULT_MAIN_MAX_TOKENS, FIRST_CALL_MAX_TOKENS, StageEngine, isToolUnsupportedError, looksLikeCorruptedModelText, looksLikeTextualToolProtocol, mainStageMaxTokens, userAuthorizesTransition, type StageStreamFn } from "../src/stage/engine.ts";
+import { DEFAULT_MAIN_MAX_TOKENS, FIRST_CALL_MAX_TOKENS, StageEngine, extractPureTextNarrative, isToolUnsupportedError, looksLikeCorruptedModelText, looksLikeTextualToolProtocol, mainStageMaxTokens, userAuthorizesTransition, type StageStreamFn } from "../src/stage/engine.ts";
 import { listReplyVariants } from "../src/swipe.ts";
 
 /** 临时舞台：配置+卡+独立会话目录 */
@@ -125,6 +125,69 @@ test("引擎：模型声明不支持工具时直接使用纯文本小说模式",
 		assert.equal(contexts[0]?.tools, undefined);
 		assert.match(contexts[0]?.systemPrompt ?? "", /纯文本主演模式/);
 		assert.ok(JSON.stringify(sm.getBranch()).includes("纯文本模式生成的完整正文"));
+	} finally {
+		reg.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("引擎：纯文本小说模式分离正文与状态格式后正常落树", async () => {
+	const { cwd, sm } = makeStage();
+	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
+	try {
+		reg.setResponses([fauxAssistantMessage("<content>纯文本正文落在宅邸门前。\n\n<status>时间：黄昏</status></content>"), fauxScribeEmpty()] as never);
+		const base = reg.getModel("faux-rp") as Record<string, unknown>;
+		let resynced: string[] | undefined;
+		let cleared = 0;
+		const engine = new StageEngine({
+			cwd,
+			getSessionManager: () => sm as never,
+			getModel: () => ({ ...base, compat: { ...((base.compat as Record<string, unknown> | undefined) ?? {}), supportsTools: false } }) as never,
+			getAuth: async () => ({}),
+			streamFn: streamSimple as unknown as StageStreamFn,
+			events: { onDraftResync: (segments) => { resynced = segments; }, onStreamClear: () => { cleared++; } },
+		});
+		await engine.performTurn("继续当前场景。");
+		const branch = JSON.stringify(sm.getBranch());
+		assert.match(branch, /纯文本正文落在宅邸门前/);
+		assert.deepEqual(resynced, ["纯文本正文落在宅邸门前。"]);
+		assert.equal(cleared, 1);
+	} finally {
+		reg.unregister();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("纯文本异常终态保留已收到正文，未闭合格式块不吞掉正文", async () => {
+	assert.equal(extractPureTextNarrative("<content>前半段正文。\n\n<image>未完成图片参数"), "前半段正文。");
+	assert.match(extractPureTextNarrative("<content>前段。<image>图片</image>后段。</content>"), /前段。.*后段。/s);
+	const { cwd, sm } = makeStage();
+	const reg = registerFauxProvider({ models: [{ id: "faux-rp" }] });
+	try {
+		const base = reg.getModel("faux-rp") as Record<string, unknown>;
+		const streamFn: StageStreamFn = (model, context, options) => ({
+			async *[Symbol.asyncIterator]() {
+				yield { type: "text_delta", delta: "<content>异常终态下仍应保留的正文。\n\n<options>未完成", contentIndex: 0 };
+				yield { type: "error", reason: "error", error: { role: "assistant", content: [], stopReason: "error", errorMessage: "Stream ended without finish_reason" } };
+			},
+			result: async () => ({ role: "assistant", content: [], stopReason: "error" }),
+		}) as never;
+		let ended: { aborted: boolean; entryId?: string; error?: string } | undefined;
+		const engine = new StageEngine({
+			cwd,
+			getSessionManager: () => sm as never,
+			getModel: () => ({ ...base, compat: { ...((base.compat as Record<string, unknown> | undefined) ?? {}), supportsTools: false } }) as never,
+			getAuth: async () => ({}),
+			streamFn,
+			events: { onTurnEnd: (info) => { ended = info; } },
+		});
+		await engine.performTurn("继续当前场景。");
+		const branch = JSON.stringify(sm.getBranch());
+		assert.match(branch, /异常终态下仍应保留的正文/);
+		assert.equal(ended?.aborted, true);
+		assert.ok(ended?.entryId);
+		const assistant = (sm.getBranch() as Array<{ message?: { role?: string; content?: Array<{ text?: string }> } }>).find((entry) => entry.message?.role === "assistant");
+		assert.equal(assistant?.message?.content?.[0]?.text, "异常终态下仍应保留的正文。");
 	} finally {
 		reg.unregister();
 		rmSync(cwd, { recursive: true, force: true });

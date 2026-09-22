@@ -1,28 +1,34 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { join, relative, resolve, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 
-import { readCardRawJson } from "../card.ts";
-import { loadCorpusDocuments, corpusTextsDir, type CorpusDocument } from "../outline/corpus.ts";
+import { entriesToCharacterBook, readCardRawJson } from "../card.ts";
+import { loadCorpusDocuments, corpusTextsDir, corpusDigestsDir, type CorpusDocument, type TextChunk } from "../outline/corpus.ts";
 import { scanSkillFiles } from "../stage/skill-store.ts";
 import { resolveConfigPath } from "../paths.ts";
+import { readJsonFile } from "../jsonio.ts";
 import type { RpConfig } from "../types.ts";
 import { buildNovelPlayCard, type NovelPlayRawCard } from "./card.ts";
 import { type NovelAnchor, type NovelPackage } from "./canon.ts";
-import { extractNovelOpening, type NovelOpeningProposal } from "./opening.ts";
+import { extractNovelCharacterProfiles, extractNovelOpening, type NovelOpeningProposal } from "./opening.ts";
 import { buildNovelEvents } from "./service.ts";
+import { extendNovelPackage } from "./extend.ts";
 import { loadNovelPackage, type StoredNovelPackage } from "./store.ts";
+import { prepareNovelSource } from "./source.ts";
+import { saveNovelPackage } from "./store.ts";
+import { buildNovelCharacterProfileCorpus } from "./profile-service.ts";
+import { loadNovelCharacterProfileCorpus, type NovelCharacterProfileCorpus } from "./profile-store.ts";
 
 export interface NovelPlayModelHost {
 	cwd: string;
-	runSideText(step: "outlineResearch", systemPrompt: string, userText: string, options?: { maxTokens?: number; signal?: AbortSignal; forceNonStreaming?: boolean }): Promise<string | { error: string }>;
+	runSideText(step: "novelDigest", systemPrompt: string, userText: string, options?: { maxTokens?: number; signal?: AbortSignal; forceNonStreaming?: boolean }): Promise<string | { error: string }>;
 	switchToCard(): Promise<"switched" | "created">;
 	memoryScope(): { sessionId: string; card?: string };
 }
 
 export interface NovelPlayBinding { sessionId: string; card: string }
 export interface PackagePublicDto { docId: string; title: string; revision: string; stageCount: number; nodeCount: number; builtAt: string }
-export interface StartOptionDto { docId: string; revision: string; title: string; nodes: Array<{ nodeId: string; title: string }> }
+export interface StartOptionDto { docId: string; revision: string; title: string; capabilities: { playerModes: Array<"new-character" | "existing-character">; startKinds: Array<"node" | "source-end"> }; sourceEnd: { kind: "source-end"; chapterLabel: string; sourceChars: number }; nodes: Array<{ nodeId: string; title: string; summary: string; stageTitle: string; stageOrder: number; nodeOrder: number; source: { chunkIndex: number; chapters: string[] } }> }
 export interface PreviewPublicDto {
 	token: string;
 	expiresAt: string;
@@ -35,6 +41,33 @@ export type StartResult =
 	| { card: string; session: "recovery-required"; recovery: string };
 
 const sha256 = (value: string): string => createHash("sha256").update(value, "utf8").digest("hex");
+
+/** Ensure novel character profiles also exist as a visible mounted lorebook. */
+export function ensureNovelPlayLorebook(cwd: string): string | undefined {
+	const configState = loadRawConfig(cwd), cardPath = String(configState.config.card ?? "");
+	if (!cardPath) return undefined;
+	try {
+		const { raw } = readCardRawJson(resolve(cwd, cardPath));
+		const data = raw.data as Record<string, unknown>;
+		const extension = (data.extensions as Record<string, unknown> | undefined)?.liyuanNovelPlay as Record<string, unknown> | undefined;
+		if (!extension?.docId || !extension.revision) return undefined;
+		const book = data.character_book && typeof data.character_book === "object" ? data.character_book as Record<string, unknown> : {};
+		const entries = book.entries && typeof book.entries === "object" ? book.entries as Record<string, unknown> : {};
+		const profileEntries = Object.fromEntries(Object.entries(entries).filter(([, value]) => {
+			if (!value || typeof value !== "object") return false;
+			const row = value as Record<string, unknown>;
+			return Number(row.insertion_order ?? row.order ?? 0) >= 120 && row.selective === true;
+		}));
+		if (!Object.keys(profileEntries).length) return undefined;
+		const relativeLore = `assets/lorebooks/novel-play-${String(extension.docId)}.json`;
+		const loreFile = join(cwd, relativeLore);
+		mkdirSync(dirname(loreFile), { recursive: true });
+		atomicWrite(loreFile, `${JSON.stringify({ entries: profileEntries, extensions: { liyuanNovelPlay: { docId: extension.docId, revision: extension.revision, kind: "character-profiles" } } }, null, "\t")}\n`);
+		const mounted = Array.isArray(configState.config.lorebooks) ? [...configState.config.lorebooks] : [];
+		if (!mounted.includes(relativeLore)) atomicWrite(configState.path, `${JSON.stringify({ ...configState.config, lorebooks: [...mounted, relativeLore] }, null, "\t")}\n`);
+		return relativeLore;
+	} catch { return undefined; }
+}
 
 function atomicWrite(path: string, bytes: string): void {
 	const temporary = `${path}.${randomUUID()}.tmp`;
@@ -51,6 +84,7 @@ function loadRawConfig(cwd: string): { path: string; existed: boolean; bytes: st
 }
 
 export function novelPlayBinding(host: NovelPlayModelHost): NovelPlayBinding {
+	ensureNovelPlayLorebook(host.cwd);
 	const scope = host.memoryScope();
 	const sessionId = scope.sessionId;
 	const runtimeCard = String(scope.card ?? "");
@@ -72,7 +106,7 @@ const skill = (cwd: string, dir: string): string => {
 };
 
 const modelText = async (host: NovelPlayModelHost, systemPrompt: string, userText: string, signal?: AbortSignal, maxTokens = 8192): Promise<string> => {
-	const result = await host.runSideText("outlineResearch", systemPrompt, userText, { maxTokens, signal, forceNonStreaming: true });
+	const result = await host.runSideText("novelDigest", systemPrompt, userText, { maxTokens, signal, forceNonStreaming: true });
 	if (typeof result !== "string") throw new Error(result.error || "模型调用失败");
 	return result;
 };
@@ -100,13 +134,89 @@ export async function buildPackage(host: NovelPlayModelHost, docId: string, sign
 	const { document, text } = readyCorpusSource(host.cwd, docId);
 	const pkg = await buildNovelEvents({
 		cwd: host.cwd, document, storedText: text, signal,
-		modelCall: async input => modelText(host, input.skillBody, JSON.stringify({ source: input.source, chunk: input.chunk, attempt: input.attempt }, null, 2), input.signal),
+		modelCall: async input => modelText(host, input.skillBody, JSON.stringify({ source: input.source, chunk: input.chunk, attempt: input.attempt, previous_validation_error: input.previousValidationError }, null, 2), input.signal),
 	});
 	return packageDto(document.title, pkg);
 }
 
+export async function buildPackageWithProgress(host: NovelPlayModelHost, docId: string, signal: AbortSignal | undefined, onProgress: (completed: number, total: number) => void): Promise<PackagePublicDto> {
+	const { document, text } = readyCorpusSource(host.cwd, docId);
+	const pkg = await buildNovelEvents({
+		cwd: host.cwd, document, storedText: text, signal, onProgress,
+		modelCall: async input => modelText(host, input.skillBody, JSON.stringify({ source: input.source, chunk: input.chunk, attempt: input.attempt, previous_validation_error: input.previousValidationError }, null, 2), input.signal),
+	});
+	return packageDto(document.title, pkg);
+}
+
+export async function extendPackageWithProgress(host: NovelPlayModelHost, baseDocId: string, baseRevision: string, targetDocId: string, signal: AbortSignal | undefined, onProgress: (completed: number, total: number) => void): Promise<PackagePublicDto & { parentRevision: string; inheritedNodes: number; newNodes: number }> {
+	const base = loadNovelPackage(host.cwd, baseDocId, baseRevision);
+	const target = readyCorpusSource(host.cwd, targetDocId);
+	const extensionSkill = scanSkillFiles(host.cwd).find(item => item.dir === "小说续更事件提取")?.body;
+	if (!extensionSkill?.trim()) throw new Error("缺少小说续更事件提取 Skill");
+	let layout: TextChunk[] | undefined;
+	try {
+		const digest = readJsonFile(join(corpusDigestsDir(host.cwd), `${targetDocId}.json`)) as { layout?: TextChunk[] };
+		if (Array.isArray(digest.layout)) layout = digest.layout;
+	} catch { /* A normal layout is used for legacy corpus documents. */ }
+	const targetSource = prepareNovelSource(target.document, target.text, undefined, layout);
+	const pkg = await extendNovelPackage({
+		base,
+		target: { source: targetSource, packageDocId: targetDocId },
+		skillBody: extensionSkill,
+		signal,
+		onProgress,
+		modelCall: async input => modelText(host, input.skillBody, JSON.stringify({ source: input.source, chunk: input.chunk, attempt: input.attempt, previous_validation_error: input.previousValidationError }, null, 2), input.signal),
+	});
+	saveNovelPackage(host.cwd, targetSource, pkg);
+	return { ...packageDto(target.document.title, pkg), parentRevision: base.package.revision, inheritedNodes: pkg.lineage?.inheritedNodeIds.length ?? 0, newNodes: pkg.lineage?.newNodeIds.length ?? 0 };
+}
+
 export function packageDto(title: string, pkg: NovelPackage): PackagePublicDto {
 	return { docId: pkg.docId, title, revision: pkg.revision, stageCount: pkg.stages.length, nodeCount: pkg.nodes.length, builtAt: new Date().toISOString() };
+}
+
+export async function buildCharacterProfilesWithProgress(host: NovelPlayModelHost, docId: string, revision: string, signal: AbortSignal | undefined, onProgress: (completed: number, total: number) => void): Promise<{ docId: string; revision: string; profileCount: number; completedChunks: number; totalChunks: number }> {
+	const value = stored(host, docId, revision);
+	const corpus = await buildNovelCharacterProfileCorpus({
+		cwd: host.cwd, source: value.source, revision,
+		onProgress,
+		modelCall: async (systemPrompt, userText, callSignal) => modelText(host, systemPrompt, userText, callSignal, 16_000),
+		signal,
+	});
+	return { docId, revision, profileCount: corpus.profiles.length, completedChunks: corpus.completedChunks.length, totalChunks: value.source.chunks.length };
+}
+
+export function loadCharacterProfiles(host: NovelPlayModelHost, docId: string, revision: string): NovelCharacterProfileCorpus | undefined {
+	stored(host, docId, revision);
+	return loadNovelCharacterProfileCorpus(host.cwd, docId, revision);
+}
+
+export function applyCharacterProfilesToCard(cwd: string, cardPath: string, docId: string, revision: string): { card: string; profileCount: number } {
+	const corpus = loadNovelCharacterProfileCorpus(cwd, docId, revision);
+	if (!corpus || corpus.completedChunks.length === 0) throw new Error("人物资料库尚未完成");
+	const storedPackage = loadNovelPackage(cwd, docId, revision);
+	if (corpus.completedChunks.length !== storedPackage.source.chunks.length) throw new Error("人物资料库尚未完成全部原文分块，不能覆盖角色卡");
+	const absolute = resolve(cwd, cardPath);
+	const cardsRoot = realpathSync(join(cwd, "assets", "cards"));
+	const candidate = realpathSync(absolute);
+	const relativeCard = relative(cardsRoot, candidate);
+	if (!relativeCard || relativeCard.startsWith("..") || relativeCard.startsWith(sep)) throw new Error("角色卡路径不在 cards 目录内");
+	const { raw } = readCardRawJson(candidate);
+	const data = raw.data as Record<string, unknown>;
+	const extensions = (data.extensions as Record<string, unknown> | undefined)?.liyuanNovelPlay as Record<string, unknown> | undefined;
+	if (!extensions || extensions.docId !== docId || extensions.revision !== revision) throw new Error("角色卡未绑定指定小说作品包");
+	const existing = data.character_book && typeof data.character_book === "object" ? data.character_book as Record<string, unknown> : {};
+	const entries = Array.isArray(existing.entries) ? existing.entries.filter((entry) => {
+		if (!entry || typeof entry !== "object") return false;
+		const row = entry as Record<string, unknown>;
+		const order = Number(row.insertion_order ?? row.order ?? 0);
+		return order < 120;
+	}) : [];
+	const profileEntries = corpus.profiles.map((profile, index) => ({ uid: index + 120, keys: profile.keys, secondaryKeys: [], comment: profile.name, content: profile.content, constant: false, enabled: true, selective: true, order: 120 + index }));
+	data.character_book = { ...existing, entries: [...entries, ...((entriesToCharacterBook(profileEntries).entries as unknown[]) ?? [])] };
+	const temporary = `${candidate}.${randomUUID()}.tmp`;
+	try { writeFileSync(temporary, `${JSON.stringify(raw, null, "\t")}\n`, { encoding: "utf8", flag: "wx" }); renameSync(temporary, candidate); } finally { rmSync(temporary, { force: true }); }
+	return { card: cardPath, profileCount: corpus.profiles.length };
 }
 
 function stored(host: NovelPlayModelHost, docId: string, revision: string): StoredNovelPackage {
@@ -119,24 +229,34 @@ function stored(host: NovelPlayModelHost, docId: string, revision: string): Stor
 
 export function startOptions(host: NovelPlayModelHost, docId: string, revision: string): StartOptionDto {
 	const value = stored(host, docId, revision);
-	const stages = new Map(value.package.stages.map((stage, index) => [stage.id, index + 1]));
+	const stages = new Map(value.package.stages.map((stage, index) => [stage.id, { order: index + 1, title: stage.title }]));
 	return {
 		docId, revision, title: value.source.title,
+		capabilities: { playerModes: ["new-character", "existing-character"], startKinds: ["node", "source-end"] },
+		sourceEnd: { kind: "source-end", chapterLabel: value.source.chunks.at(-1)?.chapters.join(" / ") || "原文终点", sourceChars: value.source.chunks.reduce((sum, chunk) => sum + chunk.text.length, 0) },
 		nodes: value.package.nodes.filter(node => node.visibility === "public").map(node => ({
 			nodeId: node.id,
-			title: `阶段 ${stages.get(node.stageId) ?? 0} · 节点 ${node.order + 1}`,
+			title: node.title,
+			summary: node.summary,
+			stageTitle: stages.get(node.stageId)?.title ?? `分块 ${node.order + 1}`,
+			stageOrder: stages.get(node.stageId)?.order ?? 0,
+			nodeOrder: node.order + 1,
+			source: { chunkIndex: node.sourceRefs[0]?.chunkIndex ?? 0, chapters: value.source.chunks.find(chunk => chunk.index === node.sourceRefs[0]?.chunkIndex)?.chapters ?? [] },
 		})),
 	};
 }
 
-export async function createOpeningProposal(host: NovelPlayModelHost, input: { docId: string; revision: string; nodeId: string; position: "before" | "after"; player: { name: string; identity: string } }, signal?: AbortSignal): Promise<{ proposal: NovelOpeningProposal; stored: StoredNovelPackage; anchor: NovelAnchor }> {
+export async function createOpeningProposal(host: NovelPlayModelHost, input: { docId: string; revision: string; nodeId?: string; position?: "before" | "after"; startKind?: "node" | "source-end"; player: { name: string; identity: string; mode?: "new-character" | "existing-character" } }, signal?: AbortSignal): Promise<{ proposal: NovelOpeningProposal; stored: StoredNovelPackage; anchor: NovelAnchor }> {
 	const value = stored(host, input.docId, input.revision);
-	const anchor: NovelAnchor = { packageRevision: input.revision, nodeId: input.nodeId, position: input.position };
+	const anchor: NovelAnchor = input.startKind === "source-end" ? { kind: "source-end", packageRevision: input.revision } : { packageRevision: input.revision, nodeId: input.nodeId!, position: input.position! };
 	const proposal = await extractNovelOpening({
 		stored: value, anchor, player: input.player, skillBody: skill(host.cwd, "小说开场提取"), signal,
 		modelCall: async (request, options) => modelText(host, request.systemPrompt, request.userText, options.signal),
 	});
-	return { proposal, stored: value, anchor };
+	const profileSkill = scanSkillFiles(host.cwd).find(item => item.dir === "小说人物画像提取")?.body;
+	if (!profileSkill) return { proposal, stored: value, anchor };
+	const profiled = await extractNovelCharacterProfiles({ stored: value, proposal, skillBody: profileSkill, signal, maxAttempts: 3, modelCall: async (request, options) => modelText(host, request.systemPrompt, request.userText, options.signal, 16_000) });
+	return { proposal: profiled, stored: value, anchor };
 }
 
 function activeNovelCard(host: NovelPlayModelHost, card: string): boolean {
@@ -184,7 +304,12 @@ export async function startFromConfirmedProposal(host: NovelPlayModelHost, input
 	const before = loadRawConfig(host.cwd);
 	if (activeNovelCard(host, before.config.card)) throw new Error("当前已有小说开演会话，请先切到普通角色卡");
 	const confirmed = { ...input.proposal.draft, confirmed: true as const };
-	const raw: NovelPlayRawCard = buildNovelPlayCard({ mode: "new-character", workTitle: input.stored.source.title, pkg: input.stored.package, anchor: input.anchor, snapshot: confirmed, skillBody: skill(host.cwd, "小说开演边界") });
+	const fullProfiles = loadNovelCharacterProfileCorpus(host.cwd, input.stored.package.docId, input.stored.package.revision);
+	if (fullProfiles?.profiles.length) {
+		confirmed.characterProfiles = fullProfiles.profiles.map(profile => ({ name: profile.name, keys: profile.keys, content: profile.content, evidenceQuotes: profile.evidence.map(item => item.quote).filter(Boolean) }));
+	}
+	const mode = confirmed.user.mode === "existing-character" ? "existing-character" : "new-character";
+	const raw: NovelPlayRawCard = buildNovelPlayCard({ mode, workTitle: input.stored.source.title, pkg: input.stored.package, anchor: input.anchor, snapshot: confirmed, characterProfiles: fullProfiles?.profiles.map(profile => ({ name: profile.name, keys: profile.keys, content: profile.content, evidenceQuotes: profile.evidence.map(item => item.quote).filter(Boolean) })), skillBody: skill(host.cwd, "小说开演边界") });
 	const cardsDir = join(host.cwd, "assets", "cards");
 	mkdirSync(cardsDir, { recursive: true });
 	const relativeCard = `assets/cards/novel-play-${randomUUID()}.json`;

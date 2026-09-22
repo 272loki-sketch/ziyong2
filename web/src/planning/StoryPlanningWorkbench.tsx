@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { IconClose, IconRefresh } from "../components/icons.tsx";
 import {
-	bootstrapOutline, confirmOutlineProposal, getOutline, getOutlineResearch, createCorpus, createCorpusUrl, deleteCorpus, discoverCorpus, getCorpusDetail, listCorpus, pauseCorpus, resumeCorpus,
+	bootstrapOutline, confirmOutlineProposal, getOutline, getOutlineResearch, createCorpus, createCorpusVersion, createCorpusUrl, deleteCorpus, discoverCorpus, getCorpusDetail, listCorpus, pauseCorpus, resumeCorpus,
 	getOutlineVersions, getTurnDiagnostics, getResearchSearchSchedule, putOutlineSettings, reconcileOutline, refreshOutlineResearch, rejectOutlineProposal, runResearchSearchSchedule, searchOutlineResearch, searchResearchLogs, retrySearchExtraction, streamOutlineChat,
 	clearChats, getMemoryEvents, getMemoryDiff,
 } from "./client.ts";
 import { uploadFile } from "../api.ts";
+import { listNovelPlayJobs, type NovelPlayJob } from "./novel-play-client.ts";
 import type {
 	CorpusDetailResponse, CorpusDocument, CorpusWorkbenchResponse,
 	OutlineChatResponse, OutlineDiscussionFocus, OutlineHistoryResponse, OutlineMode, OutlineNode,
@@ -40,6 +41,7 @@ import { DIRECTOR_MODULE_BY_ID, DIRECTOR_MODULE_GROUPS, type DirectorTab } from 
 import { DiagnosticsModule } from "./modules/DiagnosticsModule.tsx";
 import { ResearchSearchModule } from "./modules/ResearchSearchModule.tsx";
 import { CorpusModule } from "./modules/CorpusModule.tsx";
+import { NovelPlayModule } from "./modules/NovelPlayModule.tsx";
 import { ResearchLibraryModule } from "./modules/ResearchLibraryModule.tsx";
 import { MemoryModule } from "./modules/MemoryModule.tsx";
 import { StoryMapModule } from "./modules/StoryMapModule.tsx";
@@ -148,6 +150,7 @@ export function StoryPlanningWorkbench({ onClose, toast }: { onClose: () => void
 	const [corpusLoading, setCorpusLoading] = useState(false);
 	const [corpusError, setCorpusError] = useState("");
 	const [corpusDetail, setCorpusDetail] = useState<Record<string, CorpusDetailResponse>>({});
+	const [novelJobs, setNovelJobs] = useState<NovelPlayJob[]>([]);
 	const [corpusUploading, setCorpusUploading] = useState(false);
 	const [corpusUrl, setCorpusUrl] = useState("");
 	const corpusRequest = useRef(0);
@@ -188,6 +191,7 @@ export function StoryPlanningWorkbench({ onClose, toast }: { onClose: () => void
 		catch (cause) { if (request === corpusRequest.current) setCorpusError(cause instanceof Error ? cause.message : String(cause)); }
 		finally { if (request === corpusRequest.current) setCorpusLoading(false); }
 	};
+	const loadNovelJobs = async () => { try { const result = await listNovelPlayJobs(); setNovelJobs(result.jobs); } catch { setNovelJobs([]); } };
 	const loadMemory = async () => {
 		const request = ++memoryRequest.current;
 		setMemoryLoading(true); setMemoryError("");
@@ -207,6 +211,16 @@ export function StoryPlanningWorkbench({ onClose, toast }: { onClose: () => void
 				if (!ok) { toast("info", "已取消建档（可在上传区删除该文件）"); return; }
 			}
 			toast("info", `已创建文档：${created.doc.title}（预计 ${created.estimatedCalls} 次辅助调用）`);
+			await loadCorpus();
+		} catch (cause) { toast("error", cause instanceof Error ? cause.message : String(cause)); }
+		finally { setCorpusUploading(false); if (corpusFileRef.current) corpusFileRef.current.value = ""; }
+	};
+	const uploadCorpusVersion = async (base: CorpusDocument, file: File) => {
+		setCorpusUploading(true);
+		try {
+			const uploaded = await uploadFile(file);
+			const result = await createCorpusVersion(base.id, uploaded.file);
+			toast("info", `已创建《${result.doc.title}》追加版本：复用 ${result.reusedChunks} 块，新增 ${result.newChunks} 块`);
 			await loadCorpus();
 		} catch (cause) { toast("error", cause instanceof Error ? cause.message : String(cause)); }
 		finally { setCorpusUploading(false); if (corpusFileRef.current) corpusFileRef.current.value = ""; }
@@ -262,9 +276,10 @@ export function StoryPlanningWorkbench({ onClose, toast }: { onClose: () => void
 		return () => { window.clearInterval(timer); diagnosticsRequest.current++; };
 	}, [tab]);
 	useEffect(() => {
-		if (tab !== "corpus") return;
+		if (tab !== "corpus" && tab !== "novel-play") return;
 		void loadCorpus();
-		const timer = window.setInterval(() => void loadCorpus(), 5_000);
+		void loadNovelJobs();
+		const timer = window.setInterval(() => { void loadCorpus(); void loadNovelJobs(); }, 1_500);
 		return () => { window.clearInterval(timer); corpusRequest.current++; };
 	}, [tab]);
 	useEffect(() => {
@@ -452,7 +467,8 @@ export function StoryPlanningWorkbench({ onClose, toast }: { onClose: () => void
 				{tab === "foreshadowing" && <ForeshadowingModule state={state!} groups={foreshadowGroups} revealed={revealed} setRevealed={setRevealed} />}
 				{tab === "world" && <WorldModule />}
 				{tab === "proposals" && <ProposalsModule proposals={proposals} busy={busy} proposalAction={(proposal, accept) => void proposalAction(proposal, accept)} />}
-				{tab === "corpus" && <CorpusModule corpusUploading={corpusUploading} busy={busy} discoverCorpusWorks={() => void discoverCorpusWorks()} corpusFileRef={corpusFileRef} uploadCorpusFile={(file) => void uploadCorpusFile(file)} corpusUrl={corpusUrl} setCorpusUrl={setCorpusUrl} importCorpusUrl={() => void importCorpusUrl()} corpusLoading={corpusLoading} corpusError={corpusError} corpus={corpus} corpusDetail={corpusDetail} toggleCorpusDetail={(doc) => void toggleCorpusDetail(doc)} corpusAction={(doc, kind) => void corpusAction(doc, kind)} />}
+				{tab === "corpus" && <CorpusModule corpusUploading={corpusUploading} busy={busy} discoverCorpusWorks={() => void discoverCorpusWorks()} corpusFileRef={corpusFileRef} uploadCorpusFile={(file) => void uploadCorpusFile(file)} uploadCorpusVersion={(doc, file) => void uploadCorpusVersion(doc, file)} corpusUrl={corpusUrl} setCorpusUrl={setCorpusUrl} importCorpusUrl={() => void importCorpusUrl()} corpusLoading={corpusLoading} corpusError={corpusError} corpus={corpus} novelJobs={novelJobs} corpusDetail={corpusDetail} toggleCorpusDetail={(doc) => void toggleCorpusDetail(doc)} corpusAction={(doc, kind) => void corpusAction(doc, kind)} />}
+				{tab === "novel-play" && <NovelPlayModule documents={list(corpus?.documents)} />}
 			{tab === "search" && <ResearchSearchModule searchTopic={searchTopic} setSearchTopic={setSearchTopic} searchBusy={searchBusy} searchSchedule={searchSchedule} runSearch={() => void runSearch()} runAutoSearch={() => void runAutoSearch()} searchError={searchError} searchResult={searchResult} searchLogs={searchLogs} busy={busy} expandedLog={expandedLog} toggleLog={toggleLog} runRetryExtraction={(log) => void runRetryExtraction(log)} setTab={setTab} />}
 			{tab === "research" && <ResearchLibraryModule items={research} filter={researchFilter} setFilter={setResearchFilter} confidence={researchConfidence} setConfidence={setResearchConfidence} />}
 			{tab === "versions" && <VersionsModule mode={mode} researchMode={researchMode} busy={busy} saveSettings={saveSettings} history={history} state={state} />}

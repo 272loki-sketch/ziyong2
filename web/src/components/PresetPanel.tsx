@@ -3,7 +3,7 @@
  * - 开关 / 改字 → 立即进运行时（下一轮生效），**不写盘**
  * - 「保存」→ 写入预设文件
  * - 切换预设再切回 → 磁盘已保存版（未保存改动丢弃）
- * - 点条目展开可改名称 / 正文（通道是 chatHistory 派生的位置，只读）
+ * - 点条目展开可改名称 / 正文 / 历史前后位置；「新增条目」可缝合不同预设内容
  *
  * 磁盘上存的是**酒馆原文**：这里发的是补丁（开关落 prompt_order、改字落 prompts），
  * 梨园不认识的键原样留在文件里（见 src/preset-doc.ts）。
@@ -79,12 +79,14 @@ function PresetBlockEditor({
 	note,
 	onChange,
 	onDelete,
+	onMove,
 }: {
 	block: DraftBlock;
 	busy: boolean;
 	note?: string;
 	onChange: (patch: Partial<DraftBlock>) => void;
 	onDelete?: () => void;
+	onMove?: (direction: "up" | "down") => void;
 }) {
 	const [open, setOpen] = useState(false);
 
@@ -109,6 +111,8 @@ function PresetBlockEditor({
 					</div>
 				</button>
 				<div className="preset-block-acts">
+					{onMove && <button type="button" className="act" disabled={busy} title="上移一位" onClick={() => onMove("up")}>上移</button>}
+					{onMove && <button type="button" className="act" disabled={busy} title="下移一位" onClick={() => onMove("down")}>下移</button>}
 					<button
 						type="button"
 						className="act preset-edit-btn"
@@ -141,11 +145,11 @@ function PresetBlockEditor({
 					<label className="field-label" style={{ marginTop: 8 }}>
 						位置
 					</label>
-					<div className="field-hint">
-						{CHANNEL_LABEL[block.channel] ?? block.channel}
-						{block.depth !== undefined ? ` · 深度注入 depth=${block.depth}` : ""}
-						——由本块在预设里相对 Chat History 槽位的位置决定，改顺序请在酒馆里改。
-					</div>
+					<select className="panel-search" value={block.channel} disabled={busy} onChange={(e) => onChange({ channel: e.target.value as DraftBlock["channel"] })}>
+						<option value="system">历史前</option>
+						<option value="postHistory">历史后</option>
+					</select>
+					<div className="field-hint">{block.depth !== undefined ? `深度注入 depth=${block.depth} · ` : ""}切换后立即影响下一轮，保存后写入预设。</div>
 					<label className="field-label" style={{ marginTop: 8 }}>
 						正文
 					</label>
@@ -188,11 +192,35 @@ export function PresetPanel({ toast }: { toast: (level: "info" | "warning" | "er
 	const [loadError, setLoadError] = useState<string | null>(null);
 	/** 防 apply 风暴：合并短时间多次改动 */
 	const applyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const runtimeWriteRef = useRef<Promise<void>>(Promise.resolve());
 	const pendingRef = useRef<PresetBlockPatch[]>([]);
 	const pendingSamplersRef = useRef<Record<string, number> | null>(null);
 	const draftRef = useRef(draft);
 	draftRef.current = draft;
 	const activeFile = files.data?.active ?? null;
+
+	const flushRuntime = useCallback(async () => {
+		if (applyTimer.current) {
+			clearTimeout(applyTimer.current);
+			applyTimer.current = null;
+		}
+		const pending = pendingRef.current;
+		const samplers = pendingSamplersRef.current;
+		if (pending.length === 0 && !samplers) {
+			await runtimeWriteRef.current;
+			return;
+		}
+		const merged = new Map<string, PresetBlockPatch>();
+		for (const patch of pending) merged.set(patch.id, { ...merged.get(patch.id), ...patch });
+		pendingRef.current = [];
+		pendingSamplersRef.current = null;
+		const write = runtimeWriteRef.current.then(() => apiPut("/api/preset", {
+			blocks: [...merged.values()],
+			...(samplers ? { samplers } : {}),
+		}));
+		runtimeWriteRef.current = write.then(() => undefined, () => undefined);
+		await write;
+	}, []);
 
 	const loadFromDisk = useCallback(async () => {
 		setLoadingDetail(true);
@@ -235,25 +263,10 @@ export function PresetPanel({ toast }: { toast: (level: "info" | "warning" | "er
 			if (samplers) pendingSamplersRef.current = samplers;
 			if (applyTimer.current) clearTimeout(applyTimer.current);
 			applyTimer.current = setTimeout(() => {
-				// 同一块的多次改动按后写优先合并成一条
-				const merged = new Map<string, PresetBlockPatch>();
-				for (const p of pendingRef.current) merged.set(p.id, { ...merged.get(p.id), ...p });
-				const body: { blocks: PresetBlockPatch[]; samplers?: Record<string, number> } = {
-					blocks: [...merged.values()],
-				};
-				if (pendingSamplersRef.current) body.samplers = pendingSamplersRef.current;
-				pendingRef.current = [];
-				pendingSamplersRef.current = null;
-				void (async () => {
-					try {
-						await apiPut("/api/preset", body);
-					} catch (e) {
-						toast("error", e instanceof Error ? e.message : String(e));
-					}
-				})();
+				void flushRuntime().catch((e) => toast("error", e instanceof Error ? e.message : String(e)));
 			}, 280);
 		},
-		[toast],
+		[flushRuntime, toast],
 	);
 
 	/** 本地视图改动 + 同步一条补丁到运行时草稿 */
@@ -287,6 +300,7 @@ export function PresetPanel({ toast }: { toast: (level: "info" | "warning" | "er
 					...(typeof patch.enabled === "boolean" ? { enabled: patch.enabled } : {}),
 					...(typeof patch.name === "string" ? { name: patch.name } : {}),
 					...(typeof patch.content === "string" ? { content: patch.content } : {}),
+					...(patch.channel ? { channel: patch.channel } : {}),
 				},
 			],
 		);
@@ -305,6 +319,27 @@ export function PresetPanel({ toast }: { toast: (level: "info" | "warning" | "er
 	/** 删块：从预设整块移除（立即进运行时，dirty，保存后写盘）。8/12 用户点名：提示词/状态栏都要能删。 */
 	const removeBlock = (id: string) => {
 		patchDraft((d) => ({ ...d, blocks: d.blocks.filter((b) => b.id !== id) }), [{ id, remove: true }]);
+	};
+
+	const addBlock = () => {
+		if (!draft) return;
+		const id = `liyuan-block-${Date.now().toString(36)}`;
+		const block: DraftBlock = { id, name: "新提示词块", channel: "system", role: "system", enabled: true, marker: false, chars: 0, content: "" };
+		patchDraft((d) => ({ ...d, blocks: [...d.blocks, block] }), [{ id, add: true, name: block.name, role: "system", channel: block.channel, enabled: true, content: "" }]);
+	};
+
+	const moveBlock = (id: string, direction: "up" | "down") => {
+		patchDraft(
+			(d) => {
+				const index = d.blocks.findIndex((block) => block.id === id);
+				const target = direction === "up" ? index - 1 : index + 1;
+				if (index < 0 || target < 0 || target >= d.blocks.length) return d;
+				const blocks = [...d.blocks];
+				[blocks[index], blocks[target]] = [blocks[target]!, blocks[index]!];
+				return { ...d, blocks };
+			},
+			[{ id, move: direction }],
+		);
 	};
 
 	const orderedSamplers = useMemo(() => {
@@ -342,6 +377,9 @@ export function PresetPanel({ toast }: { toast: (level: "info" | "warning" | "er
 
 	const saveToDisk = () =>
 		run(async () => {
+			// A fast click after editing can beat the 280ms runtime-draft debounce.
+			// Persist the queued patch before the save endpoint clears the override.
+			await flushRuntime();
 			// 草稿已在运行时文件里（原文＋补丁），保存＝把它落到预设文件
 			await apiPost("/api/preset/save", {});
 			setDirty(false);
@@ -551,21 +589,23 @@ export function PresetPanel({ toast }: { toast: (level: "info" | "warning" | "er
 												<span className="lore-meta">
 													{`启用块原文按 prompt_order 原序装配进提示词：${blocks.length} 块 · 启用 ${onChars.toLocaleString()} 字`}
 												</span>
-												{blocks.length > 0 && (
-													<button className="act" disabled={busy} onClick={() => toggleChannel(blocks, !allOn)}>
-														{allOn ? "全关" : "全开"}
-													</button>
-												)}
+													{blocks.length > 0 && (
+														<button className="act" disabled={busy} onClick={() => toggleChannel(blocks, !allOn)}>
+															{allOn ? "全关" : "全开"}
+														</button>
+													)}
+													<button className="act" disabled={busy} onClick={addBlock}>新增条目</button>
 											</div>
 											{blocks.length === 0 && <div className="sp-empty">该预设没有内容块。</div>}
 											{blocks.map((b) => (
 												<PresetBlockEditor
 													key={b.id}
-													block={b}
-													busy={busy}
-													onChange={(patch) => patchBlock(b.id, patch)}
-													onDelete={() => removeBlock(b.id)}
-												/>
+															block={b}
+															busy={busy}
+															onChange={(patch) => patchBlock(b.id, patch)}
+															onDelete={() => removeBlock(b.id)}
+															onMove={(direction) => moveBlock(b.id, direction)}
+														/>
 											))}
 										</section>
 									);

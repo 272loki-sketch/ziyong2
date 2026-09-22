@@ -34,10 +34,10 @@ test("audit 3: cancellation is terminal and workers cannot publish after cancell
 });
 
 test("audit 4: build and preview have deadlines, disconnect abort, and slots follow underlying settlement", () => {
-	assert.equal(NOVEL_PLAY_LIMITS.buildDeadlineMs, 30 * 60_000);
+	assert.equal(NOVEL_PLAY_LIMITS.buildDeadlineMs, 4 * 60 * 60_000);
 	assert.equal(NOVEL_PLAY_LIMITS.modelCallDeadlineMs, 120_000);
 	assert.equal(NOVEL_PLAY_LIMITS.startSwitchDeadlineMs, 30_000);
-	assert.equal(NOVEL_PLAY_LIMITS.previewDeadlineMs, 45_000);
+	assert.equal(NOVEL_PLAY_LIMITS.previewDeadlineMs, 5 * 60_000);
 	assert.match(api, /req\.once\("aborted", abort\)/);
 	assert.match(api, /responseEvents\.once\?\.\("close", close\)/);
 	assert.match(api, /void operation\.catch\(\(\) => \{\}\)\.finally\(\(\) => \{ instance\.buildOperations--/);
@@ -62,9 +62,13 @@ test("audit 6: preview concurrency and per-session rate limits are explicit", ()
 	assert.match(api, /statusCode: 429/);
 });
 
-test("audit 7: public start options use ordinal labels and never copy canon titles", () => {
-	assert.match(application, /title: `阶段 \$\{stages\.get\(node\.stageId\) \?\? 0\} · 节点 \$\{node\.order \+ 1\}`/);
-	assert.doesNotMatch(application, /title: node\.title/);
+test("audit 7: public start options expose safe public context without internal canon fields", () => {
+	assert.match(application, /title: node\.title/);
+	assert.match(application, /summary: node\.summary/);
+	assert.match(application, /stageTitle:/);
+	assert.doesNotMatch(application, /visibility: node\.visibility/);
+	assert.doesNotMatch(application, /sourceRefs: node\.sourceRefs/);
+	assert.doesNotMatch(application, /dependsOn: node\.dependsOn/);
 });
 
 test("audit 8: active-card inspection resolves real paths, contains them under cards, and uses raw card parsing", () => {

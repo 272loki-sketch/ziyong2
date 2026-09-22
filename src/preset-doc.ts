@@ -35,7 +35,7 @@ export interface PresetDoc {
 	entries: AssemblyEntry[];
 }
 
-/** 给 UI / 助手工具看的块视图。`channel` 是**派生只读值**，不是可选属性 */
+/** 给 UI / 助手工具看的块视图。`channel` 是相对 chatHistory 的位置投影，可通过补丁调整。 */
 export interface PresetBlockView {
 	id: string;
 	name: string;
@@ -43,7 +43,7 @@ export interface PresetBlockView {
 	enabled: boolean;
 	/** 酒馆内置槽位（Chat History / Char Description …）：占位，不可编辑内容 */
 	marker: boolean;
-	/** 派生：相对 chatHistory 槽位的前后（酒馆里这是位置，不是属性） */
+	/** 相对 chatHistory 槽位的前后（ST 原文中通过 prompt_order 表达） */
 	channel: "system" | "postHistory";
 	/** in-chat 深度注入才有 */
 	depth?: number;
@@ -56,6 +56,12 @@ export interface PresetBlockPatch {
 	enabled?: boolean;
 	name?: string;
 	content?: string;
+	role?: PieceRole;
+	channel?: "system" | "postHistory";
+	/** Add a new author block instead of patching an existing one. */
+	add?: boolean;
+	/** Move an existing block in prompt_order, including across chatHistory. */
+	move?: "up" | "down";
 	/** 从预设里整块移除（prompts 与 prompt_order 同时摘掉）——8/12 用户点名保留的能力 */
 	remove?: boolean;
 }
@@ -137,9 +143,50 @@ export function patchPresetRaw(doc: PresetDoc, patch: PresetPatch): Record<strin
 		if (orderIdx >= 0) {
 			const chosen = (next.prompt_order as Record<string, unknown>[])[orderIdx];
 			const order = (chosen?.order ?? []) as Record<string, unknown>[];
+			const markerIndex = order.findIndex((item) => item.identifier === "chatHistory");
+			const additions = (patch.blocks ?? []).filter((p) => p.add && p.id.trim() && typeof p.content === "string");
+			for (const p of additions) {
+				if ((next.prompts as unknown[]).some((item) => (item as Record<string, unknown>)?.identifier === p.id)) continue;
+				const definition = {
+					identifier: p.id,
+					name: p.name?.trim() || p.id,
+					role: p.role ?? "system",
+					content: p.content ?? "",
+					marker: false,
+				};
+				(next.prompts as Record<string, unknown>[]).push(definition);
+				const item = { identifier: p.id, enabled: p.enabled !== false };
+				if (markerIndex < 0 || p.channel === "postHistory") {
+					const insertAt = markerIndex < 0 ? order.length : order.length;
+					order.splice(insertAt, 0, item);
+				} else {
+					order.splice(markerIndex, 0, item);
+				}
+			}
 			for (const o of order) {
 				const p = typeof o.identifier === "string" ? byId.get(o.identifier) : undefined;
 				if (p && typeof p.enabled === "boolean") o.enabled = p.enabled;
+			}
+			for (const p of patch.blocks ?? []) {
+				if (p.add || !p.channel) continue;
+				const index = order.findIndex((item) => item.identifier === p.id);
+				if (index < 0 || markerIndex < 0) continue;
+				const [item] = order.splice(index, 1);
+				const nextMarker = order.findIndex((row) => row.identifier === "chatHistory");
+				const insertAt = p.channel === "postHistory" ? order.length : nextMarker;
+				order.splice(Math.max(0, insertAt), 0, item!);
+			}
+			for (const p of patch.blocks ?? []) {
+				if (p.add || !p.move) continue;
+				const index = order.findIndex((item) => item.identifier === p.id);
+				if (index < 0) continue;
+				const target = p.move === "up" ? index - 1 : index + 1;
+				if (target < 0 || target >= order.length || order[target]?.identifier === "chatHistory") {
+					if (order[target]?.identifier !== "chatHistory") continue;
+					// The author block may cross the history marker; the marker is the
+					// boundary, not a block that the user is moving itself.
+				}
+				[order[index], order[target]] = [order[target]!, order[index]!];
 			}
 			if (removed.size > 0 && chosen) {
 				chosen.order = order.filter((o) => !(typeof o.identifier === "string" && removed.has(o.identifier)));
@@ -168,12 +215,25 @@ export function patchPresetRaw(doc: PresetDoc, patch: PresetPatch): Record<strin
 
 	// 旧梨园格式：原样落回 blocks
 	const blocks = (Array.isArray(next.blocks) ? next.blocks : []) as Record<string, unknown>[];
+	for (const p of patch.blocks ?? []) {
+		if (!p.add || !p.id.trim() || typeof p.content !== "string" || blocks.some((b) => b.id === p.id)) continue;
+		blocks.push({ id: p.id, name: p.name?.trim() || p.id, role: p.role ?? "system", content: p.content, enabled: p.enabled !== false, channel: p.channel ?? "system" });
+	}
 	for (const b of blocks) {
 		const p = typeof b.id === "string" ? byId.get(b.id) : undefined;
 		if (!p) continue;
 		if (typeof p.enabled === "boolean") b.enabled = p.enabled;
 		if (typeof p.name === "string" && p.name.trim()) b.name = p.name.trim();
 		if (typeof p.content === "string") b.content = p.content;
+		if (p.role) b.role = p.role;
+		if (p.channel) b.channel = p.channel;
+	}
+	for (const p of patch.blocks ?? []) {
+		if (p.add || !p.move) continue;
+		const index = blocks.findIndex((block) => block.id === p.id);
+		const target = p.move === "up" ? index - 1 : index + 1;
+		if (index < 0 || target < 0 || target >= blocks.length) continue;
+		[blocks[index], blocks[target]] = [blocks[target]!, blocks[index]!];
 	}
 	next.blocks = removed.size > 0 ? blocks.filter((b) => !(typeof b.id === "string" && removed.has(b.id))) : blocks;
 	if (patch.samplers) {

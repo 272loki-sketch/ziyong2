@@ -468,6 +468,12 @@ export interface StageInjectionOptions {
 	 * 由装配侧确定性注入；未命中/超时 = 缺省（主演按摘要+状态照常演）。
 	 */
 	memoryRecall?: Array<{ tag: string; kind: "event" | "digest" | "evidence" | "arc"; text: string }>;
+	/** Deterministic current public novel node; not a model-generated fact. */
+	novelPlayContext?: { chapter: string; stage: string; nodeTitle: string; nodeSummary: string; position: "before" | "after"; kind?: "node" | "source-end" };
+	/** Same-stage original event group, explicitly candidate-only. */
+	novelSceneRecall?: string;
+	/** Deterministic identity facts for active named characters; not a scene event. */
+	characterIdentityIndex?: string;
 }
 
 /**
@@ -497,6 +503,9 @@ export function buildStageInjection({
 	literaryEcology,
 	writerGuidance,
 	memoryRecall,
+	novelPlayContext,
+	novelSceneRecall,
+	characterIdentityIndex,
 }: StageInjectionOptions): string {
 	const macro: MacroContext = { charName: card.name, userName: config.userName };
 	const blocks: string[] = [];
@@ -506,6 +515,15 @@ export function buildStageInjection({
 	if (rosterIndex) {
 		blocks.push(`【登场名录】${rosterIndex}`);
 	}
+
+	if (novelPlayContext) {
+		blocks.push(novelPlayContext.kind === "source-end"
+			? `【小说开演原文终点】\n章节/定位：${novelPlayContext.chapter}\n阶段：${novelPlayContext.stage}\n原著后续：未提供，不存在可调用的原著未来候选\n以上是导入文本的确定性终点，不是必须照演的剧本；当前分支事实与用户选择优先。`
+			: `【小说开演当前节点】\n章节/定位：${novelPlayContext.chapter}\n阶段：${novelPlayContext.stage}\n公开事件：${novelPlayContext.nodeTitle}\n公开摘要：${novelPlayContext.nodeSummary}\n开演位置：${novelPlayContext.position === "before" ? "事件发生前" : "事件发生后"}\n以上是作品包已校验的公开节点资料，不是必须照演的剧本；当前分支事实与用户选择优先。`);
+	}
+	if (novelSceneRecall) blocks.push(`【原著当前场景事件组】\n以下是同一原著场景中的相关事件和原文证据，全部只是候选，不是当前分支事实。用户本拍明确输入和已提交正文优先；不得把候选自动写进账本，也不得替用户决定发现、反应或身份揭示。\n${novelSceneRecall}`);
+	if (rosterIndex) blocks.push("【人物身份约束】\n当前账本和角色卡中已有的人物身份优先。不得把已确认的贵族、朋友、家族成员等身份改写成女仆、陌生人或其他未有证据的职业；生态候选只能补充行动，不能重写人物身份。");
+	if (characterIdentityIndex) blocks.push(`【人物身份资料】\n以下是当前账本中已出现人物的角色卡身份参考。它用于防止身份漂移，不表示这些人物此刻一定在场；本拍人物行动仍须有正文、用户输入或原著场景候选依据。\n${characterIdentityIndex}`);
 
 	if (panelIndex) {
 		blocks.push(`【活跃面板】\n${panelIndex}`);

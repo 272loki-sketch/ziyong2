@@ -58,7 +58,8 @@ test("server contract and UI preserve recovery and public-data boundaries", () =
 	assert.match(server, /send\(res, 202, \{ started: instance\.recovery \}\)/);
 	assert.match(server, /outcome\.result\.session === "created" \? 201 : 202/);
 	assert.match(application, /filter\(node => node\.visibility === "public"\)\.map\(node => \(\{/);
-	assert.doesNotMatch(client.match(/interface NovelPlayStartOptions[^\n]+/)?.[0] ?? "", /summary|visibility|sourceRefs|dependsOn/);
+	assert.match(client.match(/interface NovelPlayStartOptions[^\n]+/)?.[0] ?? "", /summary|stageTitle|source/);
+	assert.doesNotMatch(client.match(/interface NovelPlayStartOptions[^\n]+/)?.[0] ?? "", /visibility|sourceRefs|dependsOn/);
 	assert.match(ui, /response\.started\.session === "created"\) onClose\(\)/);
 	assert.match(ui, /setPreview\(null\)/);
 	assert.match(ui, /开演令牌已经消耗，请勿重复提交/);
@@ -69,7 +70,7 @@ test("server contract and UI preserve recovery and public-data boundaries", () =
 test("novel play UI cleans polls and explains deadlines and session-scoped jobs", () => {
 	assert.match(ui, /window\.clearTimeout\(timer\); abort\.abort\(\)/);
 	assert.match(ui, /const close = \(\) => \{ invalidate\(\); onClose\(\); \}/);
-	assert.match(ui, /模型预览最长约 45 秒/);
+	assert.match(ui, /模型预览最长约 5 分钟/);
 	assert.match(ui, /角色切换最长约 30 秒/);
 	assert.match(ui, /构建记录只属于当前会话/);
 	assert.match(ui, /selectedNodeIndex === 0 && position === "before"/);

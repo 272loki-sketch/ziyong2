@@ -51,11 +51,19 @@ test("小说开演卡：V2 卡名表示作品演出而非玩家，现有 normali
 	assert.notEqual(normalized.personality, input.snapshot.user.identity);
 	assert.match(normalized.description, /用户角色：林岚/);
 	assert.match(normalized.description, /身份：新来的图书管理员/);
-	assert.match(normalized.description, /周姨/);
-	assert.match(normalized.description, /图书馆九点开门/);
+	assert.doesNotMatch(normalized.description, /周姨|图书馆九点开门/);
 	assert.match(normalized.scenario, /九月清晨/);
 	assert.equal(normalized.firstMes, "钥匙在锁孔里轻轻一响。");
 	assert.equal(normalized.systemPrompt, input.skillBody);
+	assert.deepEqual(normalized.book.map((entry) => entry.comment), [
+		"小说开演·开场定位",
+		"小说开演·人物·周姨",
+		"小说开演·公开世界事实",
+	]);
+	assert.ok(normalized.book.every((entry) => entry.constant && entry.enabled));
+	assert.match(normalized.book[0]?.content ?? "", /旧图书馆门厅/);
+	assert.match(normalized.book[1]?.content ?? "", /认识每位常客/);
+	assert.match(normalized.book[2]?.content ?? "", /图书馆九点开门/);
 	assert.deepEqual(raw.data.extensions.liyuanNovelPlay, {
 		docId: "doc-public", revision: "revision-1", startNodeId: "node-start", position: "before",
 		playerName: "林岚", playerMode: "new-character",

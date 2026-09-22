@@ -309,6 +309,14 @@ export type ServerFrame =
 				charName: string;
 				userName: string;
 			};
+			novelGuide?: {
+				mode: "new-character" | "existing-character";
+				startKind: "node" | "source-end";
+				visible: boolean;
+				positionLabel: string;
+				candidates: Array<{ title: string; summary: string }>;
+				note: string;
+			};
 	  }
 	| { type: "message"; message: WireMsg }
 	/** draft=true：该 text 增量是 draft_write 参数的转发（替换语义——重交原地更新，不叠加）；reset=true：本次调用的首个分片 */

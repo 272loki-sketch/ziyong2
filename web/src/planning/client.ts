@@ -32,6 +32,7 @@ export const putOutlineSettings = (settings: Required<OutlineSettings>) =>
 export const getTurnDiagnostics = (limit = 12) => apiGet<TurnDiagnosticsResponse>(`/api/turn-diagnostics?limit=${limit}`, { bypassCache: true });
 export const listCorpus = () => apiGet<CorpusWorkbenchResponse>("/api/outline/corpus", { bypassCache: true });
 export const createCorpus = (file: string) => apiPost<CorpusCreateResponse>("/api/outline/corpus", { file });
+export const createCorpusVersion = (baseDocId: string, file: string) => apiPost<CorpusCreateResponse & { reusedChunks: number; newChunks: number }>("/api/outline/corpus/version", { baseDocId, file });
 export const createCorpusUrl = (url: string) => apiPost<CorpusCreateResponse>("/api/outline/corpus/url", { url });
 export const discoverCorpus = () => apiPost<CorpusDiscoveryResponse>("/api/outline/corpus/discover", {});
 export const getCorpusDetail = (id: string) => apiGet<CorpusDetailResponse>(`/api/outline/corpus/${encodeURIComponent(id)}`, { bypassCache: true });

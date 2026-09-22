@@ -56,7 +56,7 @@ import {
 	type CompactOutcome,
 	type RpSummaryData,
 } from "./compact.ts";
-import { runScribeTurn, STATE_ENTRY_TYPE } from "./scribe-run.ts";
+import { repairKnownCharacterIdentityState, runScribeTurn, STATE_ENTRY_TYPE } from "./scribe-run.ts";
 import {
 	LITERARY_PROFILE_ENTRY_TYPE,
 	buildCharacterProfilePrompt,
@@ -85,6 +85,7 @@ import {
 	formatPlotAdaptation,
 	parsePlotAdaptation,
 	plotAdaptationFromNovelProjection,
+	mergePlotAdaptations,
 	type PlotAdaptation,
 } from "./plot-adaptation.ts";
 import {
@@ -153,6 +154,7 @@ import { projectOutline } from "../outline/projection.ts";
 import { workflowSkill } from "./skill-store.ts";
 import { worldModuleSkillPacks } from "./skill-store.ts";
 import { commitNovelPlayState, prepareNovelPlayTurn, type NovelPlayProjection, type PreparedNovelPlayTurn } from "../novel-play/runtime.ts"; // novel-play-runtime-integration-v2
+import { novelPlayContextForBranch } from "../novel-play/runtime.ts";
 import {
 	WORLD_MANIFEST_ENTRY_TYPE,
 	buildWorldProfilePrompt,
@@ -514,7 +516,10 @@ export function progressLine(ws: TurnWorkspace, packNames?: string[], forcedSkil
 
 /** 轻量历史回照预判：普通拍不发云端 embedding，明确过去/旧账信号才进入召回。 */
 export function shouldRecallHistory(userText: string): boolean {
-	return /还记得|记得吗|第一次|初次|初遇|当年|以前|过去|那天|那次|之前|曾经|旧事|回想|回忆|再次提到|又提到|那把|那封|那个约定|你说过|我说过|从头(讲|说|聊|回忆|梳理)|一路走来|这一路|这些年|往事|来龙去脉|经历了(什么|哪些)|整个过程|怎么(走到|变成|发展到)/u.test(userText);
+	if (/还记得|记得吗|第一次|初次|初遇|当年|那天|那次|曾经|旧事|回想|回忆|再次提到|又提到|那把|那封|那个约定|你说过|我说过|从头(讲|说|聊|回忆|梳理)|一路走来|这一路|这些年|往事|来龙去脉|经历了(什么|哪些)|整个过程|怎么(走到|变成|发展到)/u.test(userText)) return true;
+	// Bare temporal modifiers such as "以前的几个朋友" describe a noun;
+	// they are not a request to retrieve old story facts.
+	return /(?:以前|过去|之前)(?:.{0,12})(?:发生|提到|见过|认识|说过|答应|约定|经历|相处|故事|事情)/u.test(userText);
 }
 
 export function classifyRecallIntent(userText: string): "point" | "sweep" {
@@ -537,6 +542,24 @@ export function looksLikeTextualToolProtocol(text: string): boolean {
 	if (!source) return false;
 	if (/<[｜|]{0,2}DSML[｜|]{0,2}(?:tool_calls|invoke)|<\/?(?:tool_call|function_call|invoke)\b/i.test(source)) return true;
 	return /^(?:```(?:json)?\s*)?(?:beat_plan|beat_step_done|draft_append|draft_write|draft_edit|draft_seal|world_state_update|lorebook_search|memory_search)\s*\(/i.test(source);
+}
+
+export function extractPureTextNarrative(text: string): string {
+	// Some card presets wrap the complete answer in a narrative container. The
+	// generic panel stripper treats every top-level tag as non-prose, so unwrap
+	// these known body containers before removing nested status/option blocks.
+	let unwrapped = text;
+	const open = /<(content|main_output)\b[^>]*>/i.exec(unwrapped);
+	if (open?.index !== undefined) {
+		const bodyStart = open.index + open[0].length;
+		const close = new RegExp(`</${open[1]}\\s*>`, "i").exec(unwrapped.slice(bodyStart));
+		const bodyEnd = close?.index === undefined ? unwrapped.length : bodyStart + close.index;
+		unwrapped = unwrapped.slice(bodyStart, bodyEnd);
+	}
+	// Remove complete format blocks while preserving narrative before and after
+	// them. If a provider stops inside a final format block, the tag scanner's
+	// hanging-block rule drops that unfinished tail without dropping earlier prose.
+	return extractDraftBody(unwrapped);
 }
 
 const WRITER_STREAM_TIMEOUT_MS = 900_000;
@@ -609,7 +632,9 @@ export function sideTextTimeoutMs(step: SideModelStep): number {
 	if (step === "writer") return 900_000;
 	if (step === "compaction") return 120_000;
 	if (step === "memoryEvents") return 60_000;
-	return 90_000;
+	// The configured side models can spend well over a minute on structured
+	// Chinese planning. Keep a finite per-step cap without killing valid work.
+	return 180_000;
 }
 
 export function sideTextRetryLimit(step: SideModelStep): number {
@@ -1269,11 +1294,17 @@ export class StageEngine {
 			ev.onNotify?.("error", "尚未配置剧情模型——请先在「连接」面板选择模型。");
 			return { aborted: false, error: "no-model" };
 		}
+		const rawCardData = materials.rawCard.data && typeof materials.rawCard.data === "object" ? materials.rawCard.data as Record<string, unknown> : materials.rawCard;
+		const rawExtensions = rawCardData.extensions && typeof rawCardData.extensions === "object" ? rawCardData.extensions as Record<string, unknown> : {};
+		const isNovelPlayCard = !!(rawExtensions as { liyuanNovelPlay?: unknown }).liyuanNovelPlay;
+		// Novel Play cards are created from a snapshot and must follow the current
+		// session writer, not freeze the model routing that existed at card creation.
+		const writerStepModels = isNovelPlayCard ? { ...(config.stepModels ?? {}), writer: undefined } : config.stepModels;
 		// 主演插头（writer）：正文生成可单独指定高级模型；未配置则继承剧情总插头。
 		// 旁路步骤（场记/压缩/导演等）走各自插头，不受这里影响。
 		const resolved = resolveStepModel(
 			"writer",
-			config.stepModels,
+			writerStepModels,
 			baseModel,
 			(provider, id) => this.#deps.findModel?.(provider, id),
 			(id) => this.#deps.findModelById?.(id),
@@ -1307,7 +1338,13 @@ export class StageEngine {
 			this.#startWorldProfilePrep(materials, branch);
 			this.#startLiteraryProfilePrep(materials, branch);
 		}
-		const state = stateFromBranch(branch);
+		const rawState = stateFromBranch(branch);
+		const identityHints = Object.fromEntries(Object.keys(rawState.characters).flatMap(name => materials.entries
+			.filter(entry => !entry.constant && entry.keys.some(key => key === name || name.includes(key) || key.includes(name)))
+			.slice(0, 2).map(entry => [name, entry.content.slice(0, 1200)])));
+		const identityRepair = repairKnownCharacterIdentityState(rawState, identityHints);
+		const state = identityRepair.state;
+		const novelPlayContext = novelPlayContextForBranch(cwd, materials.rawCard, branch);
 		const { history, lastUserText, lastNarrativeText, summary } = rebuildHistory(branch, materials.promptRules);
 		const literaryProfile = literaryProfileFromBranch(branch);
 		let literaryEcology = literaryEcologyFromBranch(branch);
@@ -1321,7 +1358,10 @@ export class StageEngine {
 		let novelProjection: NovelPlayProjection | undefined;
 		let preparedNovelPlay: PreparedNovelPlayTurn | undefined;
 		let planFact: PlanFactComparison | undefined;
-		const directorRequested = !rerollPrep && config.literaryQuality === "guided" && !isBackstageText(lastUserText);
+		// A reroll is a writer retry. If the previous turn has prep artifacts they
+		// are carried in rerollPrep; otherwise do not rebuild slow optional prep.
+		const rerollWithoutPrep = userText === null && !rerollPrep;
+		const directorRequested = !rerollPrep && !rerollWithoutPrep && config.literaryQuality === "guided" && !isBackstageText(lastUserText);
 		if (!history.some((m) => m.role === "user")) {
 			ev.onNotify?.("error", "没有可开演的用户输入。");
 			return { aborted: false, error: "no-user-input" };
@@ -1335,6 +1375,7 @@ export class StageEngine {
 			.map((m) => m.text)
 			.join("\n");
 		const activated = scanEntries(materials.entries, windowText, config.maxLoreInjections);
+		const identityReference = Object.entries(identityHints).map(([name, content]) => `${name}：${content}`).join("\n\n").slice(0, 6000);
 
 		// 面板快照（M1 读磁盘缓存；写侧与分支化随 M3）
 		let panelIndex: string | undefined;
@@ -1405,13 +1446,33 @@ export class StageEngine {
 		const prepController = new AbortController();
 		// 停止按钮必须同时取消拍前旁路；否则导演/排演/生态请求仍会继续跑完。
 		this.#abort.signal.addEventListener("abort", () => prepController.abort(), { once: true });
-		const prepBudgetMs = 120_000;
+		const prepBudgetMs = 10 * 60_000;
+		// Each optional side step gets a realistic two-minute window. Steps are
+		// independent: a timeout skips only that step, while later prep and the
+		// writer can continue with the materials already available.
+		const prepStepWaitMs = 120_000;
+		const waitPrep = async <T>(work: Promise<T>, fallback: T): Promise<T> => {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			try {
+				return await Promise.race([
+					work,
+					new Promise<T>((resolve) => {
+						timer = setTimeout(() => {
+							ev.onActivity?.(`拍前旁路超时（${Math.round(prepStepWaitMs / 1000)}秒），已跳过并继续正文`);
+							resolve(fallback);
+						}, prepStepWaitMs);
+					}),
+				]);
+			} finally {
+				if (timer) clearTimeout(timer);
+			}
+		};
 		const prepTimer = setTimeout(() => {
 			prepController.abort();
 			ev.onActivity?.(`拍前准备达到总预算（${Math.round(prepBudgetMs / 1000)}秒），正文按已有材料继续`);
 		}, prepBudgetMs);
-		const arrivalRequested = !rerollPrep && config.literaryEcologyEnabled === true && !legacyBackstage && !!ecologyRuntimeSkill;
-		const continuityRequested = !rerollPrep && config.literaryQuality === "guided" && !legacyBackstage && shouldRunContinuity({ state, history, summary, userText: lastUserText });
+		const arrivalRequested = !rerollPrep && !rerollWithoutPrep && config.literaryEcologyEnabled === true && !legacyBackstage && !!ecologyRuntimeSkill;
+		const continuityRequested = !rerollPrep && !rerollWithoutPrep && config.literaryQuality === "guided" && !legacyBackstage && shouldRunContinuity({ state, history, summary, userText: lastUserText });
 		const arrivalPromise: Promise<LiteraryEcologyState | undefined> = arrivalRequested
 			? Promise.resolve().then(async () => {
 				ev.onActivity?.("鲜活世界：匹配当前人物与场所");
@@ -1484,12 +1545,12 @@ export class StageEngine {
 					new Promise<Array<{ arc: string; text: string; events: number }>>((resolve) => setTimeout(() => resolve([]), 5_000)),
 				])
 				: Promise.resolve([]);
-		const [arrivalCandidate, continuityCandidate, memoryHits, memoryArcs] = await Promise.all([
+		const [arrivalCandidate, continuityCandidate, memoryHits, memoryArcs] = await waitPrep(Promise.all([
 			arrivalPromise,
 			continuityPromise,
 			memoryRecallPromise,
 			memoryArcPromise,
-		]);
+		]), [undefined, undefined, undefined, []]);
 		if (sm.getLeafId() === prepLeafId) {
 			if (arrivalCandidate) literaryEcology = arrivalCandidate;
 			if (continuityCandidate) literaryContinuity = continuityCandidate;
@@ -1532,17 +1593,17 @@ export class StageEngine {
 			ev.onActivity?.("鲜活世界：已在后台搜索并准备下一拍素材");
 		}
 		// 小说开演独立于生态开关。它只读取原始卡扩展、不可变作品包和当前权威分支。
-		if (!rerollPrep && !legacyBackstage) {
+		if (!rerollPrep && !rerollWithoutPrep && !legacyBackstage) {
 			const novelSkill = materials.skillFiles.find(skill => skill.dir === "小说分支校准");
 			if (novelSkill) {
-				preparedNovelPlay = await prepareNovelPlayTurn({
+				preparedNovelPlay = await waitPrep(prepareNovelPlayTurn({
 					cwd, rawCard: materials.rawCard, branch, expectedLeafId: prepLeafId, skillBody: novelSkill.body,
 					getLeafId: () => sm.getLeafId(),
 					modelCall: async (systemPrompt, modelInput) => {
 						const result = await this.#sideText("plotAdaptation", systemPrompt, modelInput, 4096, "off", prepController.signal);
 						return typeof result === "string" ? result : undefined;
 					},
-				});
+				}), undefined);
 				novelProjection = preparedNovelPlay?.projection;
 				if (novelProjection) plotAdaptation = plotAdaptationFromNovelProjection(novelProjection);
 				else ev.onActivity?.("小说分支校准：本拍无可用候选，按当前事实继续");
@@ -1551,7 +1612,7 @@ export class StageEngine {
 
 		// 剧情卡—生态适配：卡池是长期卡级语法，运行态给出眼前人物/地点；本步骤把抽象模板
 		// 变形成当前故事可用的因果候选。候选不落事实，正文实际发生后才由场记/大纲校准。
-		const plotAdaptationRequested = !rerollPrep && config.literaryEcologyEnabled === true && !legacyBackstage;
+		const plotAdaptationRequested = !rerollPrep && !rerollWithoutPrep && config.literaryEcologyEnabled === true && !legacyBackstage;
 		if (plotAdaptationRequested) {
 			ev.onActivity?.("生态剧情适配：按当前剧情卡编排事件候选");
 			const sourceLeafId = sm.getLeafId();
@@ -1560,9 +1621,9 @@ export class StageEngine {
 				outline: projectOutline(outlineFromBranch(branch), "director"), state, history, summary,
 				userText: lastUserText, userName: config.userName, novelProjection,
 			});
-			const result = await this.#sideText("plotAdaptation", prompt.systemPrompt, prompt.userText, 8192, undefined, prepController.signal);
+			const result = await waitPrep(this.#sideText("plotAdaptation", prompt.systemPrompt, prompt.userText, 8192, undefined, prepController.signal), { error: "拍前等待窗口已到，正文按现有材料继续" });
 			if (typeof result === "string" && sm.getLeafId() === sourceLeafId) {
-				plotAdaptation = parsePlotAdaptation(result);
+				plotAdaptation = mergePlotAdaptations(plotAdaptation, parsePlotAdaptation(result));
 				if (!plotAdaptation) ev.onActivity?.("生态剧情适配：输出不可解析，本拍不采用候选");
 			} else if (typeof result !== "string") {
 				ev.onActivity?.(`生态剧情适配：生成失败（${result.error}），正文按原流程继续`);
@@ -1584,6 +1645,7 @@ export class StageEngine {
 				userText: lastUserText,
 				charName: card.name,
 				userName: config.userName,
+				characterIdentityIndex: identityReference || undefined,
 				outline: projectOutline(outlineFromBranch(branch), "director"),
 			});
 			const result = await this.#sideText(
@@ -1604,15 +1666,15 @@ export class StageEngine {
 		})();
 		// 场面编排只吸收导演与生态适配候选。角色动机已经由导演统一处理，
 		// 不再按出场人数额外调用模型做逐角色排演。
-		await directorPromise;
+		await waitPrep(directorPromise, undefined);
 		// 排演后的场面编排：把各角色的独立动机变成可见动作链。它不写正文，也不创造事实，
 		// 只把本拍事件的因果、信息差和玩家停点交给主演。
-		const sceneConductorRequested = !rerollPrep && !legacyBackstage && (!!plotAdaptation || !!literaryDirectionData);
+		const sceneConductorRequested = !rerollPrep && !rerollWithoutPrep && !legacyBackstage && (!!plotAdaptation || !!literaryDirectionData);
 		if (sceneConductorRequested) {
 			ev.onActivity?.("场面编排：组织角色行动与信息差");
 			const sourceLeafId = sm.getLeafId();
 			const prompt = buildSceneConductorPrompt({ plot: plotAdaptation, direction: literaryDirectionData, outline: projectOutline(outlineFromBranch(branch), "director") });
-			const result = await this.#sideText("sceneConductor", prompt.systemPrompt, prompt.userText, 4096, undefined, prepController.signal);
+			const result = await waitPrep(this.#sideText("sceneConductor", prompt.systemPrompt, prompt.userText, 4096, undefined, prepController.signal), { error: "拍前等待窗口已到，正文按导演方向继续" });
 			if (typeof result === "string" && sm.getLeafId() === sourceLeafId) {
 				sceneConductor = parseSceneConductor(result);
 				if (!sceneConductor) ev.onActivity?.("场面编排：输出不可解析，主演按导演方向继续");
@@ -1712,6 +1774,9 @@ export class StageEngine {
 			literaryWorld: adaptiveWorldEnabled ? formatModularWorldInjection(modularWorld, worldManifest) : undefined,
 			literaryEcology: config.literaryEcologyEnabled === true ? formatLiteraryEcologyInjection(literaryEcology) : undefined,
 			memoryRecall: memoryRecallBlocks,
+					novelPlayContext,
+				novelSceneRecall: novelProjection?.sceneRecall?.map(item => `- ${item.title}：${item.summary}\n  原文证据：${item.quote}`).join("\n") || undefined,
+				characterIdentityIndex: identityHints || undefined,
 			writerGuidance: [
 				...materials.writerGuidance,
 				...(workflowSkill(materials.skillFiles, "writer")
@@ -1917,18 +1982,38 @@ export class StageEngine {
 		if (!final && !this.#abort?.signal.aborted) {
 			_blog("provider_error", "主演请求未返回最终消息");
 		}
+		// A gateway can emit a substantial text body and then fail to provide a
+		// usable terminal message. Preserve that body as an unfinished reply rather
+		// than letting the empty workspace path discard it.
+		if (!final && text.trim() && !corruptOutput) {
+			final = {
+				role: "assistant",
+				content: [],
+				stopReason: "aborted",
+				errorMessage: errored || "主演请求未返回最终消息",
+			};
+		}
 
 		// 尾巴口径（8/09）：稿落地后的 text 通道产出。稿落地前工具轮的旁白（读题/计划）
 		// 不算——旁白曾被 mergeFinalText 当尾巴拼到正文尾部（实弹：读题文字跑进正文）。
 		// M-A agent 循环（PLAN-RP-AGENT-EXEC §2.3）：思考→工具→看结果→再思考，直到交稿定稿。
 		// 首轮无论 stopReason 都进循环——模型直出正文不调工具时由循环做宽进严出代收（D2）。
-		if (final && final.stopReason !== "aborted" && !corruptOutput && writerTools.length === 0) {
+		if (final && !corruptOutput && writerTools.length === 0) {
 			const direct = (text || textOfAssistant(final)).trim();
 			if (direct) {
-				const received = runWriteTool(ws, wsDeps, "draft_write", { content: direct }, true);
+				// Pure-text providers often obey the card's output format even though the
+				// degraded writer protocol asks for prose only. Keep narrative and curtain
+				// as separate artifacts instead of rejecting an otherwise usable turn.
+				const narrative = extractPureTextNarrative(direct);
+				const received = runWriteTool(ws, wsDeps, "draft_write", { content: narrative }, true);
 				if (received.ok) {
 					for (let attempt = 0; attempt < 3 && !ws.sealed; attempt++) runWriteTool(ws, wsDeps, "draft_seal", {});
-					ev.onActivity?.("纯文本正文已收稿");
+					// Pure-text output was streamed through the normal text channel. Clear
+					// that provisional bubble before the canonical assistant message is
+					// rendered, otherwise the same prose appears twice in the UI.
+					ev.onStreamClear?.();
+					if (narrative !== direct) ev.onDraftResync?.(splitDraftSegments(ws.draft));
+					ev.onActivity?.(final.stopReason === "aborted" || final.stopReason === "error" ? "纯文本异常终态已保留未完成正文" : "纯文本正文已收稿");
 				} else errored = received.text;
 			} else errored = "纯文本主演未返回正文";
 		} else if (final && final.stopReason !== "aborted" && !corruptOutput) {
@@ -2172,6 +2257,7 @@ export class StageEngine {
 
 		// 场记兜底（D5）：模型本拍没调 world_state_update 才旁路补账，M-B 视实弹数据决定退役。
 		if (entryId && !aborted && narrativeText && ws.patches.length === 0) {
+			if (identityRepair.changed) { sm.appendCustomEntry(STATE_ENTRY_TYPE, { ...state, _diagnosticSourceEntryId: entryId, _identityRepair: true }); sm.flush(); }
 			const r = await runScribeTurn(
 				{
 					// 2048：账本+名录随剧情增长，patch 可能很长；1024 实测会截断出半截 JSON（8/03）
@@ -2180,6 +2266,7 @@ export class StageEngine {
 					getLeafId: () => sm.getLeafId(),
 					stateFile: this.#deps.getStateFile?.(sm.getSessionId()),
 					onActivity: (d) => ev.onActivity?.(d),
+					identityHints,
 				},
 				{
 					state,
